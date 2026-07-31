@@ -1,0 +1,621 @@
+import * as THREE from "three";
+
+/** Full cycle: 3 min day + 3 min night */
+export const DAY_LENGTH_SEC = 180;
+export const NIGHT_LENGTH_SEC = 180;
+export const CYCLE_LENGTH_SEC = DAY_LENGTH_SEC + NIGHT_LENGTH_SEC;
+
+/**
+ * Baseline aerosol turbidity (Preetham-style scale).
+ * 1 ≈ very clear alpine, 2–3 typical clear day, 5+ hazy / humid.
+ */
+export const AEROSOL_BASE_TURBIDITY = 2.15;
+
+export type DayNightSample = {
+  /** 0..1 through full cycle (0 = dawn) */
+  phase: number;
+  /** Seconds into cycle */
+  timeOfDay: number;
+  /** Sun elevation -1..1 (sin of orbital angle) */
+  sunElevation: number;
+  /** 1 fully day, 0 fully night */
+  dayFactor: number;
+  /** 1 fully night, 0 fully day */
+  nightFactor: number;
+  sunDir: THREE.Vector3;
+  moonDir: THREE.Vector3;
+  /** Rayleigh + Mie composite sky (pre-weather) */
+  sky: THREE.Color;
+  fog: THREE.Color;
+  sunColor: THREE.Color;
+  moonColor: THREE.Color;
+  sunIntensity: number;
+  moonIntensity: number;
+  ambientIntensity: number;
+  hemiIntensity: number;
+  hemiSky: THREE.Color;
+  hemiGround: THREE.Color;
+  /**
+   * Aerosol optical load used for this sample (turbidity-like).
+   * Weather may raise this further when mixing storms / humidity.
+   */
+  aerosol: number;
+  /** 0..1 milky Mie haze amount in the sky composite */
+  mieHaze: number;
+  weatherDim: number;
+  weatherFlash: number;
+};
+
+export type AtmosphereSample = {
+  sky: THREE.Color;
+  fog: THREE.Color;
+  sunColor: THREE.Color;
+  aerosol: number;
+  mieHaze: number;
+  weatherDim: number;
+  weatherFlash: number;
+};
+
+/**
+ * Molecular (Rayleigh) scattering — strongly wavelength-dependent.
+ * Shorter wavelengths (blue) scatter more → clear zenith blue.
+ */
+function rayleighContribution(
+  airMass: number,
+  elev: number,
+  out: { r: number; g: number; b: number },
+): void {
+  // βR ratios roughly ~ λ^-4 : blue >> green > red
+  const r = 0.18 + Math.exp(-0.2 * airMass) * 0.38;
+  const g = 0.38 + Math.exp(-0.42 * airMass) * 0.4;
+  const b = 0.7 + Math.exp(-0.9 * airMass) * 0.28;
+
+  // Zenith saturation toward pure azure
+  const zen = THREE.MathUtils.smoothstep(0.1, 0.75, elev);
+  out.r = THREE.MathUtils.lerp(r, 0.28, zen * 0.55);
+  out.g = THREE.MathUtils.lerp(g, 0.6, zen * 0.65);
+  out.b = THREE.MathUtils.lerp(b, 0.98, zen * 0.85);
+}
+
+/**
+ * Aerosol (Mie) scattering — weakly wavelength-dependent, forward-peaked.
+ * Looks milky / warm white; dominates near the sun and along long paths
+ * (horizon), and grows with turbidity (dust, humidity, pollution, smoke).
+ *
+ * Simplified Henyey–Greenstein / Preetham turbidity ideas for a flat sky color:
+ * we don't have a view-dependent dome, so we bake a zenith-vs-horizon blend
+ * into a single background color + fog tint.
+ */
+function mieAerosolContribution(
+  airMass: number,
+  elev: number,
+  turbidity: number,
+  out: { r: number; g: number; b: number; haze: number },
+): void {
+  // Turbidity T: optical thickness of aerosols (Preetham uses ~2–10)
+  const T = THREE.MathUtils.clamp(turbidity, 1.2, 9);
+
+  // Mie extinction grows with path length and T
+  // βM ~ T (nearly grey / slightly warm)
+  const path = Math.min(6, airMass * (0.55 + T * 0.18));
+  const optical = 1 - Math.exp(-path * 0.35);
+
+  // Slightly warm aerosol albedo (dust / organic haze), not pure white
+  // Higher T → browner / more desert-dust; low T → soft white haze
+  const dust = THREE.MathUtils.smoothstep(2.2, 6.5, T);
+  const ar = THREE.MathUtils.lerp(0.92, 0.78, dust);
+  const ag = THREE.MathUtils.lerp(0.94, 0.72, dust);
+  const ab = THREE.MathUtils.lerp(0.98, 0.62, dust);
+
+  // Horizon bias: Mie is much more visible on long paths (low elev)
+  const horizon = 1 - THREE.MathUtils.smoothstep(0.05, 0.55, elev);
+  // Forward scatter glow when sun is up (halo washes the sky slightly)
+  const sunGlow =
+    elev > 0
+      ? THREE.MathUtils.smoothstep(0, 0.35, elev) *
+        (0.25 + 0.35 * THREE.MathUtils.clamp(1.2 - elev, 0, 1))
+      : 0;
+
+  const haze = THREE.MathUtils.clamp(
+    optical * (0.35 + horizon * 0.55 + sunGlow * 0.35) * ((T - 1) / 5),
+    0,
+    0.85,
+  );
+
+  out.r = ar;
+  out.g = ag;
+  out.b = ab;
+  out.haze = haze;
+}
+
+/**
+ * Composite clear-atmosphere sky: Rayleigh molecules + Mie aerosols.
+ * @param turbidity  Preetham-like aerosol load (base ~2.2 clear day)
+ */
+export function atmosphereSkyColor(
+  sunElevation: number,
+  turbidity: number,
+  outSky: THREE.Color,
+  outFog: THREE.Color,
+  outSun: THREE.Color,
+): { aerosol: number; mieHaze: number } {
+  const h = THREE.MathUtils.clamp(sunElevation, -0.35, 1);
+  // Relative optical air mass (Rozenberg / Young approx-ish)
+  const airMass = 1 / Math.max(0.07, h + 0.15 * Math.exp(-h * 2.5) + 0.12);
+
+  const T = THREE.MathUtils.clamp(turbidity, 1.2, 9);
+  const ray = { r: 0, g: 0, b: 0 };
+  const mie = { r: 0, g: 0, b: 0, haze: 0 };
+  rayleighContribution(airMass, Math.max(0, h), ray);
+  mieAerosolContribution(airMass, Math.max(0, h), T, mie);
+
+  // Mix: haze pulls sky toward aerosol color without killing zenith blue
+  // Cap clear-day haze so midday stays blue (T~2 → mild horizon only)
+  const haze = mie.haze;
+  let r = THREE.MathUtils.lerp(ray.r, mie.r, haze * 0.75);
+  let g = THREE.MathUtils.lerp(ray.g, mie.g, haze * 0.7);
+  let b = THREE.MathUtils.lerp(ray.b, mie.b, haze * 0.65);
+
+  // Golden hour: Rayleigh path + warm aerosols reinforce each other
+  if (h > -0.08 && h < 0.3) {
+    const s = 1 - Math.abs(h - 0.05) / 0.3;
+    const w = s * s * (0.55 + haze * 0.45);
+    r = Math.min(1.3, r + w * 0.5);
+    g = Math.min(1.05, g + w * 0.16);
+    b = Math.max(0.15, b - w * 0.2);
+  }
+
+  // Night — residual aerosol glow dies with sun
+  if (h < 0.06) {
+    const n = THREE.MathUtils.smoothstep(0.06, -0.28, h);
+    r = THREE.MathUtils.lerp(r, 0.012, n);
+    g = THREE.MathUtils.lerp(g, 0.025, n);
+    b = THREE.MathUtils.lerp(b, 0.07, n);
+  }
+
+  outSky.setRGB(
+    THREE.MathUtils.clamp(r, 0, 1.3),
+    THREE.MathUtils.clamp(g, 0, 1.15),
+    THREE.MathUtils.clamp(b, 0, 1.2),
+  );
+
+  // Fog: more aerosol → milkier, shorter range horizon
+  // Fog color = blend of sky and warm Mie (aerial perspective)
+  outFog.copy(outSky);
+  outFog.r = THREE.MathUtils.lerp(outFog.r, mie.r, 0.25 + haze * 0.35);
+  outFog.g = THREE.MathUtils.lerp(outFog.g, mie.g, 0.22 + haze * 0.3);
+  outFog.b = THREE.MathUtils.lerp(outFog.b, mie.b, 0.18 + haze * 0.25);
+  // Day fill so fog isn't pure sky blue (classic aerial perspective white-blue)
+  if (h > 0.1) {
+    outFog.lerp(new THREE.Color(0xc8dce8), 0.12 + haze * 0.2);
+  }
+  if (h < 0) {
+    outFog.lerp(new THREE.Color(0x0a1020), Math.min(1, -h * 1.5));
+  }
+
+  // Sun disc color through aerosol path (reddens with air mass + T)
+  const sunRedden = Math.min(1, (airMass - 1) * 0.12 + (T - 2) * 0.04);
+  outSun.setRGB(
+    1,
+    THREE.MathUtils.clamp(0.96 - sunRedden * 0.35, 0.45, 1),
+    THREE.MathUtils.clamp(0.88 - sunRedden * 0.55, 0.25, 1),
+  );
+
+  return { aerosol: T, mieHaze: haze };
+}
+
+/** @deprecated use atmosphereSkyColor — kept as thin wrapper for clarity */
+export function rayleighSkyColor(sunElevation: number, out: THREE.Color): void {
+  const fog = new THREE.Color();
+  const sun = new THREE.Color();
+  atmosphereSkyColor(sunElevation, AEROSOL_BASE_TURBIDITY, out, fog, sun);
+}
+
+export class DayNightCycle {
+  private time = CYCLE_LENGTH_SEC * 0.25; // start at noon
+
+  /**
+   * Single key SpotLight used for BOTH day and night (reliable shadows).
+   * One light = one shadow map path that always works (moon used to work,
+   * reused engine sun did not during daytime).
+   */
+  private readonly keyLight: THREE.SpotLight;
+  private readonly sunBillboard: THREE.Mesh;
+  private readonly moonBillboard: THREE.Mesh;
+  private readonly group = new THREE.Group();
+  private readonly tmpSun = new THREE.Vector3();
+  private readonly tmpMoon = new THREE.Vector3();
+  private readonly tmpShadowDir = new THREE.Vector3();
+  private readonly tmpFog = new THREE.Color();
+
+  private readonly tmpSunCol = new THREE.Color();
+  private readonly sample: DayNightSample;
+  /** Slowly varying background aerosol (dust days vs clean) */
+  private baseTurbidity = AEROSOL_BASE_TURBIDITY;
+  private turbidityDrift = 0;
+  private _aimX = 0;
+  private _aimY = 20;
+  private _aimZ = 0;
+
+  constructor(scene: THREE.Scene, existingSun?: THREE.Light) {
+    // Disable engine placeholder sun if provided — we own the real key light
+    if (existingSun) {
+      existingSun.castShadow = false;
+      existingSun.intensity = 0;
+      existingSun.visible = false;
+    }
+
+    // SpotLight shadows are more reliable than Directional in this stack
+    // (directional maps were allocating but never darkening receivers).
+    this.keyLight = new THREE.SpotLight(0xfff0d8, 2.2, 0, Math.PI / 4.5, 0.35, 1);
+    this.keyLight.castShadow = true;
+    this.keyLight.shadow.mapSize.set(2048, 2048);
+    // Low bias = tight contact at block feet (high normalBias caused light rings)
+    this.keyLight.shadow.bias = -0.00004;
+    this.keyLight.shadow.normalBias = 0.008;
+    this.keyLight.shadow.intensity = 0.55;
+    this.keyLight.shadow.radius = 1;
+    this.keyLight.shadow.camera.near = 4;
+    this.keyLight.shadow.camera.far = 140;
+    this.keyLight.shadow.camera.fov = 48;
+    this.keyLight.shadow.focus = 1;
+    scene.add(this.keyLight);
+    scene.add(this.keyLight.target);
+
+
+    this.sample = {
+      phase: 0,
+      timeOfDay: 0,
+      sunElevation: 0.6,
+      dayFactor: 1,
+      nightFactor: 0,
+      sunDir: new THREE.Vector3(0.55, 0.72, 0.4).normalize(),
+      moonDir: new THREE.Vector3(-0.55, -0.72, -0.4).normalize(),
+      sky: new THREE.Color(0x5ba3d9),
+      fog: new THREE.Color(0x8ec4e8),
+      sunColor: new THREE.Color(0xfff0d8),
+      moonColor: new THREE.Color(0xb0c4ff),
+      sunIntensity: 1.5,
+      moonIntensity: 0,
+      ambientIntensity: 0.2,
+      hemiIntensity: 0.15,
+      hemiSky: new THREE.Color(0xb8d8ff),
+      hemiGround: new THREE.Color(0x4a6a3a),
+      aerosol: AEROSOL_BASE_TURBIDITY,
+      mieHaze: 0.1,
+      weatherDim: 1,
+      weatherFlash: 0,
+    };
+
+    this._aimX = 0;
+    this._aimY = 24;
+    this._aimZ = 0;
+    this.finalizeKeyLight();
+
+    // Flat billboarded squares
+    const sunTex = this.makeDiscTexture("#fff6c8", "#ffcc66", true);
+    const moonTex = this.makeDiscTexture("#e8eef8", "#9aa8c0", false);
+    const plane = new THREE.PlaneGeometry(1, 1);
+
+    this.sunBillboard = new THREE.Mesh(
+      plane,
+      new THREE.MeshBasicMaterial({
+        map: sunTex,
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        fog: false,
+        toneMapped: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    this.sunBillboard.scale.setScalar(14);
+    this.sunBillboard.renderOrder = -3;
+    this.sunBillboard.frustumCulled = false;
+
+    this.moonBillboard = new THREE.Mesh(
+      plane.clone(),
+      new THREE.MeshBasicMaterial({
+        map: moonTex,
+        transparent: true,
+        depthWrite: false,
+        depthTest: true,
+        fog: false,
+        toneMapped: false,
+        side: THREE.DoubleSide,
+      }),
+    );
+    this.moonBillboard.scale.setScalar(10);
+    this.moonBillboard.renderOrder = -3;
+    this.moonBillboard.frustumCulled = false;
+
+    this.group.add(this.sunBillboard);
+    this.group.add(this.moonBillboard);
+    scene.add(this.group);
+  }
+
+
+  /** Key directional light (day sun / night moon) — weather binds to this */
+  get light(): THREE.SpotLight {
+    return this.keyLight;
+  }
+
+  get state(): DayNightSample {
+    return this.sample;
+  }
+
+  private makeDiscTexture(
+    core: string,
+    rim: string,
+    glow: boolean,
+  ): THREE.CanvasTexture {
+    const s = 128;
+    const c = document.createElement("canvas");
+    c.width = s;
+    c.height = s;
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, s, s);
+    if (glow) {
+      const g0 = ctx.createRadialGradient(
+        s / 2,
+        s / 2,
+        8,
+        s / 2,
+        s / 2,
+        s * 0.48,
+      );
+      g0.addColorStop(0, "rgba(255,240,180,0.55)");
+      g0.addColorStop(0.45, "rgba(255,200,80,0.2)");
+      g0.addColorStop(1, "rgba(255,180,40,0)");
+      ctx.fillStyle = g0;
+      ctx.fillRect(0, 0, s, s);
+    }
+    const pad = 18;
+    ctx.fillStyle = rim;
+    ctx.fillRect(pad, pad, s - pad * 2, s - pad * 2);
+    const g = ctx.createRadialGradient(s / 2, s / 2, 4, s / 2, s / 2, s * 0.38);
+    g.addColorStop(0, core);
+    g.addColorStop(0.7, rim);
+    g.addColorStop(1, glow ? "rgba(255,200,100,0.15)" : "rgba(160,170,200,0.2)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(s / 2, s / 2, s * 0.36, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = glow ? "rgba(255,220,120,0.9)" : "rgba(200,210,230,0.85)";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(pad + 2, pad + 2, s - pad * 2 - 4, s - pad * 2 - 4);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    return tex;
+  }
+
+  update(
+    dt: number,
+    px: number,
+    py: number,
+    pz: number,
+    camera: THREE.Camera,
+  ): DayNightSample {
+    this.time = (this.time + dt) % CYCLE_LENGTH_SEC;
+    const phase = this.time / CYCLE_LENGTH_SEC;
+
+    // Slow natural turbidity drift (clean ↔ slightly hazy days)
+    this.turbidityDrift += dt * 0.015;
+    this.baseTurbidity =
+      AEROSOL_BASE_TURBIDITY +
+      Math.sin(this.turbidityDrift) * 0.35 +
+      Math.sin(this.turbidityDrift * 0.37) * 0.2;
+
+    // Phase: 0 dawn → 0.25 noon → 0.5 dusk → 0.75 midnight
+    // Visual path: mid-latitude summer feel — nearly overhead at noon (not polar)
+    const theta = phase * Math.PI * 2;
+    // Peak elevation ~82° from horizon (sin ≈ 0.99) — high sun, not arctic low
+    const elevAngle = Math.sin(theta) * (Math.PI / 2.2);
+    const cosE = Math.cos(elevAngle);
+    const sinE = Math.sin(elevAngle);
+    const azim = theta;
+    // Mild south bias only — keep the arc readable without pinning the sun low
+    const sunDir = this.tmpSun
+      .set(
+        cosE * Math.sin(azim),
+        sinE,
+        cosE * Math.cos(azim) * 0.35,
+      )
+      .normalize();
+    const moonDir = this.tmpMoon.copy(sunDir).multiplyScalar(-1);
+
+
+    const sunElevation = sunDir.y;
+    const dayFactor = THREE.MathUtils.smoothstep(-0.08, 0.2, sunElevation);
+    const nightFactor = 1 - dayFactor;
+
+    const s = this.sample;
+    s.phase = phase;
+    s.timeOfDay = this.time;
+    s.sunElevation = sunElevation;
+    s.dayFactor = dayFactor;
+    s.nightFactor = nightFactor;
+    s.sunDir.copy(sunDir);
+    s.moonDir.copy(moonDir);
+
+    // Clear-atmosphere composite (Rayleigh + Mie aerosols)
+    const atm = atmosphereSkyColor(
+      sunElevation,
+      this.baseTurbidity,
+      s.sky,
+      this.tmpFog,
+      this.tmpSunCol,
+    );
+    s.fog.copy(this.tmpFog);
+    s.aerosol = atm.aerosol;
+    s.mieHaze = atm.mieHaze;
+
+    // Sun color: atmosphere reddening + slight artistic horizon boost
+    s.sunColor.copy(this.tmpSunCol);
+    const horizon =
+      1 - THREE.MathUtils.smoothstep(0.0, 0.35, Math.abs(sunElevation));
+    s.sunColor.g = Math.min(s.sunColor.g, 0.95 - horizon * 0.12);
+    s.sunColor.b = Math.min(s.sunColor.b, 0.88 - horizon * 0.28);
+    s.moonColor.setRGB(0.72, 0.8, 1.0);
+
+    // Aerosols slightly soften direct sun (haze extinction)
+    const hazeExt = 1 - atm.mieHaze * 0.22;
+    const elev = THREE.MathUtils.clamp(sunElevation, 0, 1);
+    // Key light strong; fill kept low so daytime shadows stay readable
+    s.sunIntensity = dayFactor * (1.55 + 0.7 * elev) * hazeExt;
+    s.moonIntensity =
+      nightFactor * (0.55 + 0.4 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
+    s.ambientIntensity =
+      0.16 + dayFactor * 0.1 + nightFactor * 0.08 + atm.mieHaze * 0.04;
+    s.hemiIntensity =
+      0.1 + dayFactor * 0.1 + nightFactor * 0.06 + atm.mieHaze * 0.03;
+
+
+    s.hemiSky.copy(s.sky).multiplyScalar(0.9);
+    s.hemiGround.set(
+      THREE.MathUtils.lerp(0.12, 0.28, dayFactor),
+      THREE.MathUtils.lerp(0.16, 0.38, dayFactor),
+      THREE.MathUtils.lerp(0.1, 0.18, dayFactor),
+    );
+
+    this._aimX = px;
+    this._aimY = py + 4;
+    this._aimZ = pz;
+    this.finalizeKeyLight();
+
+    const skyDist = 180;
+
+    this.sunBillboard.position.set(
+      px + sunDir.x * skyDist,
+      py + Math.max(0.05, sunDir.y) * skyDist,
+      pz + sunDir.z * skyDist,
+    );
+    this.moonBillboard.position.set(
+      px + moonDir.x * skyDist,
+      py + Math.max(0.05, moonDir.y) * skyDist,
+      pz + moonDir.z * skyDist,
+    );
+    this.sunBillboard.quaternion.copy(camera.quaternion);
+    this.moonBillboard.quaternion.copy(camera.quaternion);
+
+    // Billboard dimmed through haze (optical depth)
+    const sunVis = sunElevation > -0.06 ? 1 : 0;
+    const moonVis = -sunElevation > -0.06 ? 1 : 0;
+    (this.sunBillboard.material as THREE.MeshBasicMaterial).opacity =
+      sunVis * (0.55 + dayFactor * 0.45) * (1 - atm.mieHaze * 0.25);
+    (this.moonBillboard.material as THREE.MeshBasicMaterial).opacity =
+      moonVis * (0.4 + nightFactor * 0.55);
+    this.sunBillboard.visible = sunVis > 0 && sunDir.y > -0.05;
+    this.moonBillboard.visible = moonVis > 0 && moonDir.y > -0.05;
+
+    // Slight billboard scale boost as “corona” grows with aerosols near horizon
+    const corona = 1 + atm.mieHaze * 0.35 * horizon;
+    this.sunBillboard.scale.setScalar(14 * corona);
+
+    return s;
+  }
+
+  /**
+   * Apply key directional light + shadow map.
+   * Call after weather so nothing stomps castShadow/intensity.
+   * Fixed Minecraft-style angle (never vertical) for stable shadow camera.
+   */
+  finalizeKeyLight(): void {
+    const s = this.sample;
+    const px = this._aimX;
+    const py = this._aimY;
+    const pz = this._aimZ;
+    const dist = 55;
+
+    const isDay = s.sunElevation >= 0;
+    if (isDay) {
+      // Key light follows sun azimuth but keeps a moderate elevation so
+      // shadows stay long/readable even when the billboard sun is overhead
+      const az = Math.atan2(s.sunDir.x, s.sunDir.z);
+      // Blend toward true sun elev, but never steeper than ~65° from horizon
+      const trueElev = Math.asin(THREE.MathUtils.clamp(s.sunDir.y, -1, 1));
+      const elev = Math.min(trueElev, 1.05); // cap ~60°
+      const e = Math.max(0.35, elev);
+      this.tmpShadowDir
+        .set(
+          Math.sin(az) * Math.cos(e * 0.75),
+          Math.sin(e * 0.75) + 0.15,
+          Math.cos(az) * Math.cos(e * 0.75),
+        )
+        .normalize();
+    } else {
+      const az = Math.atan2(s.moonDir.x, s.moonDir.z);
+      const elev = 0.55;
+      this.tmpShadowDir
+        .set(
+          Math.sin(az) * Math.cos(elev),
+          Math.sin(elev) + 0.2,
+          Math.cos(az) * Math.cos(elev),
+        )
+        .normalize();
+    }
+
+
+    const weatherDim = s.weatherDim > 0 ? s.weatherDim : 1;
+    const flash = s.weatherFlash ?? 0;
+    const baseI = isDay
+      ? Math.max(1.2, s.sunIntensity * 1.3)
+      : Math.max(0.55, s.moonIntensity * 1.4);
+    const intensity = baseI * weatherDim + flash * 0.4;
+    const color = isDay ? s.sunColor : s.moonColor;
+
+    const ox = this.tmpShadowDir.x * dist;
+    const oy = Math.max(28, Math.abs(this.tmpShadowDir.y) * dist);
+    const oz = this.tmpShadowDir.z * dist;
+
+    this.keyLight.position.set(px + ox, py + oy, pz + oz);
+    this.keyLight.target.position.set(px, py, pz);
+    this.keyLight.target.updateMatrixWorld();
+    this.keyLight.color.copy(color);
+    this.keyLight.intensity = intensity;
+    this.keyLight.distance = 0; // infinite-ish falloff disabled
+    this.keyLight.decay = 0;
+    this.keyLight.angle = Math.PI / 4.2;
+    this.keyLight.penumbra = 0.4;
+    this.keyLight.visible = true;
+    this.keyLight.castShadow = true;
+    this.keyLight.shadow.intensity = isDay ? 0.55 : 0.9;
+    // Keep contact tight at block bases — large normalBias left bright rings
+    this.keyLight.shadow.bias = -0.00004;
+    this.keyLight.shadow.normalBias = 0.008;
+    this.keyLight.shadow.radius = 1;
+    // Tighter depth range = cleaner edges between voxel faces
+    this.keyLight.shadow.camera.near = 6;
+    this.keyLight.shadow.camera.far = 120;
+    this.keyLight.shadow.camera.fov = 48;
+    this.keyLight.shadow.camera.updateProjectionMatrix();
+    this.keyLight.updateMatrixWorld(true);
+    this.keyLight.shadow.camera.updateMatrixWorld();
+    this.keyLight.shadow.needsUpdate = true;
+
+  }
+
+
+
+
+
+
+
+  dispose(scene: THREE.Scene): void {
+    scene.remove(this.group);
+    scene.remove(this.keyLight);
+    scene.remove(this.keyLight.target);
+    const sunMat = this.sunBillboard.material as THREE.MeshBasicMaterial;
+    const moonMat = this.moonBillboard.material as THREE.MeshBasicMaterial;
+    this.sunBillboard.geometry.dispose();
+    sunMat.map?.dispose();
+    sunMat.dispose();
+    this.moonBillboard.geometry.dispose();
+    moonMat.map?.dispose();
+    moonMat.dispose();
+    this.keyLight.dispose();
+  }
+}
