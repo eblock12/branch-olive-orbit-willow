@@ -188,8 +188,10 @@ export class WeatherSystem {
   private readonly cloudDeckGap = 3.4;
   private readonly cloudLayerStep = 1.15;
   private readonly cloudCell = 4;
-  private readonly cloudHalf = 26;
-  private readonly maxCloudVoxels = 4200;
+  /** Half-extent in cloud cells — 10+ chunks (chunk=16 → need ≥40 cells at cell size 4) */
+  private readonly cloudHalf = 42;
+  private readonly maxCloudVoxels = 10000;
+
   private cloudColor = new THREE.Color();
   private cloudOcc = new Set<string>();
   private cloudVoxels: {
@@ -235,6 +237,14 @@ export class WeatherSystem {
     windX: 0.25, windZ: 0.12, windSpeed: 0.28, gloom: 0, stormProximity: 0,
   };
   private windHook: { update: (t: number, x: number, z: number) => void };
+  /** Fired when lightning hits (distance in blocks from player) */
+  onLightning: ((info: {
+    dist: number;
+    strength: number;
+    x: number;
+    y: number;
+    z: number;
+  }) => void) | null = null;
   private lastDayNight: DayNightSample | null = null;
 
   constructor(
@@ -583,20 +593,26 @@ export class WeatherSystem {
   private triggerLocalFlash(strikeX: number, strikeY: number, strikeZ: number, strength: number): void {
     if (strength < 0.08) return;
     const s = Math.max(0, Math.min(1, strength));
+    // Punchier multi-pulse: bright spike → dark → secondary flash
     this.flashPulses.push(
-      { t: 0.04, duration: 0.04, peak: 0.7 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
-      { t: 0.1, duration: 0.07, peak: 0.08 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
-      { t: 0.055, duration: 0.055, peak: 0.45 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
+      { t: 0.035, duration: 0.035, peak: 1.05 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
+      { t: 0.07, duration: 0.05, peak: 0.12 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
+      { t: 0.05, duration: 0.05, peak: 0.7 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
+      { t: 0.09, duration: 0.08, peak: 0.25 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
     );
-    const pl = new THREE.PointLight(0xd0e0ff, 0, 42, 2);
+    const pl = new THREE.PointLight(0xe8f0ff, 0, 52, 1.8);
     pl.position.set(strikeX, strikeY + 6, strikeZ);
     this.scene.add(pl);
     this.flashPoints.push(pl);
+    // Quick intensity pop on the point light
+    pl.intensity = 18 * s;
+    window.setTimeout(() => { pl.intensity = 6 * s; }, 40);
+    window.setTimeout(() => { pl.intensity = 14 * s; }, 90);
     window.setTimeout(() => {
       this.scene.remove(pl); pl.dispose();
       const idx = this.flashPoints.indexOf(pl);
       if (idx >= 0) this.flashPoints.splice(idx, 1);
-    }, 280);
+    }, 320);
   }
 
   private aimFlashLights(sx: number, sy: number, sz: number, _px: number, _py: number, _pz: number): void {
@@ -625,9 +641,9 @@ export class WeatherSystem {
       const e = Math.max(0, envelope) * p.peak;
       const prox = this.flashProximity(Math.hypot(p.sx - px, p.sz - pz));
       if (prox <= 0.001) { if (p.t <= 0) this.flashPulses.splice(i, 1); continue; }
-      mainI = Math.max(mainI, e * 1.35 * prox);
-      fillI = Math.max(fillI, e * 0.45 * prox);
-      ambI = Math.max(ambI, e * 0.22 * prox);
+      mainI = Math.max(mainI, e * 1.75 * prox);
+      fillI = Math.max(fillI, e * 0.65 * prox);
+      ambI = Math.max(ambI, e * 0.32 * prox);
       skyFlash = Math.max(skyFlash, e * 0.4 * prox);
       pointI = Math.max(pointI, e * 18 * prox);
       if (p.t <= 0) this.flashPulses.splice(i, 1);
@@ -703,16 +719,20 @@ export class WeatherSystem {
     if (f > 0) this.tmpFog.lerp(FOG_FLASH, Math.min(0.35, f * 0.4));
     this.fog.color.copy(this.tmpFog);
     const aerosolFog = totalMie * 22 + humidAerosol * 18;
-    this.fog.near = Math.max(8, 36 - peak * 12 - aerosolFog * 0.25 + f * 4);
+    this.fog.near = Math.max(18, 72 - peak * 22 - aerosolFog * 0.28 + f * 7);
+    // Match ~16-chunk view (256 blocks): soft fade just before the horizon
     this.fog.far = Math.max(
-      this.fog.near + 35,
-      130 - peak * 40 - aerosolFog + f * 18,
+      this.fog.near + 60,
+      290 - peak * 70 - aerosolFog * 1.2 + f * 28,
     );
+
+
+
 
     // Key light owned by DayNight — only pass dimming factors
     const weatherDim = Math.max(
-      0.55,
-      1 - localGrey * 0.35 - Math.max(0, approach - 0.5) * 0.15 - totalMie * 0.1,
+      0.68,
+      1 - localGrey * 0.28 - Math.max(0, approach - 0.5) * 0.12 - totalMie * 0.08,
     );
     if (dn) {
       dn.weatherDim = weatherDim;
@@ -720,41 +740,67 @@ export class WeatherSystem {
     }
 
     const ambMul = Math.max(
-      0.55,
-      1 - localGrey * 0.28 - Math.max(0, approach - 0.55) * 0.12,
+      0.65,
+      1 - localGrey * 0.22 - Math.max(0, approach - 0.55) * 0.1,
     );
+    const dayF = dn?.dayFactor ?? 1;
+    const nightF = 1 - dayF;
+    // Brighter fill overall; storms still dim but stay playable
+    const ambFloor = 0.14 + dayF * 0.16;
+    const ambCeil = 0.32 + dayF * 0.42;
     this.ambient.intensity = Math.max(
-      0.12,
+      ambFloor,
       Math.min(
-        0.32,
+        ambCeil,
         (dn?.ambientIntensity ?? this.baseAmbientIntensity) * ambMul +
-          totalMie * 0.03,
+          totalMie * 0.035 * dayF,
       ),
     );
     if (dn) {
+      // Day: soft warm-neutral · Night: readable blue (not near-black)
+      const r =
+        THREE.MathUtils.lerp(0.32, 0.82, dayF) -
+        localGrey * 0.06 +
+        totalMie * 0.04 * dayF;
+      const g =
+        THREE.MathUtils.lerp(0.4, 0.86, dayF) -
+        localGrey * 0.05 +
+        totalMie * 0.03 * dayF;
+      const b =
+        THREE.MathUtils.lerp(0.55, 0.94, dayF) - localGrey * 0.03;
       this.ambient.color.setRGB(
-        0.55 + dn.dayFactor * 0.28 - localGrey * 0.08 + totalMie * 0.05,
-        0.62 + dn.dayFactor * 0.22 - localGrey * 0.06 + totalMie * 0.04,
-        0.78 + dn.dayFactor * 0.12,
+        Math.max(0.14, r),
+        Math.max(0.16, g),
+        Math.max(0.22, b),
       );
+      if (nightF > 0.2) {
+        this.ambient.color.lerp(new THREE.Color(0x2a4068), nightF * 0.4);
+      }
     } else {
-      this.ambient.color.setRGB(0.58, 0.68, 0.82);
+      this.ambient.color.setRGB(0.68, 0.76, 0.88);
     }
 
-    const hemiMul = Math.max(0.5, 1 - localGrey * 0.28);
+    const hemiMul = Math.max(0.6, 1 - localGrey * 0.22);
+    const hemiFloor = 0.1 + dayF * 0.12;
+    const hemiCeil = 0.28 + dayF * 0.4;
     this.hemi.intensity = Math.max(
-      0.08,
+      hemiFloor,
       Math.min(
-        0.28,
-        (dn?.hemiIntensity ?? this.baseHemiIntensity) * hemiMul + totalMie * 0.03,
+        hemiCeil,
+        (dn?.hemiIntensity ?? this.baseHemiIntensity) * hemiMul +
+          totalMie * 0.025 * dayF,
       ),
     );
     if (dn) {
       this.hemi.color.copy(dn.hemiSky);
       this.hemi.groundColor.copy(dn.hemiGround);
       if (localGrey > 0.35) {
-        this.hemi.color.lerp(new THREE.Color(0x6a7a98), localGrey * 0.5);
-        this.hemi.groundColor.lerp(new THREE.Color(0x2a3428), localGrey * 0.4);
+        this.hemi.color.lerp(new THREE.Color(0x7a8aa8), localGrey * 0.4);
+        this.hemi.groundColor.lerp(new THREE.Color(0x3a4438), localGrey * 0.35);
+      }
+      if (nightF > 0.25) {
+        this.hemi.color.lerp(new THREE.Color(0x243850), nightF * 0.3);
+        this.hemi.groundColor.lerp(new THREE.Color(0x121c28), nightF * 0.4);
       }
     } else {
       this.hemi.color.set(localGrey > 0.4 ? 0x6a7a98 : 0xb8d8ff);
@@ -1052,6 +1098,7 @@ export class WeatherSystem {
 
     if (strength > 0.08) {
       this.triggerLocalFlash(sx, ground + 20, sz, strength);
+      this.onLightning?.({ dist, strength, x: sx, y: ground + 20, z: sz });
       if (Math.random() < 0.3 && prox > 0.4 && zone.core > 0.25) {
         const delay = 90 + Math.random() * 140;
         const sx2 = sx, sz2 = sz, g = ground, s2 = strength * 0.38;
@@ -1059,6 +1106,16 @@ export class WeatherSystem {
           this.triggerLocalFlash(sx2 + (Math.random() - 0.5) * 10, g + 24, sz2 + (Math.random() - 0.5) * 10, s2);
         }, delay);
       }
+    }
+    // Distant thunder even when visual flash is weak
+    else if (dist < 140 && zone.core + zone.front > 0.15) {
+      this.onLightning?.({
+        dist,
+        strength: Math.max(0.15, structure * 0.35 * cell.intensity),
+        x: sx,
+        y: ground + 24,
+        z: sz,
+      });
     }
     void py;
   }

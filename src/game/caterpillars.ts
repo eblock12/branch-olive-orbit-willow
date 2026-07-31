@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isSolid } from "./blocks";
+import { Block } from "./blocks";
 import type { World } from "./world";
 import type { Player } from "./player";
 import {
@@ -8,6 +8,12 @@ import {
   disposeEntityShadowShared,
   updateEntityShadow,
 } from "./entityShadow";
+import {
+  applyEntityGravity,
+  moveEntityXZ,
+  unstickEntity,
+  type EntityBox,
+} from "./entityCollision";
 
 export type CaterpillarMood = "wander" | "eat" | "flee" | "tease" | "steal";
 
@@ -133,6 +139,8 @@ export class NaughtyCaterpillar {
   x: number;
   y: number;
   z: number;
+  vy = 0;
+  onGround = true;
   yaw = 0;
   mood: CaterpillarMood = "wander";
   hp = 3;
@@ -145,6 +153,8 @@ export class NaughtyCaterpillar {
   private targetZ = 0;
   private hurtFlash = 0;
   private wiggle = 0;
+  private hopCooldown = 0;
+  private climbHopT = 0;
 
   constructor(x: number, y: number, z: number, mats: CaterpillarMaterials) {
     this.mesh = buildCaterpillarMesh(mats);
@@ -164,9 +174,9 @@ export class NaughtyCaterpillar {
     this.targetZ = this.z + Math.sin(a) * d;
   }
 
-  hit(fromX: number, fromZ: number): "hurt" | "dead" | "miss" {
+  hit(fromX: number, fromZ: number, damage = 1): "hurt" | "dead" | "miss" {
     if (!this.alive) return "miss";
-    this.hp -= 1;
+    this.hp -= damage;
     this.hurtFlash = 0.35;
     this.mood = "flee";
     this.stateT = 1.8 + Math.random();
@@ -221,6 +231,8 @@ export class NaughtyCaterpillar {
     this.eatCooldown = Math.max(0, this.eatCooldown - dt);
     this.hurtFlash = Math.max(0, this.hurtFlash - dt);
     this.nextThink -= dt;
+    this.hopCooldown = Math.max(0, this.hopCooldown - dt);
+    this.climbHopT = Math.max(0, this.climbHopT - dt);
 
     const pdx = player.x - this.x;
     const pdz = player.z - this.z;
@@ -247,7 +259,8 @@ export class NaughtyCaterpillar {
       while (dyaw < -Math.PI) dyaw += Math.PI * 2;
       this.yaw += dyaw * Math.min(1, 6 * dt);
 
-      const step = speed * dt;
+      const airMul = this.onGround ? 1 : this.climbHopT > 0 ? 0.9 : 0.35;
+      const step = speed * dt * airMul;
       const nx = this.x + Math.sin(this.yaw) * step;
       const nz = this.z + Math.cos(this.yaw) * step;
       this.tryMove(world, nx, nz);
@@ -255,7 +268,22 @@ export class NaughtyCaterpillar {
       this.pickWanderTarget();
     }
 
-    this.snapToGround(world);
+    // Fall with gravity instead of snapping to terrain
+    {
+      const box: EntityBox = {
+        x: this.x,
+        y: this.y,
+        z: this.z,
+        halfW: 0.32,
+        height: 0.42,
+      };
+      const g = applyEntityGravity(world, box, this.vy, dt, 28, 40);
+      this.vy = g.vy;
+      this.onGround = g.onGround;
+      this.x = box.x;
+      this.y = box.y;
+      this.z = box.z;
+    }
 
     if (this.mood === "eat" && this.eatCooldown <= 0) {
       this.tryEat(world);
@@ -431,29 +459,37 @@ export class NaughtyCaterpillar {
   }
 
   private tryMove(world: World, nx: number, nz: number): void {
-    const feetY = this.y + 0.05;
-    if (!isSolid(world.getBlock(Math.floor(nx), Math.floor(feetY), Math.floor(this.z)))) {
-      this.x = nx;
-    } else {
-      this.pickWanderTarget();
-    }
-    if (!isSolid(world.getBlock(Math.floor(this.x), Math.floor(feetY), Math.floor(nz)))) {
-      this.z = nz;
-    } else {
-      this.pickWanderTarget();
-    }
-    const headY = this.y + 0.35;
-    if (isSolid(world.getBlock(Math.floor(this.x), Math.floor(headY), Math.floor(this.z)))) {
-      this.x -= Math.sin(this.yaw) * 0.1;
-      this.z -= Math.cos(this.yaw) * 0.1;
-      this.pickWanderTarget();
-    }
-  }
+    const box: EntityBox = {
+      x: this.x,
+      y: this.y,
+      z: this.z,
+      halfW: 0.32,
+      height: 0.42,
+    };
+    unstickEntity(world, box);
+    const dx = nx - this.x;
+    const dz = nz - this.z;
+    const { blocked, canStep } = moveEntityXZ(world, box, dx, dz, 1.05);
+    this.x = box.x;
+    this.y = box.y;
+    this.z = box.z;
 
-  private snapToGround(world: World): void {
-    const sy = world.getSurfaceY(Math.floor(this.x), Math.floor(this.z));
-    this.y += (sy - this.y) * 0.35;
-    if (Math.abs(this.y - sy) < 0.05) this.y = sy;
+    // Climb with a real hop — never teleport onto the block
+    if (
+      blocked &&
+      canStep &&
+      this.onGround &&
+      this.hopCooldown <= 0 &&
+      this.vy <= 0.05
+    ) {
+      this.vy = 7.6;
+      this.hopCooldown = 0.4;
+      this.climbHopT = 0.5;
+      this.onGround = false;
+      return;
+    }
+
+    if (blocked && !canStep) this.pickWanderTarget();
   }
 
   private syncMesh(): void {
@@ -578,6 +614,7 @@ export class CaterpillarSystem {
     dy: number,
     dz: number,
     maxDist: number,
+    damage = 1,
   ): "hurt" | "dead" | null {
     let bestT = maxDist;
     let best: NaughtyCaterpillar | null = null;
@@ -589,7 +626,7 @@ export class CaterpillarSystem {
       }
     }
     if (!best) return null;
-    const result = best.hit(ox, oz);
+    const result = best.hit(ox, oz, damage);
     if (result === "dead") this.killed++;
     return result === "miss" ? null : result;
   }

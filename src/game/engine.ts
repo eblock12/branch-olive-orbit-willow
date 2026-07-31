@@ -1,13 +1,19 @@
 import * as THREE from "three";
-import { Block, type BlockId } from "./blocks";
+import { Block, isPlant, isSolid, type BlockId } from "./blocks";
 
 import { Player, MOUSE_SENS } from "./player";
 import { World } from "./world";
-import { createBlockAtlas, createDestroyCrackTextures } from "./textures";
+import { createBlockAtlas, createDestroyCrackTextures, CRACK_STAGE_COUNT } from "./textures";
+
+
 
 import { raycastVoxel, type VoxelHit } from "./raycast";
 import { CHUNK_HEIGHT } from "./chunk";
 import { CaterpillarSystem } from "./caterpillars";
+import { PassiveMobSystem } from "./passiveMobs";
+import { BirdSystem } from "./birds";
+import { AmbianceFX } from "./ambiance";
+import { GameAudio, surfaceFromBlock } from "./audio";
 import { WeatherSystem, type WeatherKind } from "./weather";
 import { DayNightCycle } from "./dayNight";
 import {
@@ -16,19 +22,29 @@ import {
   HOTBAR_SIZE,
   MAX_HEALTH,
   MAX_HUNGER,
+  CRAFTABLE_RECIPES,
+  getTool,
+  placeableBlock,
   type HotbarSlot,
+  type ItemId,
 } from "./survival";
+import { itemName, isTool } from "./items";
+import { ItemDropSystem } from "./itemDrops";
+import { WaterFX } from "./water";
+import { ViewHand } from "./viewHand";
 
 export type HudSnapshot = {
   playing: boolean;
   fps: number;
-  selected: BlockId;
-  placeable: BlockId[];
+  selected: ItemId;
+  selectedName: string;
+  placeable: ItemId[];
   pos: { x: number; y: number; z: number };
   target: VoxelHit | null;
   isTouch: boolean;
   caterpillars: number;
   banished: number;
+  animals: number;
   weather: WeatherKind;
   rain: number;
   dayPhase: number;
@@ -42,7 +58,20 @@ export type HudSnapshot = {
   selectedSlot: number;
   mineProgress: number;
   dead: boolean;
+  atlasUrl: string;
+  blockIcons: Record<number, string>;
+  craftingOpen: boolean;
+  recipes: {
+    id: string;
+    name: string;
+    hint?: string;
+    canCraft: boolean;
+    inputs: { id: ItemId; count: number; name: string }[];
+    output: { id: ItemId; count: number; name: string };
+  }[];
+  tip: string;
 };
+
 
 export type EngineOptions = {
   canvas: HTMLCanvasElement;
@@ -57,10 +86,25 @@ export class GameEngine {
   private world: World;
   private player: Player;
   private caterpillars: CaterpillarSystem;
+  private animals: PassiveMobSystem;
+  private birds: BirdSystem;
+  private ambiance: AmbianceFX;
+  private audio = new GameAudio();
+  private wasOnGround = true;
+  private wasInWater = false;
+  private prevHealth = MAX_HEALTH;
+  private itemDrops: ItemDropSystem;
+  private waterFX: WaterFX;
   private weather: WeatherSystem;
+  private viewHand: ViewHand;
+
+
   private dayNight: DayNightCycle;
   private material: THREE.MeshLambertMaterial;
   private atlas: THREE.CanvasTexture;
+  private atlasUrl = "";
+  private blockIcons: Record<number, string> = {};
+
   private highlight: THREE.LineSegments;
   private crackMesh: THREE.Mesh;
   private crackStages: THREE.CanvasTexture[];
@@ -110,6 +154,11 @@ export class GameEngine {
 
   private _air = 5;
   private _caterHurt = 0;
+  private craftingOpen = false;
+  private lastAttack = 0;
+  /** Subtle grounded walk bob (phase + smoothed strength) */
+  private viewBobPhase = 0;
+  private viewBobAmt = 0;
 
   constructor(opts: EngineOptions) {
     this.canvas = opts.canvas;
@@ -133,22 +182,28 @@ export class GameEngine {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x5ba3d9);
-    this.scene.fog = new THREE.Fog(0x8ec4e8, 50, 220);
+    this.scene.fog = new THREE.Fog(0x8ec4e8, 100, 300);
 
-    this.camera = new THREE.PerspectiveCamera(75, 1, 0.08, 320);
+
+    this.camera = new THREE.PerspectiveCamera(75, 1, 0.08, 360);
     this.camera.rotation.order = "YXZ";
+    // Camera must be in the scene so first-person hand (child) renders
+    this.scene.add(this.camera);
 
     this.sun = new THREE.SpotLight(0xfff0d8, 0);
     this.sun.castShadow = false;
     this.sun.visible = false;
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
-    this.ambient = new THREE.AmbientLight(0x8aa8c8, 0.55);
+    this.ambient = new THREE.AmbientLight(0xa8c4e0, 0.72);
     this.scene.add(this.ambient);
-    this.hemi = new THREE.HemisphereLight(0xb8d8ff, 0x4a6a3a, 0.35);
+    this.hemi = new THREE.HemisphereLight(0xc8e4ff, 0x5a7a48, 0.48);
     this.scene.add(this.hemi);
 
-    this.atlas = createBlockAtlas();
+    const atlas = createBlockAtlas();
+    this.atlas = atlas.texture;
+    this.atlasUrl = atlas.dataUrl;
+    this.blockIcons = atlas.icons;
     this.material = new THREE.MeshLambertMaterial({
       map: this.atlas,
       vertexColors: true,
@@ -161,18 +216,39 @@ export class GameEngine {
     this.particleMat = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
     this.leafParticleMat = new THREE.MeshLambertMaterial({ color: 0x6ecf4a });
 
-    const seed = 1337;
-    this.world = new World(seed, this.material, 4, 3);
+    this.waterFX = new WaterFX();
+
+    const seed = (Math.random() * 0x7fffffff) | 0;
+    this.world = new World(seed, this.material, this.waterFX.material, 16, 7);
+
+
+
+
+
+
     this.player = new Player();
     this.caterpillars = new CaterpillarSystem();
+    this.animals = new PassiveMobSystem();
+    this.birds = new BirdSystem();
+    this.ambiance = new AmbianceFX();
+    this.itemDrops = new ItemDropSystem(this.atlas);
+    this.viewHand = new ViewHand(this.atlas);
+    this.viewHand.attachTo(this.camera);
+    this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+
 
     this.world.ensureChunksAround(0, 0);
     this.world.flushMeshes();
     this.spawnPlayer();
     this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 8);
+    this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
 
     this.scene.add(this.world.group);
     this.scene.add(this.caterpillars.group);
+    this.scene.add(this.animals.group);
+    this.scene.add(this.birds.group);
+    this.scene.add(this.ambiance.group);
+    this.scene.add(this.itemDrops.group);
 
     this.dayNight = new DayNightCycle(this.scene, this.sun);
     this.sun = this.dayNight.light;
@@ -186,6 +262,9 @@ export class GameEngine {
       this.material,
       seed,
     );
+    this.weather.onLightning = ({ dist, strength, x, y, z }) => {
+      this.audio.thunder(dist, strength, x, y, z);
+    };
     {
       const depth = this.material.userData.windDepthMaterial as
         | THREE.Material
@@ -246,39 +325,98 @@ export class GameEngine {
   }
 
   private spawnPlayer(): void {
-    for (const [sx, sz] of [
-      [0.5, 0.5],
-      [2.5, 2.5],
-      [-2.5, 2.5],
-      [2.5, -2.5],
-      [4.5, 0.5],
-      [0.5, 4.5],
-      [8.5, 8.5],
-      [-8.5, 4.5],
-    ] as const) {
-      const sy = this.world.getSurfaceY(Math.floor(sx), Math.floor(sz));
-      this.player.x = sx;
-      this.player.y = sy + 0.05;
-      this.player.z = sz;
+    // Spiral search for dry land — never spawn underwater / on ocean floor
+    const tryAt = (sx: number, sz: number): boolean => {
+      this.world.ensureChunkAt(sx, sz);
+      // Neighbor chunks help collision / surface continuity
+      this.world.ensureChunkAt(sx + 16, sz);
+      this.world.ensureChunkAt(sx - 16, sz);
+      this.world.ensureChunkAt(sx, sz + 16);
+      this.world.ensureChunkAt(sx, sz - 16);
+
+      const ix = Math.floor(sx);
+      const iz = Math.floor(sz);
+      const feet = this.world.getDrySpawnY(ix, iz);
+      if (feet === null) return false;
+
+      this.player.x = ix + 0.5;
+      this.player.y = feet + 0.02;
+      this.player.z = iz + 0.5;
       this.player.vx = 0;
       this.player.vy = 0;
       this.player.vz = 0;
+
       if (
-        !this.player.collides(
+        this.player.collides(
           this.world,
           this.player.x,
           this.player.y,
           this.player.z,
         )
       ) {
-        this.player.yaw = 0;
-        return;
+        return false;
+      }
+      // Final water check at feet / eyes
+      if (this.player.sampleWater(this.world).any) return false;
+
+      this.player.yaw = 0;
+      this.player.pitch = 0;
+      this.player.onGround = true;
+      this.player.inWater = false;
+      this.player.submerged = false;
+      return true;
+    };
+
+    // Prefer near origin first
+    const preferred: [number, number][] = [
+      [0, 0],
+      [2, 2],
+      [-2, 2],
+      [2, -2],
+      [4, 0],
+      [0, 4],
+      [8, 8],
+      [-8, 4],
+      [12, -6],
+      [-12, 10],
+    ];
+    for (const [x, z] of preferred) {
+      if (tryAt(x, z)) return;
+    }
+
+    // Expanding square spiral (step 4 blocks) out to ~200
+    for (let r = 4; r <= 200; r += 4) {
+      for (let t = 0; t < r * 8; t++) {
+        const edge = Math.floor(t / Math.max(1, r * 2));
+        const o = t % Math.max(1, r * 2);
+        let x = 0;
+        let z = 0;
+        if (edge === 0) {
+          x = -r + o;
+          z = -r;
+        } else if (edge === 1) {
+          x = r;
+          z = -r + o;
+        } else if (edge === 2) {
+          x = r - o;
+          z = r;
+        } else {
+          x = -r;
+          z = r - o;
+        }
+        if (tryAt(x, z)) return;
       }
     }
+
+    // Absolute last resort: high above origin (should be rare)
+    this.world.ensureChunkAt(0, 0);
     const sy = this.world.getSurfaceY(0, 0);
     this.player.x = 0.5;
-    this.player.y = sy + 2;
+    this.player.y = Math.max(sy, 60) + 4;
     this.player.z = 0.5;
+    this.player.vx = 0;
+    this.player.vy = 0;
+    this.player.vz = 0;
   }
 
   private installControlsTest(): void {
@@ -324,6 +462,14 @@ export class GameEngine {
     this.leafParticleMat.dispose();
     this.weather.dispose();
     this.dayNight.dispose(this.scene);
+    this.itemDrops.dispose();
+    this.viewHand.dispose();
+    this.caterpillars.dispose();
+    this.animals.dispose();
+    this.birds.dispose();
+    this.ambiance.dispose();
+    this.audio.dispose();
+    this.waterFX.dispose();
     this.world.dispose?.();
     this.atlas.dispose();
     this.material.dispose();
@@ -337,6 +483,7 @@ export class GameEngine {
   }
 
   requestPlay(): void {
+    void this.audio.resume();
     if (this.isTouch) {
       this.playing = true;
       this.emitHud();
@@ -348,9 +495,12 @@ export class GameEngine {
   private setSelectedIndex(i: number): void {
     this.selectedIndex = ((i % HOTBAR_SIZE) + HOTBAR_SIZE) % HOTBAR_SIZE;
     this.survival.select(this.selectedIndex);
+    this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+    this.audio.ui();
+    this.emitHud();
   }
 
-  get selected(): BlockId {
+  get selected(): ItemId {
     return this.survival.selectedSlot?.id ?? Block.DIRT;
   }
 
@@ -425,7 +575,9 @@ export class GameEngine {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / Math.max(1, h);
     this.camera.updateProjectionMatrix();
+    this.waterFX.setSize(w, h);
   };
+
 
   private onPointerLock = () => {
     const locked = document.pointerLockElement === this.canvas;
@@ -434,9 +586,13 @@ export class GameEngine {
       this.hadPointerLock = true;
       this.lookReadyAt = performance.now() + 80;
     } else if (this.hadPointerLock) {
-      this.playing = false;
       this.mouseDown.left = false;
       this.mouseDown.right = false;
+      // Crafting unlocks the pointer on purpose — keep session "playing"
+      // so the start overlay doesn't cover the craft menu.
+      if (!this.craftingOpen) {
+        this.playing = false;
+      }
     }
     this.emitHud();
   };
@@ -449,6 +605,14 @@ export class GameEngine {
         this.setSelectedIndex(n - 1);
         this.emitHud();
       }
+    }
+    if (e.code === "KeyE") {
+      e.preventDefault();
+      this.toggleCrafting();
+    }
+    if (e.code === "Escape" && this.craftingOpen) {
+      e.preventDefault();
+      this.setCraftingOpen(false);
     }
     if (e.code === "KeyR" && this.survival.dead) this.respawn();
   };
@@ -465,10 +629,12 @@ export class GameEngine {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (!this.playing || this.survival.dead) return;
+    if (!this.playing || this.survival.dead || this.craftingOpen) return;
     if (e.button === 0) {
       this.mouseDown.left = true;
       this.tryBreak(true);
+      // Also try melee if looking at a caterpillar / no block
+      this.tryAttack();
     }
     if (e.button === 2) {
       this.mouseDown.right = true;
@@ -580,8 +746,13 @@ export class GameEngine {
     if (y <= 0) return;
     const ok = this.world.setBlock(x, y, z, Block.AIR);
     if (!ok) return;
+    this.viewHand.punch();
+    this.audio.breakBlock(surfaceFromBlock(id), x + 0.5, y + 0.5, z + 0.5);
+    this.survival.damageHeldTool(1);
     const drop = blockDrop(id);
-    if (drop !== null) this.survival.addItem(drop, 1);
+    if (drop !== null) {
+      this.itemDrops.spawn(drop, x, y, z);
+    }
     this.spawnBreakParticles(x + 0.5, y + 0.5, z + 0.5);
     this.survival.addExhaustion(0.5);
     this.emitHud();
@@ -591,22 +762,114 @@ export class GameEngine {
     const now = performance.now();
     if (!force && now - this.lastPlace < 200) return;
     if (this.survival.dead) return;
+    if (this.craftingOpen) return;
     if (!this.target) return;
-    if (!this.survival.hasSelected()) return;
+    if (!this.survival.hasSelectedPlaceable()) return;
     const px = this.target.x + this.target.nx;
     const py = this.target.y + this.target.ny;
     const pz = this.target.z + this.target.nz;
     if (py < 0 || py >= CHUNK_HEIGHT) return;
     if (this.player.overlapsBlock(px, py, pz)) return;
     if (this.world.getBlock(px, py, pz) !== Block.AIR) return;
-    const blockId = this.survival.selectedSlot!.id;
+    const itemId = this.survival.selectedSlot!.id;
+    const blockId = placeableBlock(itemId);
+    if (blockId === null) return;
+
+    if (isPlant(blockId)) {
+      const below = this.world.getBlock(px, py - 1, pz);
+      if (!isSolid(below) || isPlant(below)) return;
+    }
+
     const ok = this.world.setBlock(px, py, pz, blockId);
     if (ok) {
+      this.viewHand.punch();
+      this.audio.placeBlock(
+        surfaceFromBlock(blockId),
+        px + 0.5,
+        py + 0.5,
+        pz + 0.5,
+      );
       this.survival.consumeSelected();
+      this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
       this.lastPlace = now;
       this.survival.addExhaustion(0.15);
       this.emitHud();
     }
+  }
+
+  /** LMB attack caterpillars when not mining a block (or sword preferred) */
+  private tryAttack(): void {
+    const now = performance.now();
+    if (now - this.lastAttack < 320) return;
+    if (this.survival.dead || this.craftingOpen) return;
+    const [lx, ly, lz] = this.player.lookDir();
+    const tool = getTool(this.survival.heldToolId());
+    const dmg = tool.attack;
+    // Prefer entity hit order: caterpillars (hostile) then animals
+    let result = this.caterpillars.tryPunch(
+      this.player.x,
+      this.player.eyeY,
+      this.player.z,
+      lx,
+      ly,
+      lz,
+      tool.kind === "sword" ? 4.2 : 3.2,
+      dmg,
+    );
+    if (!result) {
+      result = this.animals.tryPunch(
+        this.player.x,
+        this.player.eyeY,
+        this.player.z,
+        lx,
+        ly,
+        lz,
+        tool.kind === "sword" ? 4.2 : 3.2,
+        dmg,
+      );
+    }
+    if (result) {
+      this.lastAttack = now;
+      this.viewHand.punch();
+      this.audio.swing();
+      if (isTool(this.survival.heldToolId() ?? 0)) {
+        this.survival.damageHeldTool(1);
+      }
+      this.emitHud();
+    }
+  }
+
+  craftRecipe(recipeId: string): boolean {
+    const recipe = CRAFTABLE_RECIPES.find((r) => r.id === recipeId);
+    if (!recipe) return false;
+    const ok = this.survival.craft(recipe);
+    if (ok) {
+      this.audio.craft();
+      this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+      this.emitHud();
+    }
+    return ok;
+  }
+
+  private toggleCrafting(): void {
+    this.setCraftingOpen(!this.craftingOpen);
+    this.audio.ui();
+  }
+
+  setCraftingOpen(open: boolean): void {
+    this.craftingOpen = open;
+    this.mouseDown.left = false;
+    this.mouseDown.right = false;
+    if (open) {
+      // Free cursor for UI without treating it as quitting the session
+      if (document.pointerLockElement === this.canvas) {
+        document.exitPointerLock();
+      }
+    } else if (!this.isTouch && this.playing) {
+      // Resume look after closing craft
+      this.canvas.requestPointerLock();
+    }
+    this.emitHud();
   }
 
   private spawnBreakParticles(x: number, y: number, z: number): void {
@@ -675,8 +938,25 @@ export class GameEngine {
     if (this.playing || this.caterpillars.count > 0) {
       this.caterpillars.update(dt, this.world, this.player);
     }
+    if (this.playing || this.animals.count > 0) {
+      this.animals.update(dt, this.world, this.player);
+    }
+
+    if (this.playing || this.itemDrops.count > 0) {
+      const collected = this.itemDrops.update(
+        dt,
+        this.world,
+        this.player,
+        (id) => this.survival.addItem(id, 1) > 0,
+      );
+      if (collected.length > 0) {
+        this.audio.pickup();
+        this.emitHud();
+      }
+    }
 
     this.world.ensureChunksAround(this.player.x, this.player.z);
+
 
 
     const dn = this.dayNight.update(
@@ -686,6 +966,8 @@ export class GameEngine {
       this.player.z,
       this.camera,
     );
+    this.birds.setDayFactor(dn.dayFactor);
+    this.birds.update(dt, this.player.x, this.player.y, this.player.z);
     this.weather.setDayNight(dn);
     this.weather.update(
       dt,
@@ -694,7 +976,106 @@ export class GameEngine {
       this.player.y,
       this.player.z,
     );
+    // Ambiance after weather so we can use wind/rain sample
+    {
+      const w = this.weather.sample;
+      this.ambiance.update(
+        dt,
+        this.world,
+        this.player,
+        dn.dayFactor,
+        w.windX,
+        w.windZ,
+        w.rain,
+      );
+    }
+    // Landing dust + thud
+    if (this.player.onGround && !this.wasOnGround && this.player.vy <= 0.01) {
+      this.ambiance.burstDust(
+        this.player.x,
+        this.player.y,
+        this.player.z,
+        0.8,
+      );
+      this.audio.land(false);
+    }
+    // Enter water splash
+    if (this.player.inWater && !this.wasInWater) {
+      this.audio.splash(0.7);
+    }
+    this.wasOnGround = this.player.onGround;
+    this.wasInWater = this.player.inWater;
+
+    // Audio ambience + footsteps
+    {
+      const w = this.weather.sample;
+      const moving =
+        this.keys.has("KeyW") ||
+        this.keys.has("KeyA") ||
+        this.keys.has("KeyS") ||
+        this.keys.has("KeyD") ||
+        this.keys.has("ArrowUp") ||
+        this.keys.has("ArrowDown") ||
+        this.keys.has("ArrowLeft") ||
+        this.keys.has("ArrowRight") ||
+        Math.hypot(this.touchMove.x, this.touchMove.y) > 0.12;
+      const sprinting =
+        (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) &&
+        this.player.onGround;
+      this.audio.update(dt, {
+        playing: this.playing && !this.survival.dead,
+        moving,
+        onGround: this.player.onGround,
+        speed: this.player.speed,
+        sprinting,
+        inWater: this.player.inWater,
+        submerged: this.player.submerged,
+        dayFactor: dn.dayFactor,
+        rain: w.rain,
+        windSpeed: w.windSpeed,
+        surface: this.footSurface(),
+        listenerX: this.player.x,
+        listenerY: this.player.eyeY,
+        listenerZ: this.player.z,
+        listenerYaw: this.player.yaw,
+      });
+    }
+
+    // Hurt SFX
+    if (this.survival.health < this.prevHealth) {
+      this.audio.hurt();
+    }
+    this.prevHealth = this.survival.health;
+
     this.dayNight.finalizeKeyLight();
+
+    // Water FX: reflection / refraction RTs + underwater state
+    this.waterFX.update(dt);
+    const fog = this.scene.fog as THREE.Fog;
+    const sky =
+      this.scene.background instanceof THREE.Color
+        ? this.scene.background
+        : new THREE.Color(0x6eb6e8);
+    this.waterFX.updateState(
+      this.world,
+      this.player.x,
+      this.player.eyeY,
+      this.player.z,
+      sky,
+      fog,
+      this.dayNight.state.sunDir,
+      this.dayNight.state.sunColor,
+      this.dayNight.state.sunIntensity,
+      this.dayNight.state.dayFactor,
+    );
+    // If not underwater, restore fog from weather (water only overrides when submerged)
+    // weather already set fog this frame before us when above water — re-apply underwater only
+    if (!this.waterFX.underwater) {
+      // leave fog as weather set it
+    } else {
+      this.scene.background = new THREE.Color(0x062a3c);
+      this.renderer.setClearColor(0x062a3c, 1);
+    }
 
     if (this.hudAccum >= 0.25) {
       this.fps = Math.round(this.frames / this.hudAccum);
@@ -741,11 +1122,83 @@ export class GameEngine {
 
     this.updateParticles(dt);
 
-    this.camera.position.set(this.player.x, this.player.eyeY, this.player.z);
+    // Gentle view bob while walking on ground (keep mild — no seasick)
+    {
+      const moving =
+        this.keys.has("KeyW") ||
+        this.keys.has("KeyA") ||
+        this.keys.has("KeyS") ||
+        this.keys.has("KeyD") ||
+        this.keys.has("ArrowUp") ||
+        this.keys.has("ArrowDown") ||
+        this.keys.has("ArrowLeft") ||
+        this.keys.has("ArrowRight") ||
+        Math.hypot(this.touchMove.x, this.touchMove.y) > 0.12;
+      const grounded = this.player.onGround && !this.player.inWater;
+      const speed = this.player.speed;
+      const want =
+        this.playing &&
+        !this.survival.dead &&
+        grounded &&
+        moving &&
+        speed > 0.4
+          ? Math.min(1, speed / 5.5)
+          : 0;
+      this.viewBobAmt += (want - this.viewBobAmt) * Math.min(1, 8 * dt);
+      if (this.viewBobAmt > 0.02) {
+        this.viewBobPhase += dt * (7.2 + this.viewBobAmt * 3.5);
+      } else {
+        this.viewBobPhase *= 1 - Math.min(1, dt * 4);
+        this.viewBobAmt *= 1 - Math.min(1, dt * 6);
+      }
+      // Use sin² for soft vertical steps (no hard snap)
+      const step = Math.sin(this.viewBobPhase);
+      const bobY = step * step * 0.038 * this.viewBobAmt;
+      // Tiny lateral sway (very small)
+      const bobSide = Math.sin(this.viewBobPhase * 0.5) * 0.012 * this.viewBobAmt;
+      const [rx, rz] = this.player.rightXZ();
+      this.camera.position.set(
+        this.player.x + rx * bobSide,
+        this.player.eyeY + bobY,
+        this.player.z + rz * bobSide,
+      );
+    }
     this.camera.rotation.y = this.player.yaw;
     this.camera.rotation.x = this.player.pitch;
+    this.camera.rotation.z = 0;
+
+    // First-person hand / held block (camera-local)
+    this.viewHand.setVisible(this.playing && !this.survival.dead);
+    this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+    {
+      const moving =
+        this.keys.has("KeyW") ||
+        this.keys.has("KeyA") ||
+        this.keys.has("KeyS") ||
+        this.keys.has("KeyD") ||
+        this.keys.has("ArrowUp") ||
+        this.keys.has("ArrowDown") ||
+        this.keys.has("ArrowLeft") ||
+        this.keys.has("ArrowRight") ||
+        Math.hypot(this.touchMove.x, this.touchMove.y) > 0.12;
+      this.viewHand.setMotion(
+        this.player.speed,
+        this.player.onGround || this.player.inWater,
+        moving,
+      );
+    }
+    this.viewHand.update(dt);
+
+    // Reflection / refraction scene captures (water hidden inside)
+    this.waterFX.renderPasses(
+      this.renderer,
+      this.scene,
+      this.camera,
+      this.world.waterGroup,
+    );
 
     this.renderer.render(this.scene, this.camera);
+    this.waterFX.renderUnderwaterOverlay(this.renderer);
   }
 
   private updatePlayer(dt: number): void {
@@ -762,11 +1215,22 @@ export class GameEngine {
     const jump = this.keys.has("Space");
     const sprint =
       this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
+    const wasGround = this.player.onGround;
     this.player.update(dt, this.world, moveF, moveR, jump, sprint);
+    if (jump && wasGround && !this.player.onGround) {
+      this.audio.jump();
+    }
 
     if (this.player.y < -8) {
       this.survival.damage(20);
     }
+  }
+
+  private footSurface(): ReturnType<typeof surfaceFromBlock> {
+    const x = Math.floor(this.player.x);
+    const z = Math.floor(this.player.z);
+    const y = Math.floor(this.player.y - 0.1);
+    return surfaceFromBlock(this.world.getBlock(x, y, z));
   }
 
   private updateSurvival(dt: number): void {
@@ -786,15 +1250,11 @@ export class GameEngine {
       this.player.y,
       sprinting,
       moving,
+      this.player.inWater,
     );
 
-    // Drowning
-    const head = this.world.getBlock(
-      Math.floor(this.player.x),
-      Math.floor(this.player.eyeY),
-      Math.floor(this.player.z),
-    );
-    if (head === Block.WATER) {
+    // Drowning — only when head is submerged
+    if (this.player.submerged) {
       this._air -= dt;
       if (this._air <= 0) {
         this._air = 0.5;
@@ -820,12 +1280,21 @@ export class GameEngine {
 
     // Hold LMB mine
     const mining = this.mouseDown.left;
+    this.viewHand.setMining(mining && !!this.target);
     if (mining && this.target && this.target.y > 0) {
       const id = this.world.getBlock(
         this.target.x,
         this.target.y,
         this.target.z,
       );
+      if (this.survival.mineProgress > 0) {
+        this.audio.mineHit(
+          surfaceFromBlock(id),
+          this.target.x + 0.5,
+          this.target.y + 0.5,
+          this.target.z + 0.5,
+        );
+      }
       if (
         this.survival.tickMine(
           dt,
@@ -856,8 +1325,9 @@ export class GameEngine {
       this.crackStage = -1;
       return;
     }
-    // 10 stages (0..9) mapped from progress; stage 0 shows as soon as mining starts
-    const stage = Math.min(9, Math.floor(p * 10));
+    // Full 10 stages (0..9) over mine progress 0..1
+    const n = CRACK_STAGE_COUNT;
+    const stage = Math.min(n - 1, Math.floor(p * n));
     this.crackMesh.position.set(mt.x + 0.5, mt.y + 0.5, mt.z + 0.5);
     if (stage !== this.crackStage) {
       this.crackStage = stage;
@@ -889,13 +1359,19 @@ export class GameEngine {
   private emitHud(): void {
     const stats = this.caterpillars.stats;
     const w = this.weather.sample;
+    const sel = this.survival.selectedSlot?.id ?? 0;
+    const tip = !this.survival.craftedFirst
+      ? "Press E to craft · wood → planks → sticks → tools"
+      : !this.survival.madePick
+        ? "Craft a pickaxe to mine stone efficiently"
+        : "Stone tools unlock faster progression";
+
     this.onHud?.({
       playing: this.playing,
       fps: this.fps,
-      selected: this.selected,
-      placeable: this.survival.slots.map(
-        (s) => s?.id ?? Block.AIR,
-      ) as BlockId[],
+      selected: sel,
+      selectedName: itemName(sel),
+      placeable: this.survival.slots.map((s) => s?.id ?? 0),
       pos: {
         x: this.player.x,
         y: this.player.y,
@@ -905,6 +1381,7 @@ export class GameEngine {
       isTouch: this.isTouch,
       caterpillars: stats.alive,
       banished: stats.banished,
+      animals: this.animals.count,
       weather: w.kind,
       rain: w.rain,
       dayPhase: this.dayNight.state.phase,
@@ -915,11 +1392,33 @@ export class GameEngine {
       hunger: this.survival.hunger,
       maxHunger: MAX_HUNGER,
       inventory: this.survival.slots.map((s) =>
-        s ? { id: s.id, count: s.count } : null,
+        s
+          ? { id: s.id, count: s.count, durability: s.durability }
+          : null,
       ),
       selectedSlot: this.survival.selected,
       mineProgress: this.survival.mineProgress,
       dead: this.survival.dead,
+      atlasUrl: this.atlasUrl,
+      blockIcons: this.blockIcons,
+      craftingOpen: this.craftingOpen,
+      recipes: CRAFTABLE_RECIPES.map((r) => ({
+        id: r.id,
+        name: r.name,
+        hint: r.hint,
+        canCraft: this.survival.canCraft(r),
+        inputs: r.inputs.map((i) => ({
+          id: i.id,
+          count: i.count,
+          name: itemName(i.id),
+        })),
+        output: {
+          id: r.output.id,
+          count: r.output.count,
+          name: itemName(r.output.id),
+        },
+      })),
+      tip,
     });
   }
 }

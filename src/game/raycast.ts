@@ -1,4 +1,4 @@
-import { isSolid } from "./blocks";
+import { isMineable } from "./blocks";
 
 export type VoxelHit = {
   x: number;
@@ -13,7 +13,7 @@ export type VoxelHit = {
 
 /**
  * Amanatides & Woo grid DDA through the voxel world.
- * Returns the first solid block along the ray, with the face entered from.
+ * Returns the first mineable block along the ray (solids + plants/flowers).
  */
 export function raycastVoxel(
   ox: number,
@@ -25,7 +25,6 @@ export function raycastVoxel(
   maxDist: number,
   getBlock: (x: number, y: number, z: number) => number,
 ): VoxelHit | null {
-  // Normalize direction
   const len = Math.hypot(dx, dy, dz) || 1;
   dx /= len;
   dy /= len;
@@ -50,21 +49,16 @@ export function raycastVoxel(
   let tMaxZ =
     stepZ > 0 ? (Math.floor(oz) + 1 - oz) * tDeltaZ : stepZ < 0 ? (oz - Math.floor(oz)) * tDeltaZ : Infinity;
 
-  // If starting inside solid, still need face — step until we leave then re-enter? 
-  // Standard: check starting cell first if solid and origin is "just inside"
   let faceX = 0;
   let faceY = 0;
   let faceZ = 0;
   let t = 0;
 
-  // If the origin cell is solid, we're inside a block — skip until free then hit next
-  // For mining, camera is never inside solid due to collision.
-
   for (let i = 0; i < 256; i++) {
     if (t > maxDist) return null;
 
     const id = getBlock(x, y, z);
-    if (isSolid(id)) {
+    if (isMineable(id)) {
       return {
         x,
         y,

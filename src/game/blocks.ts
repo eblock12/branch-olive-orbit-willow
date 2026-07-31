@@ -15,24 +15,66 @@ export const Block = {
   WATER: 12,
   CACTUS: 13,
   SNOW_GRASS: 14,
+  // —— Plants / flowers (cross-shaped) ——
+  SHORT_GRASS: 15,
+  FERN: 16,
+  DEAD_BUSH: 17,
+  POPPY: 18,
+  DANDELION: 19,
+  CORNFLOWER: 20,
+  ALLIUM: 21,
+  AZURE_BLUET: 22,
+  OXEYE_DAISY: 23,
+  TULIP_RED: 24,
+  TULIP_ORANGE: 25,
+  TULIP_PINK: 26,
+  TULIP_WHITE: 27,
+  BLUEBELL: 28,
+  LAVENDER: 29,
+  SUNFLOWER: 30,
+  ROSE: 31,
+  MUSHROOM_RED: 32,
+  MUSHROOM_BROWN: 33,
+  CATTAIL: 34,
+  FIREWEED: 35,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
+
+export type BlockShape = "cube" | "cross";
 
 export type BlockDef = {
   id: BlockId;
   name: string;
   solid: boolean;
   transparent: boolean;
-  /** Atlas tile indices: top, bottom, side */
+  /** Atlas tile indices: top, bottom, side (cross uses side for both planes) */
   tiles: [number, number, number];
-  /** Hotbar color swatch */
   color: string;
+  /** cube = full block; cross = X-shaped plant billboard */
+  shape?: BlockShape;
 };
 
-/** Texture atlas is a 4×4 grid of 16px tiles */
+/** Atlas is 8×8 grid of 16px tiles (64 slots) */
 export const TILE_SIZE = 16;
-export const ATLAS_TILES = 4;
+export const ATLAS_TILES = 8;
+
+function plant(
+  id: BlockId,
+  name: string,
+  tile: number,
+  color: string,
+): BlockDef {
+  return {
+    id,
+    name,
+    solid: false,
+    transparent: true,
+    tiles: [tile, tile, tile],
+    color,
+    shape: "cross",
+  };
+}
 
 export const BLOCKS: Record<number, BlockDef> = {
   [Block.AIR]: {
@@ -152,11 +194,39 @@ export const BLOCKS: Record<number, BlockDef> = {
     name: "Snowy Grass",
     solid: true,
     transparent: false,
-    tiles: [11, 2, 15], // snow top, dirt bottom, snowy side
+    tiles: [11, 2, 15],
     color: "#c8d4c8",
   },
+  // Plants — atlas tiles 16+
+  [Block.SHORT_GRASS]: plant(Block.SHORT_GRASS, "Short Grass", 16, "#5aad48"),
+  [Block.FERN]: plant(Block.FERN, "Fern", 17, "#3d8f4a"),
+  [Block.DEAD_BUSH]: plant(Block.DEAD_BUSH, "Dead Bush", 18, "#8a6a3a"),
+  [Block.POPPY]: plant(Block.POPPY, "Poppy", 19, "#d43c3c"),
+  [Block.DANDELION]: plant(Block.DANDELION, "Dandelion", 20, "#f0d030"),
+  [Block.CORNFLOWER]: plant(Block.CORNFLOWER, "Cornflower", 21, "#4a78d4"),
+  [Block.ALLIUM]: plant(Block.ALLIUM, "Allium", 22, "#c060d0"),
+  [Block.AZURE_BLUET]: plant(Block.AZURE_BLUET, "Azure Bluet", 23, "#e8eef8"),
+  [Block.OXEYE_DAISY]: plant(Block.OXEYE_DAISY, "Oxeye Daisy", 24, "#f4f0e8"),
+  [Block.TULIP_RED]: plant(Block.TULIP_RED, "Red Tulip", 25, "#e03040"),
+  [Block.TULIP_ORANGE]: plant(Block.TULIP_ORANGE, "Orange Tulip", 26, "#e88830"),
+  [Block.TULIP_PINK]: plant(Block.TULIP_PINK, "Pink Tulip", 27, "#e888b0"),
+  [Block.TULIP_WHITE]: plant(Block.TULIP_WHITE, "White Tulip", 28, "#f2f0ea"),
+  [Block.BLUEBELL]: plant(Block.BLUEBELL, "Bluebell", 29, "#6080e0"),
+  [Block.LAVENDER]: plant(Block.LAVENDER, "Lavender", 30, "#a070c8"),
+  [Block.SUNFLOWER]: plant(Block.SUNFLOWER, "Sunflower", 31, "#f0c020"),
+  [Block.ROSE]: plant(Block.ROSE, "Rose", 32, "#c02840"),
+  [Block.MUSHROOM_RED]: plant(Block.MUSHROOM_RED, "Red Mushroom", 33, "#c84040"),
+  [Block.MUSHROOM_BROWN]: plant(
+    Block.MUSHROOM_BROWN,
+    "Brown Mushroom",
+    34,
+    "#8a6a48",
+  ),
+  [Block.CATTAIL]: plant(Block.CATTAIL, "Cattail", 35, "#6a8a48"),
+  [Block.FIREWEED]: plant(Block.FIREWEED, "Fireweed", 36, "#d05090"),
 };
 
+/** Hotbar / creative placeables (includes a selection of flora) */
 export const PLACEABLE: BlockId[] = [
   Block.GRASS,
   Block.DIRT,
@@ -170,6 +240,21 @@ export const PLACEABLE: BlockId[] = [
   Block.ICE,
   Block.CACTUS,
   Block.SNOW_GRASS,
+  Block.SHORT_GRASS,
+  Block.FERN,
+  Block.POPPY,
+  Block.DANDELION,
+  Block.CORNFLOWER,
+  Block.ALLIUM,
+  Block.OXEYE_DAISY,
+  Block.TULIP_RED,
+  Block.TULIP_PINK,
+  Block.LAVENDER,
+  Block.SUNFLOWER,
+  Block.ROSE,
+  Block.MUSHROOM_RED,
+  Block.MUSHROOM_BROWN,
+  Block.CATTAIL,
 ];
 
 export function isSolid(id: number): boolean {
@@ -180,4 +265,22 @@ export function isSolid(id: number): boolean {
 export function isTransparent(id: number): boolean {
   const def = BLOCKS[id];
   return def ? def.transparent : true;
+}
+
+export function isPlant(id: number): boolean {
+  const def = BLOCKS[id];
+  return def?.shape === "cross";
+}
+
+export function isCrossBlock(id: number): boolean {
+  return isPlant(id);
+}
+
+/** Blocks the player can mine / target with the crosshair (solids + plants) */
+export function isMineable(id: number): boolean {
+  if (id === 0) return false; // air
+  if (id === Block.WATER) return false;
+  if (id === Block.BEDROCK) return true; // targetable but unbreakable via mineTime
+  if (isPlant(id)) return true;
+  return isSolid(id);
 }

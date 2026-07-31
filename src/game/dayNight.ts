@@ -1,8 +1,8 @@
 import * as THREE from "three";
 
-/** Full cycle: 3 min day + 3 min night */
-export const DAY_LENGTH_SEC = 180;
-export const NIGHT_LENGTH_SEC = 180;
+/** Full cycle: 15 min day + 15 min night */
+export const DAY_LENGTH_SEC = 900;
+export const NIGHT_LENGTH_SEC = 900;
 export const CYCLE_LENGTH_SEC = DAY_LENGTH_SEC + NIGHT_LENGTH_SEC;
 
 /**
@@ -220,6 +220,11 @@ export class DayNightCycle {
    * reused engine sun did not during daytime).
    */
   private readonly keyLight: THREE.SpotLight;
+  /**
+   * Unshadowed global fill (Directional) — keeps terrain outside the spot
+   * cone / shadow map from going pitch-dark. Color/dir match the key light.
+   */
+  private readonly fillLight: THREE.DirectionalLight;
   private readonly sunBillboard: THREE.Mesh;
   private readonly moonBillboard: THREE.Mesh;
   private readonly group = new THREE.Group();
@@ -245,22 +250,30 @@ export class DayNightCycle {
       existingSun.visible = false;
     }
 
-    // SpotLight shadows are more reliable than Directional in this stack
-    // (directional maps were allocating but never darkening receivers).
-    this.keyLight = new THREE.SpotLight(0xfff0d8, 2.2, 0, Math.PI / 4.5, 0.35, 1);
+    // SpotLight shadows are more reliable than Directional in this stack.
+    // Keep the cone/shadow frustum TIGHT so 2048² has usable texels-per-block.
+    // Far terrain brightness is handled by the unshadowed fill light, not by
+    // stretching the shadow map.
+    this.keyLight = new THREE.SpotLight(0xfff4e0, 2.6, 0, Math.PI / 4.2, 0.4, 1);
     this.keyLight.castShadow = true;
     this.keyLight.shadow.mapSize.set(2048, 2048);
-    // Low bias = tight contact at block feet (high normalBias caused light rings)
     this.keyLight.shadow.bias = -0.00004;
     this.keyLight.shadow.normalBias = 0.008;
-    this.keyLight.shadow.intensity = 0.55;
+    this.keyLight.shadow.intensity = 0.42;
     this.keyLight.shadow.radius = 1;
-    this.keyLight.shadow.camera.near = 4;
-    this.keyLight.shadow.camera.far = 140;
-    this.keyLight.shadow.camera.fov = 48;
+    this.keyLight.shadow.camera.near = 6;
+    this.keyLight.shadow.camera.far = 120;
+    this.keyLight.shadow.camera.fov = 46;
     this.keyLight.shadow.focus = 1;
     scene.add(this.keyLight);
     scene.add(this.keyLight.target);
+
+    // Global unshadowed fill — prevents dark ring outside the tight shadow map
+    this.fillLight = new THREE.DirectionalLight(0xfff4e0, 0.85);
+    this.fillLight.castShadow = false;
+    this.fillLight.position.set(40, 80, 30);
+    scene.add(this.fillLight);
+    scene.add(this.fillLight.target);
 
 
     this.sample = {
@@ -275,12 +288,12 @@ export class DayNightCycle {
       fog: new THREE.Color(0x8ec4e8),
       sunColor: new THREE.Color(0xfff0d8),
       moonColor: new THREE.Color(0xb0c4ff),
-      sunIntensity: 1.5,
+      sunIntensity: 1.9,
       moonIntensity: 0,
-      ambientIntensity: 0.2,
-      hemiIntensity: 0.15,
-      hemiSky: new THREE.Color(0xb8d8ff),
-      hemiGround: new THREE.Color(0x4a6a3a),
+      ambientIntensity: 0.38,
+      hemiIntensity: 0.32,
+      hemiSky: new THREE.Color(0xc8e4ff),
+      hemiGround: new THREE.Color(0x5a7a48),
       aerosol: AEROSOL_BASE_TURBIDITY,
       mieHaze: 0.1,
       weatherDim: 1,
@@ -462,24 +475,39 @@ export class DayNightCycle {
     s.moonColor.setRGB(0.72, 0.8, 1.0);
 
     // Aerosols slightly soften direct sun (haze extinction)
-    const hazeExt = 1 - atm.mieHaze * 0.22;
+    const hazeExt = 1 - atm.mieHaze * 0.16;
     const elev = THREE.MathUtils.clamp(sunElevation, 0, 1);
-    // Key light strong; fill kept low so daytime shadows stay readable
-    s.sunIntensity = dayFactor * (1.55 + 0.7 * elev) * hazeExt;
+    // Brighter key + airy fill for a more pleasant Minecraft-like look
+    s.sunIntensity = dayFactor * (1.95 + 0.85 * elev) * hazeExt;
     s.moonIntensity =
-      nightFactor * (0.55 + 0.4 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
+      nightFactor *
+      (0.58 + 0.4 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
     s.ambientIntensity =
-      0.16 + dayFactor * 0.1 + nightFactor * 0.08 + atm.mieHaze * 0.04;
+      0.14 +
+      dayFactor * 0.42 +
+      nightFactor * 0.1 +
+      atm.mieHaze * 0.04 * dayFactor;
     s.hemiIntensity =
-      0.1 + dayFactor * 0.1 + nightFactor * 0.06 + atm.mieHaze * 0.03;
+      0.12 +
+      dayFactor * 0.4 +
+      nightFactor * 0.09 +
+      atm.mieHaze * 0.03 * dayFactor;
 
-
-    s.hemiSky.copy(s.sky).multiplyScalar(0.9);
+    // Hemisphere: bright sky fill + lively ground bounce
+    s.hemiSky.copy(s.sky).multiplyScalar(1.05);
+    if (nightFactor > 0.01) {
+      const nightSky = new THREE.Color(0x2a3c68);
+      s.hemiSky.lerp(nightSky, nightFactor * 0.75);
+      s.hemiSky.multiplyScalar(THREE.MathUtils.lerp(1, 0.72, nightFactor));
+    }
     s.hemiGround.set(
-      THREE.MathUtils.lerp(0.12, 0.28, dayFactor),
-      THREE.MathUtils.lerp(0.16, 0.38, dayFactor),
-      THREE.MathUtils.lerp(0.1, 0.18, dayFactor),
+      THREE.MathUtils.lerp(0.08, 0.38, dayFactor),
+      THREE.MathUtils.lerp(0.1, 0.48, dayFactor),
+      THREE.MathUtils.lerp(0.12, 0.24, dayFactor),
     );
+    if (nightFactor > 0.01) {
+      s.hemiGround.lerp(new THREE.Color(0x121c30), nightFactor * 0.55);
+    }
 
     this._aimX = px;
     this._aimY = py + 4;
@@ -528,16 +556,14 @@ export class DayNightCycle {
     const px = this._aimX;
     const py = this._aimY;
     const pz = this._aimZ;
-    const dist = 55;
+    // Tight range → more shadow-map texels per block (readable edges)
+    const dist = 56;
 
     const isDay = s.sunElevation >= 0;
     if (isDay) {
-      // Key light follows sun azimuth but keeps a moderate elevation so
-      // shadows stay long/readable even when the billboard sun is overhead
       const az = Math.atan2(s.sunDir.x, s.sunDir.z);
-      // Blend toward true sun elev, but never steeper than ~65° from horizon
       const trueElev = Math.asin(THREE.MathUtils.clamp(s.sunDir.y, -1, 1));
-      const elev = Math.min(trueElev, 1.05); // cap ~60°
+      const elev = Math.min(trueElev, 1.05);
       const e = Math.max(0.35, elev);
       this.tmpShadowDir
         .set(
@@ -558,44 +584,59 @@ export class DayNightCycle {
         .normalize();
     }
 
-
     const weatherDim = s.weatherDim > 0 ? s.weatherDim : 1;
     const flash = s.weatherFlash ?? 0;
     const baseI = isDay
-      ? Math.max(1.2, s.sunIntensity * 1.3)
-      : Math.max(0.55, s.moonIntensity * 1.4);
-    const intensity = baseI * weatherDim + flash * 0.4;
+      ? Math.max(1.75, s.sunIntensity * 1.35)
+      : Math.max(0.7, s.moonIntensity * 1.55);
+    const totalI = baseI * weatherDim + flash * 0.4;
+    // Key: local high-res shadows. Fill: world brightness beyond the map.
+    // Keep fill lower than key so nearby shadows stay readable.
+    const keyI = totalI * 0.95;
+    const fillI = totalI * 0.48;
     const color = isDay ? s.sunColor : s.moonColor;
 
     const ox = this.tmpShadowDir.x * dist;
-    const oy = Math.max(28, Math.abs(this.tmpShadowDir.y) * dist);
+    const oy = Math.max(30, Math.abs(this.tmpShadowDir.y) * dist);
     const oz = this.tmpShadowDir.z * dist;
 
     this.keyLight.position.set(px + ox, py + oy, pz + oz);
     this.keyLight.target.position.set(px, py, pz);
     this.keyLight.target.updateMatrixWorld();
     this.keyLight.color.copy(color);
-    this.keyLight.intensity = intensity;
-    this.keyLight.distance = 0; // infinite-ish falloff disabled
+    this.keyLight.intensity = keyI;
+    this.keyLight.distance = 0;
     this.keyLight.decay = 0;
-    this.keyLight.angle = Math.PI / 4.2;
-    this.keyLight.penumbra = 0.4;
+    // Moderate cone — not the huge frustum that crushed shadow resolution
+    this.keyLight.angle = Math.PI / 4.1;
+    this.keyLight.penumbra = 0.45;
     this.keyLight.visible = true;
     this.keyLight.castShadow = true;
-    this.keyLight.shadow.intensity = isDay ? 0.55 : 0.9;
-    // Keep contact tight at block bases — large normalBias left bright rings
+    this.keyLight.shadow.intensity = isDay ? 0.4 : 0.75;
     this.keyLight.shadow.bias = -0.00004;
     this.keyLight.shadow.normalBias = 0.008;
     this.keyLight.shadow.radius = 1;
-    // Tighter depth range = cleaner edges between voxel faces
     this.keyLight.shadow.camera.near = 6;
-    this.keyLight.shadow.camera.far = 120;
-    this.keyLight.shadow.camera.fov = 48;
+    this.keyLight.shadow.camera.far = 115;
+    this.keyLight.shadow.camera.fov = 46;
     this.keyLight.shadow.camera.updateProjectionMatrix();
     this.keyLight.updateMatrixWorld(true);
     this.keyLight.shadow.camera.updateMatrixWorld();
     this.keyLight.shadow.needsUpdate = true;
 
+    // Fill: same direction/color, no shadows — far terrain stays lit
+    this.fillLight.color.copy(color);
+    this.fillLight.intensity = fillI;
+    this.fillLight.position.set(
+      px + this.tmpShadowDir.x * 100,
+      py + Math.max(50, this.tmpShadowDir.y * 100 + 30),
+      pz + this.tmpShadowDir.z * 100,
+    );
+    this.fillLight.target.position.set(px, py, pz);
+    this.fillLight.target.updateMatrixWorld();
+    this.fillLight.visible = true;
+    this.fillLight.castShadow = false;
+    this.fillLight.updateMatrixWorld(true);
   }
 
 
@@ -608,6 +649,8 @@ export class DayNightCycle {
     scene.remove(this.group);
     scene.remove(this.keyLight);
     scene.remove(this.keyLight.target);
+    scene.remove(this.fillLight);
+    scene.remove(this.fillLight.target);
     const sunMat = this.sunBillboard.material as THREE.MeshBasicMaterial;
     const moonMat = this.moonBillboard.material as THREE.MeshBasicMaterial;
     this.sunBillboard.geometry.dispose();

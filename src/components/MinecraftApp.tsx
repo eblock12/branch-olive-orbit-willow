@@ -1,18 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ClientOnly } from "@tanstack/react-router";
-import { BLOCKS, type BlockId } from "../game/blocks";
+import { BLOCKS, isPlant } from "../game/blocks";
 import type { GameEngine, HudSnapshot } from "../game/engine";
+import {
+  isBlockItem,
+  itemColor,
+  itemIconDataUrl,
+  itemName,
+  type ItemId,
+} from "../game/items";
 
 const DEFAULT_HUD: HudSnapshot = {
   playing: false,
   fps: 0,
-  selected: 1 as BlockId,
+  selected: 1,
+  selectedName: "Dirt",
   placeable: [],
   pos: { x: 0, y: 0, z: 0 },
   target: null,
   isTouch: false,
   caterpillars: 0,
   banished: 0,
+  animals: 0,
   weather: "clear",
   rain: 0,
   dayPhase: 0.2,
@@ -26,7 +35,83 @@ const DEFAULT_HUD: HudSnapshot = {
   selectedSlot: 0,
   mineProgress: 0,
   dead: false,
+  atlasUrl: "",
+  blockIcons: {},
+  craftingOpen: false,
+  recipes: [],
+  tip: "Press E to craft",
 };
+
+function ItemIcon({
+  id,
+  atlasUrl,
+  blockIcons,
+  className = "h-7 w-7",
+}: {
+  id: ItemId;
+  atlasUrl: string;
+  blockIcons: Record<number, string>;
+  className?: string;
+}) {
+  const name = itemName(id);
+  if (isBlockItem(id)) {
+    const def = BLOCKS[id];
+    if (!def) {
+      return <span className={`${className} rounded-sm bg-bg/40`} />;
+    }
+    const iso = blockIcons[id];
+    if (iso) {
+      return (
+        <span
+          className={`${className} rounded-sm`}
+          style={{
+            backgroundImage: `url(${iso})`,
+            backgroundSize: "contain",
+            backgroundPosition: "center",
+            backgroundRepeat: "no-repeat",
+            imageRendering: "pixelated",
+          }}
+          title={name}
+          role="img"
+          aria-label={name}
+        />
+      );
+    }
+    // Fallback color chip
+    return (
+      <span
+        className={`${className} rounded-sm shadow-inner`}
+        style={{ background: def.color }}
+        title={name}
+      />
+    );
+  }
+  const url = itemIconDataUrl(id);
+  if (url) {
+    return (
+      <span
+        className={`${className} rounded-sm bg-bg/40`}
+        style={{
+          backgroundImage: `url(${url})`,
+          backgroundSize: "contain",
+          backgroundPosition: "center",
+          backgroundRepeat: "no-repeat",
+          imageRendering: "pixelated",
+        }}
+        title={name}
+        role="img"
+        aria-label={name}
+      />
+    );
+  }
+  return (
+    <span
+      className={`${className} rounded-sm shadow-inner`}
+      style={{ background: itemColor(id) }}
+      title={name}
+    />
+  );
+}
 
 
 const WEATHER_LABEL: Record<string, string> = {
@@ -84,6 +169,14 @@ function GameShell() {
 
   const onSelect = useCallback((i: number) => {
     engineRef.current?.selectHotbar(i);
+  }, []);
+
+  const onCraft = useCallback((recipeId: string) => {
+    engineRef.current?.craftRecipe(recipeId);
+  }, []);
+
+  const onCloseCraft = useCallback(() => {
+    engineRef.current?.setCraftingOpen(false);
   }, []);
 
 
@@ -160,7 +253,7 @@ function GameShell() {
               <div className="rounded-xl border border-border bg-surface/85 px-3 py-2 text-right backdrop-blur-sm">
                 <p className="text-xs text-muted">Selected</p>
                 <p className="text-sm font-medium text-fg">
-                  {BLOCKS[hud.selected]?.name ?? "—"}
+                  {hud.selectedName || "—"}
                 </p>
               </div>
             )}
@@ -194,6 +287,10 @@ function GameShell() {
                 {hud.banished > 0 ? (
                   <span className="text-subtle"> · {hud.banished} banished</span>
                 ) : null}
+              </p>
+              <p className="mt-1 text-xs text-muted">Wildlife</p>
+              <p className="font-mono text-sm tabular-nums text-fg">
+                {hud.animals} nearby
               </p>
             </div>
           </div>
@@ -262,8 +359,9 @@ function GameShell() {
             {Array.from({ length: 9 }, (_, i) => {
               const slot = hud.inventory[i];
               const id = slot?.id;
-              const def = id != null ? BLOCKS[id] : null;
+              const name = id != null ? itemName(id) : null;
               const active = hud.selectedSlot === i;
+              const dur = slot?.durability;
               return (
                 <button
                   key={i}
@@ -274,28 +372,111 @@ function GameShell() {
                       ? "border-accent bg-elevated ring-1 ring-accent/40"
                       : "border-border bg-bg/60 hover:bg-elevated"
                   }`}
-                  aria-label={def?.name ?? `Empty ${i + 1}`}
-                  title={def ? `${i + 1}: ${def.name}` : `${i + 1}: empty`}
+                  aria-label={name ?? `Empty ${i + 1}`}
+                  title={name ? `${i + 1}: ${name}` : `${i + 1}: empty`}
                 >
-                  {def ? (
-                    <span
-                      className="h-6 w-6 rounded-sm shadow-inner"
-                      style={{ background: def.color }}
+                  {id != null ? (
+                    <ItemIcon
+                      id={id}
+                      atlasUrl={hud.atlasUrl}
+                      blockIcons={hud.blockIcons}
                     />
                   ) : (
-                    <span className="h-6 w-6 rounded-sm bg-bg/40" />
+                    <span className="h-7 w-7 rounded-sm bg-bg/40" />
                   )}
                   <span className="absolute bottom-0.5 left-1 font-mono text-[9px] text-subtle">
                     {i + 1}
                   </span>
-                  {slot && slot.count > 0 ? (
+                  {slot && slot.count > 1 ? (
                     <span className="absolute bottom-0.5 right-0.5 font-mono text-[10px] font-semibold text-fg">
                       {slot.count}
+                    </span>
+                  ) : null}
+                  {dur != null && slot ? (
+                    <span
+                      className="absolute left-1 right-1 top-0.5 h-0.5 overflow-hidden rounded-full bg-bg/80"
+                      title={`Durability ${dur}`}
+                    >
+                      <span
+                        className="block h-full bg-emerald-400"
+                        style={{
+                          width: `${Math.max(0, Math.min(1, dur / 140)) * 100}%`,
+                        }}
+                      />
                     </span>
                   ) : null}
                 </button>
               );
             })}
+          </div>
+          <p className="pointer-events-none text-center text-[11px] text-subtle">
+            {hud.tip}
+            {" · "}
+            <span className="text-muted">E craft</span>
+          </p>
+        </div>
+      )}
+
+      {/* Crafting panel */}
+      {ready && hud.craftingOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-bg/70 p-4 backdrop-blur-sm">
+          <div className="max-h-[min(90vh,640px)] w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold text-fg">Crafting</h2>
+                <p className="text-xs text-muted">
+                  Wood → planks → sticks → tools → mine stone
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onCloseCraft}
+                className="rounded-lg border border-border bg-elevated px-3 py-1.5 text-xs font-medium text-fg hover:bg-bg"
+              >
+                Close (E)
+              </button>
+            </div>
+            <div className="max-h-[min(70vh,520px)] space-y-2 overflow-y-auto p-3">
+              {hud.recipes.map((r) => (
+                <div
+                  key={r.id}
+                  className={`flex items-center gap-3 rounded-xl border p-3 ${
+                    r.canCraft
+                      ? "border-accent/40 bg-elevated/80"
+                      : "border-border bg-bg/40 opacity-80"
+                  }`}
+                >
+                  <ItemIcon
+                    id={r.output.id}
+                    atlasUrl={hud.atlasUrl}
+                    blockIcons={hud.blockIcons}
+                    className="h-10 w-10 shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-fg">
+                      {r.name}
+                      {r.output.count > 1 ? (
+                        <span className="text-subtle"> ×{r.output.count}</span>
+                      ) : null}
+                    </p>
+                    <p className="truncate text-xs text-muted">
+                      {r.inputs
+                        .map((i) => `${i.count}× ${i.name}`)
+                        .join(" + ")}
+                      {r.hint ? ` · ${r.hint}` : ""}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!r.canCraft}
+                    onClick={() => onCraft(r.id)}
+                    className="shrink-0 rounded-lg border border-border bg-accent/90 px-3 py-1.5 text-xs font-semibold text-bg disabled:cursor-not-allowed disabled:bg-bg disabled:text-subtle"
+                  >
+                    Craft
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -372,7 +553,7 @@ function GameShell() {
         </div>
       )}
 
-      {ready && !hud.playing && (
+      {ready && !hud.playing && !hud.craftingOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-bg/55 p-6 backdrop-blur-[2px]">
           <div className="w-full max-w-md rounded-3xl border border-border bg-surface p-8 shadow-2xl shadow-black/40">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-subtle">
@@ -390,7 +571,7 @@ function GameShell() {
               </li>
               <li className="flex gap-2">
                 <span className="w-28 shrink-0 font-mono text-xs text-subtle">Mine / Build</span>
-                <span>Hold LMB to mine · RMB place from hotbar</span>
+                <span>Hold LMB mine/attack · RMB place · E craft</span>
               </li>
               <li className="flex gap-2">
                 <span className="w-28 shrink-0 font-mono text-xs text-subtle">Survive</span>
