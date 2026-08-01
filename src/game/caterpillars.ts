@@ -26,11 +26,11 @@ const BODY_Z0 = ((SEGMENTS - 1) * SEG_SPACING) / 2;
 const SPEED_WANDER = 1.55;
 const SPEED_FLEE = 3.4;
 const SPEED_TEASE = 2.4;
-const PLAYER_NOTICE = 10;
+const PLAYER_NOTICE = 7;
 const PLAYER_FLEE = 3.2;
 const HIT_RADIUS = 0.4;
-const MAX_ALIVE = 14;
-const RESPAWN_INTERVAL = 8;
+const MAX_ALIVE = 6;
+const RESPAWN_INTERVAL = 22;
 /** Shadow radius — oval stays under body center, ≤ block width. */
 const SHADOW_RADIUS = 0.32;
 
@@ -155,6 +155,8 @@ export class NaughtyCaterpillar {
   private wiggle = 0;
   private hopCooldown = 0;
   private climbHopT = 0;
+  private climbDx = 0;
+  private climbDz = 0;
 
   constructor(x: number, y: number, z: number, mats: CaterpillarMaterials) {
     this.mesh = buildCaterpillarMesh(mats);
@@ -259,11 +261,19 @@ export class NaughtyCaterpillar {
       while (dyaw < -Math.PI) dyaw += Math.PI * 2;
       this.yaw += dyaw * Math.min(1, 6 * dt);
 
-      const airMul = this.onGround ? 1 : this.climbHopT > 0 ? 0.9 : 0.35;
-      const step = speed * dt * airMul;
-      const nx = this.x + Math.sin(this.yaw) * step;
-      const nz = this.z + Math.cos(this.yaw) * step;
-      this.tryMove(world, nx, nz);
+      const climbing = this.climbHopT > 0;
+      const airMul = this.onGround ? 1 : climbing ? 1.4 : 0.4;
+      let step = speed * dt * airMul;
+      if (climbing && !this.onGround) step = Math.max(step, 4.0 * dt);
+      let mx = Math.sin(this.yaw) * step;
+      let mz = Math.cos(this.yaw) * step;
+      if (climbing && (this.climbDx !== 0 || this.climbDz !== 0)) {
+        const clen = Math.hypot(this.climbDx, this.climbDz) || 1;
+        const boost = 2.8 * dt * (this.climbHopT > 0.25 ? 1.25 : 0.9);
+        mx += (this.climbDx / clen) * boost;
+        mz += (this.climbDz / clen) * boost;
+      }
+      this.tryMove(world, this.x + mx, this.z + mz);
     } else if (this.mood === "wander") {
       this.pickWanderTarget();
     }
@@ -291,14 +301,15 @@ export class NaughtyCaterpillar {
     if (this.mood === "steal" && this.eatCooldown <= 0) {
       this.tryStealNearPlayer(world, player);
     }
-    if (this.mood === "tease" && pDist < 1.1) {
+    if (this.mood === "tease" && pDist < 1.05) {
       const len = pDist || 1;
-      player.vx += (pdx / len) * 2.5;
-      player.vz += (pdz / len) * 2.5;
+      // Gentler bump — less rocket-launch annoyance
+      player.vx += (pdx / len) * 1.2;
+      player.vz += (pdz / len) * 1.2;
       this.mood = "flee";
-      this.stateT = 1.2;
-      this.targetX = this.x - (pdx / len) * 6;
-      this.targetZ = this.z - (pdz / len) * 6;
+      this.stateT = 1.8;
+      this.targetX = this.x - (pdx / len) * 7;
+      this.targetZ = this.z - (pdz / len) * 7;
     }
 
     this.syncMesh();
@@ -331,19 +342,19 @@ export class NaughtyCaterpillar {
       return;
     }
 
-    if (pDist < PLAYER_NOTICE && pDist > 2 && Math.random() < 0.25) {
+    if (pDist < PLAYER_NOTICE && pDist > 2.5 && Math.random() < 0.08) {
       this.mood = "tease";
       this.targetX = player.x + (Math.random() - 0.5) * 2;
       this.targetZ = player.z + (Math.random() - 0.5) * 2;
-      this.stateT = 2;
+      this.stateT = 1.4;
       return;
     }
 
-    if (pDist < 8 && Math.random() < 0.2) {
+    if (pDist < 6 && Math.random() < 0.06) {
       this.mood = "steal";
       this.targetX = player.x + (Math.random() - 0.5) * 4;
       this.targetZ = player.z + (Math.random() - 0.5) * 4;
-      this.stateT = 3;
+      this.stateT = 2.2;
       return;
     }
 
@@ -482,14 +493,18 @@ export class NaughtyCaterpillar {
       this.hopCooldown <= 0 &&
       this.vy <= 0.05
     ) {
-      this.vy = 7.6;
-      this.hopCooldown = 0.4;
-      this.climbHopT = 0.5;
+      // Apex ≈ v²/(2g) with g=28 → need v≥~9 for >1.4 block clearance
+      this.vy = 10.6;
+      this.hopCooldown = 0.32;
+      this.climbHopT = 0.75;
+      this.climbDx = Math.sin(this.yaw);
+      this.climbDz = Math.cos(this.yaw);
+      this.y += 0.06;
       this.onGround = false;
       return;
     }
 
-    if (blocked && !canStep) this.pickWanderTarget();
+    if (blocked && !canStep && this.climbHopT <= 0) this.pickWanderTarget();
   }
 
   private syncMesh(): void {
@@ -593,10 +608,10 @@ export class CaterpillarSystem {
 
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0) {
-      this.spawnTimer = RESPAWN_INTERVAL + Math.random() * 4;
-      if (this.count < 8) {
+      this.spawnTimer = RESPAWN_INTERVAL + Math.random() * 10;
+      if (this.count < 4) {
         const ang = Math.random() * Math.PI * 2;
-        const dist = 12 + Math.random() * 16;
+        const dist = 16 + Math.random() * 18;
         this.spawnAt(
           world,
           player.x + Math.cos(ang) * dist,

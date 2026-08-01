@@ -112,16 +112,21 @@ function buildPig(): THREE.Group {
   body.scale.set(0.7, 0.55, 0.95);
   body.position.y = 0.45;
   g.add(body);
+
+  const headG = new THREE.Group();
+  headG.name = "head";
+  headG.position.set(0, 0.5, 0.55);
   const head = new THREE.Mesh(geoBox, bodyM);
   head.scale.set(0.4, 0.38, 0.35);
-  head.position.set(0, 0.5, 0.55);
-  g.add(head);
+  headG.add(head);
   const snout = new THREE.Mesh(geoBox, dark);
   snout.scale.set(0.22, 0.16, 0.12);
-  snout.position.set(0, 0.42, 0.75);
-  g.add(snout);
+  snout.position.set(0, -0.08, 0.2);
+  headG.add(snout);
+  addEyes(headG, 0.11, 0.06, 0.17, 0.07);
+  g.add(headG);
+
   addLegs(g, 0.18, 0.32, 0.28, 0.32, dark);
-  addEyes(g, 0.12, 0.58, 0.68, 0.06);
   return g;
 }
 
@@ -138,24 +143,27 @@ function buildCow(): THREE.Group {
   spot.scale.set(0.35, 0.35, 0.4);
   spot.position.set(0.22, 0.85, 0.1);
   g.add(spot);
+
+  const headG = new THREE.Group();
+  headG.name = "head";
+  headG.position.set(0, 0.85, 0.72);
   const head = new THREE.Mesh(geoBox, headM);
   head.scale.set(0.42, 0.4, 0.38);
-  head.position.set(0, 0.85, 0.72);
-  g.add(head);
-  // horns
+  headG.add(head);
   for (const s of [-1, 1]) {
     const h = new THREE.Mesh(geoBox, mat(0xf0e8d8));
     h.scale.set(0.08, 0.18, 0.08);
-    h.position.set(s * 0.18, 1.12, 0.72);
-    g.add(h);
+    h.position.set(s * 0.18, 0.27, 0);
+    headG.add(h);
   }
-  // udder
+  addEyes(headG, 0.13, 0.05, 0.2, 0.065);
+  g.add(headG);
+
   const ud = new THREE.Mesh(geoSphere, mat(0xf2c8c8));
   ud.scale.set(0.22, 0.16, 0.22);
   ud.position.set(0, 0.35, -0.15);
   g.add(ud);
   addLegs(g, 0.16, 0.45, 0.32, 0.4, bodyM);
-  addEyes(g, 0.14, 0.92, 0.88, 0.055);
   return g;
 }
 
@@ -167,12 +175,17 @@ function buildSheep(): THREE.Group {
   body.scale.set(0.72, 0.65, 0.95);
   body.position.y = 0.55;
   g.add(body);
+
+  const headG = new THREE.Group();
+  headG.name = "head";
+  headG.position.set(0, 0.58, 0.58);
   const head = new THREE.Mesh(geoBox, face);
   head.scale.set(0.32, 0.32, 0.32);
-  head.position.set(0, 0.58, 0.58);
-  g.add(head);
+  headG.add(head);
+  addEyes(headG, 0.09, 0.06, 0.16, 0.055);
+  g.add(headG);
+
   addLegs(g, 0.14, 0.35, 0.26, 0.32, face);
-  addEyes(g, 0.1, 0.65, 0.72, 0.05);
   return g;
 }
 
@@ -185,33 +198,36 @@ function buildChicken(): THREE.Group {
   body.scale.set(0.38, 0.35, 0.48);
   body.position.y = 0.38;
   g.add(body);
+
+  const headG = new THREE.Group();
+  headG.name = "head";
+  headG.position.set(0, 0.55, 0.28);
   const head = new THREE.Mesh(geoBox, bodyM);
   head.scale.set(0.22, 0.24, 0.22);
-  head.position.set(0, 0.55, 0.28);
-  g.add(head);
+  headG.add(head);
   const c = new THREE.Mesh(geoBox, comb);
   c.scale.set(0.06, 0.1, 0.12);
-  c.position.set(0, 0.72, 0.28);
-  g.add(c);
+  c.position.set(0, 0.17, 0);
+  headG.add(c);
   const b = new THREE.Mesh(geoBox, beak);
   b.scale.set(0.08, 0.06, 0.12);
-  b.position.set(0, 0.52, 0.42);
-  g.add(b);
-  // wings
+  b.position.set(0, -0.03, 0.14);
+  headG.add(b);
+  addEyes(headG, 0.065, 0.03, 0.12, 0.045);
+  g.add(headG);
+
   for (const s of [-1, 1]) {
     const w = new THREE.Mesh(geoBox, mat(0xe0e0e0));
     w.scale.set(0.08, 0.22, 0.28);
     w.position.set(s * 0.22, 0.4, 0);
     g.add(w);
   }
-  // thin legs
   for (const s of [-1, 1]) {
     const leg = new THREE.Mesh(geoBox, mat(0xf0a020));
     leg.scale.set(0.05, 0.22, 0.05);
     leg.position.set(s * 0.08, 0.12, 0);
     g.add(leg);
   }
-  addEyes(g, 0.07, 0.6, 0.36, 0.04);
   return g;
 }
 
@@ -223,22 +239,27 @@ function buildRabbit(): THREE.Group {
   body.scale.set(0.32, 0.3, 0.42);
   body.position.y = 0.28;
   g.add(body);
+
+  const headG = new THREE.Group();
+  headG.name = "head";
+  headG.position.set(0, 0.4, 0.26);
   const head = new THREE.Mesh(geoBox, fur);
   head.scale.set(0.24, 0.22, 0.24);
-  head.position.set(0, 0.4, 0.26);
-  g.add(head);
+  headG.add(head);
   for (const s of [-1, 1]) {
     const ear = new THREE.Mesh(geoBox, fur);
     ear.scale.set(0.07, 0.28, 0.06);
-    ear.position.set(s * 0.08, 0.62, 0.22);
-    g.add(ear);
+    ear.position.set(s * 0.08, 0.22, -0.04);
+    headG.add(ear);
   }
+  addEyes(headG, 0.07, 0.04, 0.12, 0.04);
+  g.add(headG);
+
   const tail = new THREE.Mesh(geoSphere, belly);
   tail.scale.setScalar(0.12);
   tail.position.set(0, 0.3, -0.24);
   g.add(tail);
   addLegs(g, 0.08, 0.14, 0.1, 0.12, fur);
-  addEyes(g, 0.08, 0.45, 0.36, 0.035);
   return g;
 }
 
@@ -267,13 +288,44 @@ function addEyes(
   z: number,
   s: number,
 ): void {
-  const eyeM = mat(0x1a1a1e);
-  for (const side of [-1, 1]) {
-    const e = new THREE.Mesh(geoBox, eyeM);
-    e.scale.setScalar(s);
-    e.position.set(side * x, y, z);
-    g.add(e);
+  // Minecraft-style: white sclera + dark pupil, slightly proud of the face
+  const whiteM = mat(0xf5f5f8);
+  const pupilM = mat(0x14141a);
+  const whiteD = s * 1.15;
+  const pupilD = s * 0.55;
+  const zWhite = z + s * 0.35;
+  const zPupil = zWhite + s * 0.28;
+  for (const side of [-1, 1] as const) {
+    const white = new THREE.Mesh(geoBox, whiteM);
+    white.name = "eyeWhite";
+    const wScale = { x: whiteD, y: whiteD * 0.85, z: whiteD * 0.35 };
+    white.scale.set(wScale.x, wScale.y, wScale.z);
+    white.position.set(side * x, y, zWhite);
+    white.userData.baseScale = wScale;
+    white.userData.isEye = true;
+    g.add(white);
+
+    const pupil = new THREE.Mesh(geoBox, pupilM);
+    pupil.name = "eyePupil";
+    const pScale = { x: pupilD, y: pupilD, z: pupilD * 0.4 };
+    pupil.scale.set(pScale.x, pScale.y, pScale.z);
+    pupil.position.set(side * (x - s * 0.08), y - s * 0.02, zPupil);
+    pupil.userData.baseScale = pScale;
+    pupil.userData.isEye = true;
+    g.add(pupil);
   }
+}
+
+/** Apply blink: openAmount 1 = open, 0 = fully closed (squash Y). */
+function setEyeOpen(mesh: THREE.Object3D, openAmount: number): void {
+  mesh.traverse((o) => {
+    if (!(o instanceof THREE.Mesh) || !o.userData.isEye) return;
+    const base = o.userData.baseScale as { x: number; y: number; z: number };
+    if (!base) return;
+    const open = Math.max(0.04, Math.min(1, openAmount));
+    o.scale.set(base.x, base.y * open, base.z);
+    o.visible = open > 0.06;
+  });
 }
 
 function buildMesh(kind: PassiveKind): THREE.Group {
@@ -317,7 +369,7 @@ class PassiveMob {
   alive = true;
   private targetX = 0;
   private targetZ = 0;
-  private state: "wander" | "idle" | "flee" = "wander";
+  private state: "wander" | "idle" | "flee" | "look" = "wander";
   private stateT = 0;
   private bob = Math.random() * Math.PI * 2;
   private hop = 0;
@@ -326,6 +378,17 @@ class PassiveMob {
   private hopCooldown = 0;
   /** Forward push while airborne after a climb hop */
   private climbHopT = 0;
+  private climbDx = 0;
+  private climbDz = 0;
+  /** Seconds until next blink starts */
+  private blinkWait = 1 + Math.random() * 3;
+  /** Blink progress 0..1 while blinking; <0 when idle open */
+  private blinkT = -1;
+  /** Head yaw relative to body (radians) */
+  private headYaw = 0;
+  /** Cooldown before next curious look-at-player */
+  private lookCooldown = 2 + Math.random() * 5;
+  private headObj: THREE.Object3D | null = null;
 
   constructor(kindDef: KindDef, x: number, y: number, z: number) {
     this.def = kindDef;
@@ -337,6 +400,7 @@ class PassiveMob {
     this.mesh = buildMesh(kindDef.kind);
     this.mesh.scale.setScalar(kindDef.scale);
     this.shadow = createEntityShadow(kindDef.shadowR);
+    this.headObj = this.mesh.getObjectByName("head") ?? null;
     this.pickWander();
   }
 
@@ -411,12 +475,14 @@ class PassiveMob {
     this.hurtFlash = Math.max(0, this.hurtFlash - dt);
     this.hopCooldown = Math.max(0, this.hopCooldown - dt);
     this.climbHopT = Math.max(0, this.climbHopT - dt);
+    this.lookCooldown = Math.max(0, this.lookCooldown - dt);
 
     const pdx = player.x - this.x;
     const pdz = player.z - this.z;
     const pDist = Math.hypot(pdx, pdz);
+    const pYaw = Math.atan2(pdx, pdz);
 
-    // Rabbits / chickens spook easily
+    // Rabbits / chickens spook easily (breaks look)
     if (
       this.state !== "flee" &&
       pDist < this.def.notice &&
@@ -429,11 +495,42 @@ class PassiveMob {
       this.targetZ = this.z - (pdz / (pDist || 1)) * 10;
     }
 
-    if (this.stateT <= 0) this.pickWander();
+    // Occasionally stop and stare at a nearby player
+    if (
+      this.state !== "flee" &&
+      this.state !== "look" &&
+      this.lookCooldown <= 0 &&
+      pDist > 1.4 &&
+      pDist < this.def.notice * 1.15
+    ) {
+      // Pigs/cows/sheep more curious; prey animals less so
+      const chance =
+        this.kind === "rabbit" || this.kind === "chicken" ? 0.35 : 0.7;
+      if (Math.random() < chance) {
+        this.state = "look";
+        this.stateT =
+          this.kind === "rabbit" || this.kind === "chicken"
+            ? 1.2 + Math.random() * 1.8
+            : 2.5 + Math.random() * 4;
+        this.lookCooldown = 7 + Math.random() * 12;
+      } else {
+        this.lookCooldown = 2 + Math.random() * 4;
+      }
+    }
+
+    // End look if player leaves or timer done
+    if (this.state === "look") {
+      if (pDist > this.def.notice * 1.5 || pDist < 0.9) {
+        this.stateT = 0;
+      }
+    }
+
+    if (this.stateT <= 0 && this.state !== "flee") this.pickWander();
 
     let speed = 0;
     if (this.state === "wander") speed = this.def.speed;
     else if (this.state === "flee") speed = this.def.fleeSpeed;
+    // idle + look → stop
 
     const box = this.bodyBox();
     unstickEntity(world, box);
@@ -455,19 +552,31 @@ class PassiveMob {
         while (dyaw < -Math.PI) dyaw += Math.PI * 2;
         this.yaw += dyaw * Math.min(1, 6 * dt);
 
-        // Better air control during climb hops so they land on the block
-        const airMul = this.onGround ? 1 : this.climbHopT > 0 ? 0.85 : 0.35;
-        const step = speed * dt * airMul;
-        const dx = Math.sin(this.yaw) * step;
-        const dz = Math.cos(this.yaw) * step;
+        // Strong air control + directed push during climb hops
+        const climbing = this.climbHopT > 0;
+        const airMul = this.onGround ? 1 : climbing ? 1.35 : 0.4;
+        let step = speed * dt * airMul;
+        // Extra forward shove toward the ledge while cresting
+        if (climbing && !this.onGround) {
+          step = Math.max(step, 3.8 * dt);
+        }
+        let dx = Math.sin(this.yaw) * step;
+        let dz = Math.cos(this.yaw) * step;
+        if (climbing && (this.climbDx !== 0 || this.climbDz !== 0)) {
+          // Bias movement into the ledge, not just along yaw
+          const clen = Math.hypot(this.climbDx, this.climbDz) || 1;
+          const boost = 2.6 * dt * (this.climbHopT > 0.25 ? 1.2 : 0.85);
+          dx += (this.climbDx / clen) * boost;
+          dz += (this.climbDz / clen) * boost;
+        }
         const beforeX = box.x;
         const beforeZ = box.z;
-        const { blocked, canStep } = moveEntityXZ(world, box, dx, dz, 1.05);
+        const { blocked, canStep } = moveEntityXZ(world, box, dx, dz, 1.15);
         this.x = box.x;
         this.y = box.y;
         this.z = box.z;
 
-        // Climb: real hop instead of teleporting onto the ledge
+        // Climb: real hop — must clear ~1 block (v²/2g ≥ 1.15 @ g=28 → v≥8.0+)
         if (
           blocked &&
           canStep &&
@@ -475,20 +584,30 @@ class PassiveMob {
           this.hopCooldown <= 0 &&
           this.vy <= 0.05
         ) {
-          // Clear ~1 block with room to crest
-          this.vy = this.kind === "rabbit" || this.kind === "chicken" ? 8.2 : 7.4;
-          this.hopCooldown = 0.45;
-          this.climbHopT = 0.55;
+          // Clear 1-block ledge with margin (apex ≈ 1.6–1.9 blocks)
+          this.vy =
+            this.kind === "rabbit" || this.kind === "chicken" ? 11.2 : 10.4;
+          this.hopCooldown = 0.35;
+          this.climbHopT = 0.75;
+          this.climbDx = Math.sin(this.yaw);
+          this.climbDz = Math.cos(this.yaw);
+          // Nudge off the ground so the first gravity step goes up cleanly
+          this.y += 0.06;
+          box.y = this.y;
           this.onGround = false;
         }
 
         if (
           blocked ||
-          Math.hypot(box.x - beforeX, box.z - beforeZ) < step * 0.15
+          Math.hypot(box.x - beforeX, box.z - beforeZ) < step * 0.12
         ) {
           this.stuckT += dt;
-          // Only repath if we can't climb — don't give up on a hop-able ledge
-          if (this.stuckT > 0.55 && !(canStep && this.hopCooldown > 0)) {
+          // Don't repath while climbing or when a hop is available
+          if (
+            this.stuckT > 0.7 &&
+            !climbing &&
+            !(canStep && this.hopCooldown <= 0.05)
+          ) {
             this.stuckT = 0;
             this.pickWander();
             this.yaw += (Math.random() - 0.5) * Math.PI;
@@ -497,6 +616,29 @@ class PassiveMob {
           this.stuckT = 0;
         }
       }
+    }
+
+    // Head look / ease back to center
+    {
+      const maxHead = 0.95; // ~54°
+      let targetHead = 0;
+      if (this.state === "look" && pDist > 0.5) {
+        // Desired facing toward player, relative to body
+        let rel = pYaw - this.yaw;
+        while (rel > Math.PI) rel -= Math.PI * 2;
+        while (rel < -Math.PI) rel += Math.PI * 2;
+        targetHead = Math.max(-maxHead, Math.min(maxHead, rel));
+        // Slow body turn so they square up a bit while watching
+        this.yaw += rel * Math.min(1, 1.8 * dt);
+        // Recompute head after body turned
+        rel = pYaw - this.yaw;
+        while (rel > Math.PI) rel -= Math.PI * 2;
+        while (rel < -Math.PI) rel += Math.PI * 2;
+        targetHead = Math.max(-maxHead, Math.min(maxHead, rel));
+      }
+      const turnRate = this.state === "look" ? 7 : 5;
+      this.headYaw += (targetHead - this.headYaw) * Math.min(1, turnRate * dt);
+      if (this.headObj) this.headObj.rotation.y = this.headYaw;
     }
 
     // Gravity / fall — never snap to surface
@@ -525,6 +667,31 @@ class PassiveMob {
 
     this.mesh.position.set(this.x, this.y + this.hop, this.z);
     this.mesh.rotation.y = this.yaw;
+
+    // Blinking — quick close/open every few seconds
+    if (this.blinkT >= 0) {
+      this.blinkT += dt;
+      const dur = 0.14;
+      // 0→1→0 over `dur` seconds
+      const u = Math.min(1, this.blinkT / dur);
+      const close = u < 0.45 ? u / 0.45 : u < 0.55 ? 1 : 1 - (u - 0.55) / 0.45;
+      setEyeOpen(this.mesh, 1 - close * 0.96);
+      if (this.blinkT >= dur) {
+        this.blinkT = -1;
+        setEyeOpen(this.mesh, 1);
+        // Occasional double-blink
+        this.blinkWait =
+          Math.random() < 0.18
+            ? 0.12 + Math.random() * 0.15
+            : 2.2 + Math.random() * 4.5;
+      }
+    } else {
+      this.blinkWait -= dt;
+      if (this.blinkWait <= 0) {
+        this.blinkT = 0;
+      }
+    }
+
     if (this.hurtFlash > 0) {
       this.mesh.traverse((o) => {
         if (

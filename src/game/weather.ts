@@ -49,8 +49,16 @@ type Splash = {
 type LightningBolt = { mesh: THREE.Line; life: number };
 
 type FlashPulse = {
-  t: number; duration: number; peak: number;
-  sx: number; sy: number; sz: number;
+  /** Seconds until pulse starts */
+  delay: number;
+  /** Active lit duration (seconds) */
+  duration: number;
+  /** Elapsed since created */
+  age: number;
+  peak: number;
+  sx: number;
+  sy: number;
+  sz: number;
 };
 
 const SKY_CLEAR = new THREE.Color(0x5ba3d9);
@@ -104,12 +112,15 @@ if (wind > 0.001) {
   float phase = uTime * freq + position.x * 0.55 + position.z * 0.48 + position.y * 0.2;
   float gust = sin(uTime * (1.3 + wLen * 0.2) + position.x * 0.9) * 0.5 + 0.5;
   float gustMul = 0.88 + gust * 0.2 * smoothstep(1.0, 2.8, wLen);
-  float sway = sin(phase) * wind * gustMul;
-  float sway2 = cos(phase * 1.37 + 1.7) * wind * gustMul;
+  // wind attribute: leaves ≈ uniform 1 (rigid sway); plants = 0 at stem → 1 at tip (shear)
+  float w = wind;
+  float sway = sin(phase) * w * gustMul;
+  float sway2 = cos(phase * 1.37 + 1.7) * w * gustMul;
   vec2 wDir = wLen > 0.001 ? uWind / wLen : vec2(0.2, 0.1);
   transformed.x += wDir.x * sway * amp + sway2 * amp * 0.16;
   transformed.z += wDir.y * sway * amp + sway * amp * 0.12;
-  transformed.y += sway2 * amp * (0.035 + wLen * 0.01) * wind;
+  // Keep vertical bob tiny so planted stems don't hop
+  transformed.y += sway2 * amp * (0.02 + wLen * 0.008) * w;
 }
 `;
 
@@ -143,7 +154,7 @@ ${WIND_VERT_DISPLACE}`,
 export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
   update: (time: number, windX: number, windZ: number) => void;
 } {
-  material.customProgramCacheKey = () => "block-leaf-wind-v6";
+  material.customProgramCacheKey = () => "block-leaf-wind-v7-plant-shear";
   material.onBeforeCompile = (shader) => {
     injectWindIntoShader(shader);
   };
@@ -153,7 +164,7 @@ export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
     depthPacking: THREE.RGBADepthPacking,
     alphaTest: material.alphaTest > 0 ? material.alphaTest : 0.5,
   });
-  depthMat.customProgramCacheKey = () => "block-leaf-wind-depth-v6";
+  depthMat.customProgramCacheKey = () => "block-leaf-wind-depth-v7-plant-shear";
   depthMat.onBeforeCompile = (shader) => {
     injectWindIntoShader(shader);
   };
@@ -202,14 +213,15 @@ export class WeatherSystem {
 
   private rain: RainDrop[] = [];
   private splashes: Splash[] = [];
+  /** Line segment positions: 2 verts × 3 floats per drop */
   private rainPositions: Float32Array;
   private rainGeom: THREE.BufferGeometry;
-  private rainPoints: THREE.Points;
+  private rainLines: THREE.LineSegments;
   private splashPositions: Float32Array;
   private splashGeom: THREE.BufferGeometry;
   private splashPoints: THREE.Points;
-  private readonly maxRain = 900;
-  private readonly maxSplash = 350;
+  private readonly maxRain = 2000;
+  private readonly maxSplash = 650;
 
   private bolts: LightningBolt[] = [];
   private flashMain: THREE.DirectionalLight;
@@ -286,37 +298,76 @@ export class WeatherSystem {
     this.cloudMesh.renderOrder = -1;
     this.group.add(this.cloudMesh);
 
-    this.rainPositions = new Float32Array(this.maxRain * 3);
+    // Rain as line streaks (head → tail along velocity)
+    this.rainPositions = new Float32Array(this.maxRain * 6);
     this.rainGeom = new THREE.BufferGeometry();
-    this.rainGeom.setAttribute("position", new THREE.BufferAttribute(this.rainPositions, 3));
-    this.rainPoints = new THREE.Points(this.rainGeom, new THREE.PointsMaterial({
-      color: 0xd0e4f5, size: 0.045, transparent: true, opacity: 0.5,
-      depthWrite: false, sizeAttenuation: true, fog: true,
-    }));
-    this.rainPoints.frustumCulled = false; this.rainPoints.renderOrder = 1;
-    this.group.add(this.rainPoints);
+    this.rainGeom.setAttribute(
+      "position",
+      new THREE.BufferAttribute(this.rainPositions, 3),
+    );
+    this.rainLines = new THREE.LineSegments(
+      this.rainGeom,
+      new THREE.LineBasicMaterial({
+        color: 0xb8d4ee,
+        transparent: true,
+        opacity: 0.45,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    this.rainLines.frustumCulled = false;
+    this.rainLines.renderOrder = 1;
+    this.group.add(this.rainLines);
     for (let i = 0; i < this.maxRain; i++) {
-      this.rain.push({ x:0,y:0,z:0,vx:0,vy:0,vz:0,life:0,maxLife:1,bouncing:false,active:false });
+      this.rain.push({
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0,
+        maxLife: 1,
+        bouncing: false,
+        active: false,
+      });
     }
 
     this.splashPositions = new Float32Array(this.maxSplash * 3);
     this.splashGeom = new THREE.BufferGeometry();
-    this.splashGeom.setAttribute("position", new THREE.BufferAttribute(this.splashPositions, 3));
-    this.splashPoints = new THREE.Points(this.splashGeom, new THREE.PointsMaterial({
-      color: 0xd8e8f4, size: 0.04, transparent: true, opacity: 0.55,
-      depthWrite: false, sizeAttenuation: true, fog: true,
-    }));
+    this.splashGeom.setAttribute(
+      "position",
+      new THREE.BufferAttribute(this.splashPositions, 3),
+    );
+    this.splashPoints = new THREE.Points(
+      this.splashGeom,
+      new THREE.PointsMaterial({
+        color: 0xd8e8f4,
+        size: 0.05,
+        transparent: true,
+        opacity: 0.6,
+        depthWrite: false,
+        sizeAttenuation: true,
+        fog: true,
+      }),
+    );
     this.splashPoints.frustumCulled = false;
     this.group.add(this.splashPoints);
     for (let i = 0; i < this.maxSplash; i++) {
-      this.splashes.push({ x:0,y:0,z:0,vx:0,vy:0,vz:0,life:0,active:false });
+      this.splashes.push({
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0,
+        active: false,
+      });
     }
 
-    this.cells.push(this.makeCell(8, 12, "rain", 0.75, 32));
-    this.cells.push(this.makeCell(-40, 25, "storm", 0.95, 38));
-    this.cells.push(this.makeCell(55, -30, "storm", 0.8, 34));
-    this.cells.push(this.makeCell(20, 70, "overcast", 0.55, 42));
-    this.cells.push(this.makeCell(-70, -40, "rain", 0.6, 28));
+    // Poisson-disk seed: evenly spaced systems, no stacked banks
+    this.seedWeatherFromPoisson(0, 0);
     this.scene.add(this.group);
   }
 
@@ -334,14 +385,33 @@ export class WeatherSystem {
       hash2(gx * 0.09 + 40, gz * 0.09, this.seed + 9) * 0.35;
   }
 
-  /** Stable altitude plane so overlapping systems don't z-fight in one sheet. */
+  /** Stable altitude plane — unique lane per active system to avoid z-fight. */
   private cloudDeckY(cell: WeatherCell): number {
     const kindBias =
-      cell.kind === "storm" ? 5.5 :
-      cell.kind === "rain" ? 1.5 :
-      cell.kind === "overcast" ? -2.5 : 0;
-    const lane = ((cell.id * 7 + 3) % 5) - 2; // -2..+2
-    return this.cloudY + kindBias + lane * this.cloudDeckGap;
+      cell.kind === "storm"
+        ? 6
+        : cell.kind === "rain"
+          ? 1.2
+          : cell.kind === "overcast"
+            ? -2.8
+            : 0;
+    // Deterministic lane from id; also offset by rank among living cells
+    const peers = this.cells
+      .filter((c) => c.kind !== "clear")
+      .sort((a, b) => a.id - b.id);
+    const rank = Math.max(
+      0,
+      peers.findIndex((c) => c.id === cell.id),
+    );
+    const lane = rank - (peers.length - 1) * 0.5;
+    // Extra hash-ish spread so same-rank never shares a plane
+    const idLane = ((cell.id * 7 + 3) % 5) - 2;
+    return (
+      this.cloudY +
+      kindBias +
+      lane * this.cloudDeckGap * 1.35 +
+      idLane * 0.55
+    );
   }
 
   private fairCloudDeckY(): number {
@@ -418,15 +488,409 @@ export class WeatherSystem {
     return { cover: Math.min(1, cover), dark: Math.min(1, dark), layers: Math.min(3, layers), front: Math.min(1, front) };
   }
 
-  private makeCell(x: number, z: number, kind: WeatherKind, intensity: number, radius: number): WeatherCell {
-    const ang = Math.random() * Math.PI * 2;
-    const spd = kind === "storm" ? 0.7 + Math.random() * 0.45 : 0.5 + Math.random() * 0.7;
+  /**
+   * Minimum center distance so cloud banks / rain sheets don't interpenetrate.
+   * Storms get extra padding — they're the worst z-fighters.
+   */
+  private minCenterDist(a: WeatherCell, b: WeatherCell): number {
+    let pad = 28;
+    if (a.kind === "storm" || b.kind === "storm") pad = 48;
+    if (a.kind === "storm" && b.kind === "storm") pad = 72;
+    return a.radius * 0.9 + b.radius * 0.9 + pad;
+  }
+
+  private occupiesSpace(c: WeatherCell): boolean {
+    return c.kind !== "clear";
+  }
+
+  /** Typical exclusion radius used for Poisson min-distance (kind-aware). */
+  private poissonMinDistFor(kind: WeatherKind, radius: number): number {
+    if (kind === "storm") return radius * 1.85 + 70;
+    if (kind === "rain") return radius * 1.7 + 40;
+    if (kind === "overcast") return radius * 1.55 + 32;
+    return radius + 20;
+  }
+
+  /**
+   * Bridson Poisson-disk samples in an annulus around (cx, cz).
+   * Points are ≥ minDist apart and lie in [rInner, rOuter] from center.
+   * Also rejected if too close to existing weather cells (occupancy).
+   */
+  private poissonDiskAnnulus(
+    cx: number,
+    cz: number,
+    rInner: number,
+    rOuter: number,
+    minDist: number,
+    maxPoints: number,
+    ignoreId = -1,
+  ): { x: number; z: number }[] {
+    if (minDist <= 1 || maxPoints <= 0 || rOuter <= rInner) return [];
+
+    const cellSize = minDist / Math.SQRT2;
+    const originX = cx - rOuter;
+    const originZ = cz - rOuter;
+    const gridW = Math.ceil((rOuter * 2) / cellSize) + 2;
+    const gridH = gridW;
+    const grid = new Int32Array(gridW * gridH).fill(-1);
+    const points: { x: number; z: number }[] = [];
+    const active: number[] = [];
+
+    const inAnnulus = (x: number, z: number) => {
+      const d = Math.hypot(x - cx, z - cz);
+      return d >= rInner && d <= rOuter;
+    };
+
+    const gridIndex = (x: number, z: number) => {
+      const gx = Math.floor((x - originX) / cellSize);
+      const gz = Math.floor((z - originZ) / cellSize);
+      if (gx < 0 || gz < 0 || gx >= gridW || gz >= gridH) return -1;
+      return gz * gridW + gx;
+    };
+
+    const farFromSamples = (x: number, z: number) => {
+      const gx = Math.floor((x - originX) / cellSize);
+      const gz = Math.floor((z - originZ) / cellSize);
+      for (let iz = gz - 2; iz <= gz + 2; iz++) {
+        for (let ix = gx - 2; ix <= gx + 2; ix++) {
+          if (ix < 0 || iz < 0 || ix >= gridW || iz >= gridH) continue;
+          const pi = grid[iz * gridW + ix]!;
+          if (pi < 0) continue;
+          const p = points[pi]!;
+          if (Math.hypot(p.x - x, p.z - z) < minDist) return false;
+        }
+      }
+      return true;
+    };
+
+    const farFromCells = (x: number, z: number) => {
+      // Treat candidate as ~storm-scale so banks stay clear
+      const probeR = minDist * 0.42;
+      for (const c of this.cells) {
+        if (c.id === ignoreId || !this.occupiesSpace(c)) continue;
+        const need = c.radius * 0.9 + probeR + (c.kind === "storm" ? 48 : 28);
+        if (Math.hypot(c.x - x, c.z - z) < need) return false;
+      }
+      return true;
+    };
+
+    const tryAdd = (x: number, z: number): boolean => {
+      if (!inAnnulus(x, z)) return false;
+      if (!farFromSamples(x, z)) return false;
+      if (!farFromCells(x, z)) return false;
+      const idx = points.length;
+      points.push({ x, z });
+      active.push(idx);
+      const gi = gridIndex(x, z);
+      if (gi >= 0) grid[gi] = idx;
+      return true;
+    };
+
+    // Seed first point (uniform in annulus)
+    for (let s = 0; s < 48 && points.length === 0; s++) {
+      const ang = Math.random() * Math.PI * 2;
+      const rr = Math.sqrt(
+        rInner * rInner +
+          Math.random() * (rOuter * rOuter - rInner * rInner),
+      );
+      tryAdd(cx + Math.cos(ang) * rr, cz + Math.sin(ang) * rr);
+    }
+    if (points.length === 0) return [];
+
+    // Bridson: spawn up to k candidates in ring [minDist, 2*minDist]
+    const k = 30;
+    while (active.length > 0 && points.length < maxPoints) {
+      const ai = Math.floor(Math.random() * active.length);
+      const p = points[active[ai]!]!;
+      let found = false;
+      for (let n = 0; n < k; n++) {
+        const ang = Math.random() * Math.PI * 2;
+        const rad = minDist * (1 + Math.random());
+        if (tryAdd(p.x + Math.cos(ang) * rad, p.z + Math.sin(ang) * rad)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) active.splice(ai, 1);
+    }
+    return points;
+  }
+
+  private pickKindForSlot(slot: number, stormCount: number): {
+    kind: WeatherKind;
+    radius: number;
+    intensity: number;
+  } {
+    // Prefer a couple of storms first, then mix rain / overcast
+    if (slot < 2 && stormCount < 2) {
+      return {
+        kind: "storm",
+        radius: 95 + Math.random() * 55,
+        intensity: 0.75 + Math.random() * 0.25,
+      };
+    }
+    const roll = Math.random();
+    if (roll < 0.35) {
+      return {
+        kind: "rain",
+        radius: 55 + Math.random() * 40,
+        intensity: 0.55 + Math.random() * 0.4,
+      };
+    }
+    if (roll < 0.7) {
+      return {
+        kind: "overcast",
+        radius: 70 + Math.random() * 45,
+        intensity: 0.45 + Math.random() * 0.35,
+      };
+    }
+    if (stormCount < 2 && roll < 0.85) {
+      return {
+        kind: "storm",
+        radius: 95 + Math.random() * 50,
+        intensity: 0.7 + Math.random() * 0.28,
+      };
+    }
     return {
-      id: nextCellId++, x, z, radius,
-      core: kind === "storm" ? 0.36 : kind === "rain" ? 0.52 : 0.5,
-      kind, intensity,
-      vx: Math.cos(ang) * spd, vz: Math.sin(ang) * spd,
-      age: 0, life: 90 + Math.random() * 180,
+      kind: "rain",
+      radius: 50 + Math.random() * 35,
+      intensity: 0.5 + Math.random() * 0.4,
+    };
+  }
+
+  /** Initial Poisson layout around a world center. */
+  private seedWeatherFromPoisson(cx: number, cz: number): void {
+    this.cells = [];
+    // minDist ~200 keeps large storm cores from overlapping at seed
+    const pts = this.poissonDiskAnnulus(cx, cz, 50, 340, 210, 6);
+    let storms = 0;
+    let i = 0;
+    for (const p of pts) {
+      const spec = this.pickKindForSlot(i, storms);
+      if (spec.kind === "storm") storms++;
+      // Validate with real radius/kind (Poisson used conservative minDist)
+      if (!this.canPlaceSystem(p.x, p.z, spec.radius, spec.kind)) {
+        // Try a smaller rain system in the same slot
+        const fallbackR = 50 + Math.random() * 30;
+        if (this.canPlaceSystem(p.x, p.z, fallbackR, "rain")) {
+          this.cells.push(
+            this.makeCell(p.x, p.z, "rain", 0.6 + Math.random() * 0.3, fallbackR),
+          );
+        }
+        i++;
+        continue;
+      }
+      this.cells.push(
+        this.makeCell(p.x, p.z, spec.kind, spec.intensity, spec.radius),
+      );
+      i++;
+    }
+    // Guarantee at least one storm if Poisson was sparse
+    if (!this.cells.some((c) => c.kind === "storm")) {
+      const extra = this.poissonDiskAnnulus(cx, cz, 80, 280, 240, 3);
+      const p = extra[0];
+      if (p) {
+        this.cells.push(
+          this.makeCell(p.x, p.z, "storm", 0.9, 110 + Math.random() * 30),
+        );
+      }
+    }
+    this.separateCellsHard();
+  }
+
+  /** True if a candidate placement is clear of other systems. */
+  private canPlaceSystem(
+    x: number,
+    z: number,
+    radius: number,
+    kind: WeatherKind,
+    ignoreId = -1,
+  ): boolean {
+    if (kind === "clear") return true;
+    if (kind === "storm") {
+      const storms = this.cells.filter(
+        (c) => c.kind === "storm" && c.id !== ignoreId,
+      ).length;
+      if (storms >= 2) return false;
+    }
+    const probe: WeatherCell = {
+      id: -1,
+      x,
+      z,
+      radius,
+      core: 0.3,
+      kind,
+      intensity: 1,
+      vx: 0,
+      vz: 0,
+      age: 0,
+      life: 1,
+      nextStrike: 999,
+    };
+    for (const c of this.cells) {
+      if (c.id === ignoreId || !this.occupiesSpace(c)) continue;
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d < this.minCenterDist(probe, c)) return false;
+    }
+    return true;
+  }
+
+  /** One-shot push so residual overlaps get cleaned up. */
+  private separateCellsHard(): void {
+    const active = this.cells.filter((c) => this.occupiesSpace(c));
+    for (let iter = 0; iter < 8; iter++) {
+      let moved = false;
+      for (let i = 0; i < active.length; i++) {
+        for (let j = i + 1; j < active.length; j++) {
+          const a = active[i]!;
+          const b = active[j]!;
+          const dx = b.x - a.x;
+          const dz = b.z - a.z;
+          let d = Math.hypot(dx, dz);
+          const need = this.minCenterDist(a, b);
+          if (d >= need) continue;
+          if (d < 0.01) {
+            const ang = Math.random() * Math.PI * 2;
+            a.x -= Math.cos(ang) * need * 0.5;
+            a.z -= Math.sin(ang) * need * 0.5;
+            b.x += Math.cos(ang) * need * 0.5;
+            b.z += Math.sin(ang) * need * 0.5;
+            moved = true;
+            continue;
+          }
+          const push = (need - d) * 0.55;
+          const nx = dx / d;
+          const nz = dz / d;
+          a.x -= nx * push;
+          a.z -= nz * push;
+          b.x += nx * push;
+          b.z += nz * push;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
+  /** Soft repulsion if drift starts to close gaps (safety net under Poisson). */
+  private separateCellsSoft(dt: number): void {
+    const active = this.cells.filter((c) => this.occupiesSpace(c));
+    for (let i = 0; i < active.length; i++) {
+      for (let j = i + 1; j < active.length; j++) {
+        const a = active[i]!;
+        const b = active[j]!;
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const d = Math.hypot(dx, dz) || 0.01;
+        const need = this.minCenterDist(a, b);
+        if (d >= need) continue;
+        const overlap = (need - d) / need;
+        const nx = dx / d;
+        const nz = dz / d;
+        const posPush = overlap * overlap * 18 * dt;
+        a.x -= nx * posPush;
+        a.z -= nz * posPush;
+        b.x += nx * posPush;
+        b.z += nz * posPush;
+        const vPush =
+          (0.35 + (a.kind === "storm" || b.kind === "storm" ? 0.25 : 0)) *
+          overlap *
+          dt *
+          2.5;
+        a.vx -= nx * vPush;
+        a.vz -= nz * vPush;
+        b.vx += nx * vPush;
+        b.vz += nz * vPush;
+      }
+    }
+  }
+
+  /**
+   * Place a new system (or relocate one) using Poisson candidates around player.
+   * Returns true if a position was found.
+   */
+  private placeFromPoisson(
+    px: number,
+    pz: number,
+    kind: WeatherKind,
+    radius: number,
+    ignoreId = -1,
+  ): { x: number; z: number } | null {
+    const minDist = this.poissonMinDistFor(kind, radius);
+    const rInner = Math.max(70, radius * 0.7);
+    const rOuter = Math.max(rInner + 80, 120 + radius * 1.2);
+    const cands = this.poissonDiskAnnulus(
+      px,
+      pz,
+      rInner,
+      rOuter,
+      minDist,
+      10,
+      ignoreId,
+    );
+    // Shuffle lightly so we don't always pick the first Bridson seed
+    for (let i = cands.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = cands[i]!;
+      cands[i] = cands[j]!;
+      cands[j] = t;
+    }
+    for (const c of cands) {
+      if (this.canPlaceSystem(c.x, c.z, radius, kind, ignoreId)) {
+        return c;
+      }
+    }
+    // Fallback: denser sample with smaller minDist
+    const loose = this.poissonDiskAnnulus(
+      px,
+      pz,
+      rInner * 0.85,
+      rOuter * 1.15,
+      minDist * 0.75,
+      12,
+      ignoreId,
+    );
+    for (const c of loose) {
+      if (this.canPlaceSystem(c.x, c.z, radius, kind, ignoreId)) {
+        return c;
+      }
+    }
+    return null;
+  }
+
+  private makeCell(
+    x: number,
+    z: number,
+    kind: WeatherKind,
+    intensity: number,
+    radius: number,
+  ): WeatherCell {
+    const ang = Math.random() * Math.PI * 2;
+    // Storms drift slowly so a large system can sit over the player for minutes
+    const spd =
+      kind === "storm"
+        ? 0.22 + Math.random() * 0.2
+        : kind === "rain"
+          ? 0.35 + Math.random() * 0.25
+          : 0.4 + Math.random() * 0.35;
+    const life =
+      kind === "storm"
+        ? 420 + Math.random() * 420 // 7–14 minutes
+        : kind === "rain"
+          ? 240 + Math.random() * 240
+          : 120 + Math.random() * 180;
+    return {
+      id: nextCellId++,
+      x,
+      z,
+      radius,
+      core: kind === "storm" ? 0.28 : kind === "rain" ? 0.48 : 0.5,
+      kind,
+      intensity,
+      vx: Math.cos(ang) * spd,
+      vz: Math.sin(ang) * spd,
+      age: 0,
+      life,
       nextStrike: kind === "storm" ? 1 + Math.random() * 3 : 9999,
     };
   }
@@ -547,15 +1011,39 @@ export class WeatherSystem {
       cell.age += dt;
       cell.x += cell.vx * dt;
       cell.z += cell.vz * dt;
-      cell.vx += Math.sin(this.time * 0.2 + cell.id) * 0.06 * dt;
-      cell.vz += Math.cos(this.time * 0.17 + cell.id * 2) * 0.06 * dt;
+      // Gentle steering — keep storms slow
+      const steer =
+        cell.kind === "storm" ? 0.018 : cell.kind === "rain" ? 0.035 : 0.05;
+      cell.vx += Math.sin(this.time * 0.12 + cell.id) * steer * dt;
+      cell.vz += Math.cos(this.time * 0.1 + cell.id * 2) * steer * dt;
       const spd = Math.hypot(cell.vx, cell.vz);
-      const maxSpd = cell.kind === "storm" ? 1.4 : 1.1;
-      if (spd > maxSpd) { cell.vx = (cell.vx / spd) * maxSpd; cell.vz = (cell.vz / spd) * maxSpd; }
-      const dx = cell.x - px, dz = cell.z - pz, dist = Math.hypot(dx, dz);
-      if (dist > 160) {
-        cell.x = px - (dx / dist) * (90 + Math.random() * 40);
-        cell.z = pz - (dz / dist) * (90 + Math.random() * 40);
+      const maxSpd =
+        cell.kind === "storm" ? 0.48 : cell.kind === "rain" ? 0.75 : 1.0;
+      if (spd > maxSpd) {
+        cell.vx = (cell.vx / spd) * maxSpd;
+        cell.vz = (cell.vz / spd) * maxSpd;
+      }
+      const dx = cell.x - px,
+        dz = cell.z - pz,
+        dist = Math.hypot(dx, dz);
+      // Recycle far systems via Poisson so they re-enter on a clean slot
+      const recycleAt = Math.max(220, cell.radius * 2.8);
+      if (dist > recycleAt) {
+        const pos = this.placeFromPoisson(
+          px,
+          pz,
+          cell.kind,
+          cell.radius,
+          cell.id,
+        );
+        if (pos) {
+          cell.x = pos.x;
+          cell.z = pos.z;
+        } else {
+          const place = Math.max(cell.radius * 1.1, 100 + Math.random() * 50);
+          cell.x = px - (dx / (dist || 1)) * place;
+          cell.z = pz - (dz / (dist || 1)) * place;
+        }
       }
       if (cell.kind === "storm") {
         cell.nextStrike -= dt;
@@ -566,18 +1054,35 @@ export class WeatherSystem {
       }
     }
 
+    // Safety net if drift closes gaps
+    this.separateCellsSoft(dt);
+
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0) {
-      this.spawnTimer = 18 + Math.random() * 25;
+      this.spawnTimer = 22 + Math.random() * 30;
+      // Expire old non-storm systems first
+      this.cells = this.cells.filter(
+        (c) => c.age < c.life || c.kind === "storm",
+      );
+
       if (this.cells.length < 6) {
-        const ang = Math.random() * Math.PI * 2;
-        const dist = 50 + Math.random() * 70;
-        const roll = Math.random();
-        const kind: WeatherKind = roll < 0.2 ? "storm" : roll < 0.5 ? "rain" : roll < 0.75 ? "overcast" : "clear";
-        this.cells.push(this.makeCell(px + Math.cos(ang) * dist, pz + Math.sin(ang) * dist, kind, 0.45 + Math.random() * 0.5, 22 + Math.random() * 28));
+        const storms = this.cells.filter((c) => c.kind === "storm").length;
+        const spec = this.pickKindForSlot(this.cells.length, storms);
+        const pos = this.placeFromPoisson(px, pz, spec.kind, spec.radius);
+        if (pos) {
+          this.cells.push(
+            this.makeCell(
+              pos.x,
+              pos.z,
+              spec.kind,
+              spec.intensity,
+              spec.radius,
+            ),
+          );
+        }
       }
-      this.cells = this.cells.filter((c) => c.age < c.life || c.kind === "storm");
       if (this.cells.length > 7) this.cells.length = 7;
+      this.separateCellsHard();
     }
 
     const local = this.sampleAt(px, pz);
@@ -593,26 +1098,79 @@ export class WeatherSystem {
   private triggerLocalFlash(strikeX: number, strikeY: number, strikeZ: number, strength: number): void {
     if (strength < 0.08) return;
     const s = Math.max(0, Math.min(1, strength));
-    // Punchier multi-pulse: bright spike → dark → secondary flash
+    // Multi-pulse sequence lasting several frames each (readable at 30–60 fps)
+    // Timeline ~0.55s: hard open → hold → flicker → secondary → afterglow
     this.flashPulses.push(
-      { t: 0.035, duration: 0.035, peak: 1.05 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
-      { t: 0.07, duration: 0.05, peak: 0.12 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
-      { t: 0.05, duration: 0.05, peak: 0.7 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
-      { t: 0.09, duration: 0.08, peak: 0.25 * s, sx: strikeX, sy: strikeY, sz: strikeZ },
+      {
+        delay: 0,
+        duration: 0.14,
+        age: 0,
+        peak: 1.1 * s,
+        sx: strikeX,
+        sy: strikeY,
+        sz: strikeZ,
+      },
+      {
+        delay: 0.1,
+        duration: 0.08,
+        age: 0,
+        peak: 0.18 * s,
+        sx: strikeX,
+        sy: strikeY,
+        sz: strikeZ,
+      },
+      {
+        delay: 0.16,
+        duration: 0.18,
+        age: 0,
+        peak: 0.85 * s,
+        sx: strikeX,
+        sy: strikeY,
+        sz: strikeZ,
+      },
+      {
+        delay: 0.32,
+        duration: 0.22,
+        age: 0,
+        peak: 0.4 * s,
+        sx: strikeX,
+        sy: strikeY,
+        sz: strikeZ,
+      },
+      {
+        delay: 0.48,
+        duration: 0.2,
+        age: 0,
+        peak: 0.16 * s,
+        sx: strikeX,
+        sy: strikeY,
+        sz: strikeZ,
+      },
     );
-    const pl = new THREE.PointLight(0xe8f0ff, 0, 52, 1.8);
+    const pl = new THREE.PointLight(0xe8f0ff, 0, 56, 1.7);
     pl.position.set(strikeX, strikeY + 6, strikeZ);
     this.scene.add(pl);
     this.flashPoints.push(pl);
-    // Quick intensity pop on the point light
-    pl.intensity = 18 * s;
-    window.setTimeout(() => { pl.intensity = 6 * s; }, 40);
-    window.setTimeout(() => { pl.intensity = 14 * s; }, 90);
+    // Match point-light lifetime to the pulse train (~0.7s)
+    pl.intensity = 16 * s;
     window.setTimeout(() => {
-      this.scene.remove(pl); pl.dispose();
+      pl.intensity = 5 * s;
+    }, 80);
+    window.setTimeout(() => {
+      pl.intensity = 12 * s;
+    }, 160);
+    window.setTimeout(() => {
+      pl.intensity = 4 * s;
+    }, 320);
+    window.setTimeout(() => {
+      pl.intensity = 7 * s;
+    }, 420);
+    window.setTimeout(() => {
+      this.scene.remove(pl);
+      pl.dispose();
       const idx = this.flashPoints.indexOf(pl);
       if (idx >= 0) this.flashPoints.splice(idx, 1);
-    }, 320);
+    }, 720);
   }
 
   private aimFlashLights(sx: number, sy: number, sz: number, _px: number, _py: number, _pz: number): void {
@@ -632,28 +1190,45 @@ export class WeatherSystem {
   }
 
   private updateFlashLights(dt: number, px: number, py: number, pz: number): void {
-    let mainI = 0, fillI = 0, ambI = 0, skyFlash = 0, pointI = 0;
+    let mainI = 0,
+      fillI = 0,
+      ambI = 0,
+      skyFlash = 0,
+      pointI = 0;
     for (let i = this.flashPulses.length - 1; i >= 0; i--) {
       const p = this.flashPulses[i]!;
-      p.t -= dt;
-      const u = 1 - Math.max(0, p.t) / p.duration;
-      const envelope = u < 0.12 ? u / 0.12 : 1 - (u - 0.12) / 0.88;
-      const e = Math.max(0, envelope) * p.peak;
+      p.age += dt;
+      const end = p.delay + p.duration;
+      if (p.age >= end) {
+        this.flashPulses.splice(i, 1);
+        continue;
+      }
+      if (p.age < p.delay) continue;
+
+      // Flat-top envelope: quick rise, hold most of the pulse, soft fall
+      // so flashes stay bright across several frames
+      const localT = (p.age - p.delay) / p.duration; // 0..1
+      let envelope: number;
+      if (localT < 0.1) envelope = localT / 0.1;
+      else if (localT < 0.72) envelope = 1;
+      else envelope = Math.max(0, 1 - (localT - 0.72) / 0.28);
+
+      const e = envelope * p.peak;
       const prox = this.flashProximity(Math.hypot(p.sx - px, p.sz - pz));
-      if (prox <= 0.001) { if (p.t <= 0) this.flashPulses.splice(i, 1); continue; }
+      if (prox <= 0.001) continue;
+
       mainI = Math.max(mainI, e * 1.75 * prox);
       fillI = Math.max(fillI, e * 0.65 * prox);
       ambI = Math.max(ambI, e * 0.32 * prox);
-      skyFlash = Math.max(skyFlash, e * 0.4 * prox);
+      skyFlash = Math.max(skyFlash, e * 0.42 * prox);
       pointI = Math.max(pointI, e * 18 * prox);
-      if (p.t <= 0) this.flashPulses.splice(i, 1);
-      else this.aimFlashLights(p.sx, p.sy, p.sz, px, py, pz);
+      this.aimFlashLights(p.sx, p.sy, p.sz, px, py, pz);
     }
     this.flashMain.intensity = mainI;
     this.flashFill.intensity = fillI;
     this.flashAmbient.intensity = ambI;
     this.flashAmount = skyFlash;
-    for (const pl of this.flashPoints) pl.intensity = pointI;
+    for (const pl of this.flashPoints) pl.intensity = Math.max(pl.intensity * 0.85, pointI);
     if (mainI > 0.01) {
       this.flashMain.color.setRGB(0.88, 0.92, 1.0);
       this.flashFill.color.setRGB(0.7, 0.78, 1.0);
@@ -745,9 +1320,9 @@ export class WeatherSystem {
     );
     const dayF = dn?.dayFactor ?? 1;
     const nightF = 1 - dayF;
-    // Brighter fill overall; storms still dim but stay playable
-    const ambFloor = 0.14 + dayF * 0.16;
-    const ambCeil = 0.32 + dayF * 0.42;
+    // Day stays playable-bright; night floor drops hard for a dark cool night
+    const ambFloor = 0.035 + dayF * 0.26;
+    const ambCeil = 0.18 + dayF * 0.56;
     this.ambient.intensity = Math.max(
       ambFloor,
       Math.min(
@@ -757,32 +1332,32 @@ export class WeatherSystem {
       ),
     );
     if (dn) {
-      // Day: soft warm-neutral · Night: readable blue (not near-black)
+      // Day: soft warm-neutral · Night: deep cool blue, not washed grey
       const r =
-        THREE.MathUtils.lerp(0.32, 0.82, dayF) -
+        THREE.MathUtils.lerp(0.14, 0.82, dayF) -
         localGrey * 0.06 +
         totalMie * 0.04 * dayF;
       const g =
-        THREE.MathUtils.lerp(0.4, 0.86, dayF) -
+        THREE.MathUtils.lerp(0.22, 0.86, dayF) -
         localGrey * 0.05 +
         totalMie * 0.03 * dayF;
       const b =
-        THREE.MathUtils.lerp(0.55, 0.94, dayF) - localGrey * 0.03;
+        THREE.MathUtils.lerp(0.42, 0.94, dayF) - localGrey * 0.03;
       this.ambient.color.setRGB(
-        Math.max(0.14, r),
-        Math.max(0.16, g),
-        Math.max(0.22, b),
+        Math.max(0.08, r),
+        Math.max(0.12, g),
+        Math.max(0.2, b),
       );
-      if (nightF > 0.2) {
-        this.ambient.color.lerp(new THREE.Color(0x2a4068), nightF * 0.4);
+      if (nightF > 0.15) {
+        this.ambient.color.lerp(new THREE.Color(0x0c1830), nightF * 0.65);
       }
     } else {
       this.ambient.color.setRGB(0.68, 0.76, 0.88);
     }
 
     const hemiMul = Math.max(0.6, 1 - localGrey * 0.22);
-    const hemiFloor = 0.1 + dayF * 0.12;
-    const hemiCeil = 0.28 + dayF * 0.4;
+    const hemiFloor = 0.03 + dayF * 0.19;
+    const hemiCeil = 0.16 + dayF * 0.52;
     this.hemi.intensity = Math.max(
       hemiFloor,
       Math.min(
@@ -795,12 +1370,15 @@ export class WeatherSystem {
       this.hemi.color.copy(dn.hemiSky);
       this.hemi.groundColor.copy(dn.hemiGround);
       if (localGrey > 0.35) {
-        this.hemi.color.lerp(new THREE.Color(0x7a8aa8), localGrey * 0.4);
-        this.hemi.groundColor.lerp(new THREE.Color(0x3a4438), localGrey * 0.35);
+        this.hemi.color.lerp(new THREE.Color(0x7a8aa8), localGrey * 0.4 * dayF);
+        this.hemi.groundColor.lerp(
+          new THREE.Color(0x3a4438),
+          localGrey * 0.35 * dayF,
+        );
       }
-      if (nightF > 0.25) {
-        this.hemi.color.lerp(new THREE.Color(0x243850), nightF * 0.3);
-        this.hemi.groundColor.lerp(new THREE.Color(0x121c28), nightF * 0.4);
+      if (nightF > 0.2) {
+        this.hemi.color.lerp(new THREE.Color(0x081428), nightF * 0.55);
+        this.hemi.groundColor.lerp(new THREE.Color(0x040a14), nightF * 0.65);
       }
     } else {
       this.hemi.color.set(localGrey > 0.4 ? 0x6a7a98 : 0xb8d8ff);
@@ -958,70 +1536,144 @@ export class WeatherSystem {
 
   private updateRain(dt: number, world: World, px: number, py: number, pz: number, local: WeatherSample): void {
     const rainAmt = local.rain;
-    const want = rainAmt > 0.05 ? Math.floor(this.maxRain * Math.min(1, rainAmt * 1.1)) : 0;
-    const windMul = 0.85 + local.windSpeed * 0.35;
+    const storm = local.storm;
+    // Core of a storm: near-max particles; light rain stays sparse
+    const density = Math.min(
+      1,
+      rainAmt * 0.55 + storm * 0.95 + rainAmt * storm * 0.5,
+    );
+    const want =
+      density > 0.04 ? Math.floor(this.maxRain * Math.min(1, density * 1.05)) : 0;
+    const windMul = 0.85 + local.windSpeed * 0.4 + storm * 0.35;
+    const spread = 22 + storm * 18 + rainAmt * 8;
+    const streakBase = 0.28 + rainAmt * 0.35 + storm * 1.15; // much longer in core
+
     let active = 0;
     for (const d of this.rain) if (d.active) active++;
-    const toSpawn = Math.min(40, want - active);
-    for (let s = 0; s < toSpawn; s++) {
+    // Burst-spawn hard in storms so the sheet fills quickly
+    const spawnBudget = Math.min(
+      want - active,
+      18 + Math.floor(rainAmt * 35 + storm * 90),
+    );
+    for (let s = 0; s < spawnBudget; s++) {
       const drop = this.rain.find((r) => !r.active);
       if (!drop) break;
-      drop.x = px + (Math.random() - 0.5) * 28;
-      drop.z = pz + (Math.random() - 0.5) * 28;
+      drop.x = px + (Math.random() - 0.5) * spread;
+      drop.z = pz + (Math.random() - 0.5) * spread;
       const cloudCeil = this.fairCloudDeckY() - 6;
-      const top = Math.min(cloudCeil, py + 14);
-      const bot = Math.min(top - 2, py + 6);
+      const top = Math.min(cloudCeil, py + 16 + storm * 6);
+      const bot = Math.min(top - 2, py + 5);
       drop.y = bot + Math.random() * Math.max(1, top - bot);
-      drop.vx = local.windX * windMul * 0.7 + (Math.random() - 0.5) * 0.25;
-      drop.vz = local.windZ * windMul * 0.7 + (Math.random() - 0.5) * 0.25;
-      drop.vy = -12 - Math.random() * 5 - local.storm * 3 - local.windSpeed * 0.25;
-      drop.life = 1.2 + Math.random() * 0.6;
-      drop.maxLife = drop.life; drop.bouncing = false; drop.active = true;
+      drop.vx =
+        local.windX * windMul * (0.75 + storm * 0.35) +
+        (Math.random() - 0.5) * (0.3 + storm * 0.4);
+      drop.vz =
+        local.windZ * windMul * (0.75 + storm * 0.35) +
+        (Math.random() - 0.5) * (0.3 + storm * 0.4);
+      // Faster fall in storm core → longer visual streaks
+      drop.vy =
+        -14 -
+        Math.random() * 6 -
+        storm * 10 -
+        rainAmt * 3 -
+        local.windSpeed * 0.35;
+      drop.life = 1.0 + Math.random() * 0.7 + storm * 0.25;
+      drop.maxLife = drop.life;
+      drop.bouncing = false;
+      drop.active = true;
     }
 
     let ri = 0;
     for (const d of this.rain) {
       if (!d.active) continue;
       d.life -= dt;
-      if (d.life <= 0) { d.active = false; continue; }
+      if (d.life <= 0) {
+        d.active = false;
+        continue;
+      }
       if (!d.bouncing) {
-        d.vx += local.windX * 1.4 * dt; d.vz += local.windZ * 1.4 * dt;
-        d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+        d.vx += local.windX * (1.4 + storm * 0.8) * dt;
+        d.vz += local.windZ * (1.4 + storm * 0.8) * dt;
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+        d.z += d.vz * dt;
         const surface = world.getSurfaceY(Math.floor(d.x), Math.floor(d.z));
         if (d.y <= surface + 0.05) {
           d.y = surface + 0.02;
-          this.spawnSplash(d.x, surface + 0.05, d.z, d.vx, d.vz);
-          if (Math.random() < 0.55) {
-            d.bouncing = true; d.vy = 1.8 + Math.random() * 2.5; d.vx *= 0.4; d.vz *= 0.4;
-            d.life = 0.25 + Math.random() * 0.2;
-          } else { d.active = false; continue; }
+          this.spawnSplash(d.x, surface + 0.05, d.z, d.vx, d.vz, storm);
+          if (Math.random() < 0.45 + storm * 0.15) {
+            d.bouncing = true;
+            d.vy = 1.6 + Math.random() * 2.2;
+            d.vx *= 0.35;
+            d.vz *= 0.35;
+            d.life = 0.2 + Math.random() * 0.18;
+          } else {
+            d.active = false;
+            continue;
+          }
         }
-        if (d.y < py - 20 || Math.hypot(d.x - px, d.z - pz) > 22) { d.active = false; continue; }
+        if (
+          d.y < py - 22 ||
+          Math.hypot(d.x - px, d.z - pz) > spread * 0.95
+        ) {
+          d.active = false;
+          continue;
+        }
       } else {
-        d.vy -= 18 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+        d.vy -= 18 * dt;
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+        d.z += d.vz * dt;
         const surface = world.getSurfaceY(Math.floor(d.x), Math.floor(d.z));
         if (d.y <= surface) {
-          this.spawnSplash(d.x, surface + 0.04, d.z, d.vx * 0.5, d.vz * 0.5);
-          d.active = false; continue;
+          this.spawnSplash(d.x, surface + 0.04, d.z, d.vx * 0.5, d.vz * 0.5, storm);
+          d.active = false;
+          continue;
         }
       }
-      this.rainPositions[ri * 3] = d.x;
-      this.rainPositions[ri * 3 + 1] = d.y;
-      this.rainPositions[ri * 3 + 2] = d.z;
+
+      // Streak: head at drop, tail opposite velocity
+      const spd = Math.hypot(d.vx, d.vy, d.vz) || 1;
+      const len =
+        streakBase *
+        (0.55 + Math.min(1.4, spd / 22)) *
+        (d.bouncing ? 0.25 : 1);
+      const tx = (d.vx / spd) * len;
+      const ty = (d.vy / spd) * len;
+      const tz = (d.vz / spd) * len;
+      const i = ri * 6;
+      this.rainPositions[i] = d.x;
+      this.rainPositions[i + 1] = d.y;
+      this.rainPositions[i + 2] = d.z;
+      this.rainPositions[i + 3] = d.x - tx;
+      this.rainPositions[i + 4] = d.y - ty;
+      this.rainPositions[i + 5] = d.z - tz;
       ri++;
     }
-    for (let i = ri; i < this.maxRain; i++) this.rainPositions[i * 3 + 1] = -999;
-    this.rainGeom.setDrawRange(0, ri);
+    // Hide unused segments
+    for (let i = ri; i < this.maxRain; i++) {
+      const j = i * 6;
+      this.rainPositions[j + 1] = -999;
+      this.rainPositions[j + 4] = -999;
+    }
+    this.rainGeom.setDrawRange(0, ri * 2);
     this.rainGeom.attributes.position!.needsUpdate = true;
-    this.rainPoints.visible = ri > 0 && rainAmt > 0.04;
-    (this.rainPoints.material as THREE.PointsMaterial).opacity = 0.3 + Math.min(0.4, rainAmt * 0.45);
+    this.rainLines.visible = ri > 0 && rainAmt > 0.03;
+    const mat = this.rainLines.material as THREE.LineBasicMaterial;
+    mat.opacity = 0.28 + Math.min(0.55, rainAmt * 0.35 + storm * 0.4);
 
     let si = 0;
     for (const sp of this.splashes) {
       if (!sp.active) continue;
-      sp.life -= dt; sp.vy -= 22 * dt;
-      sp.x += sp.vx * dt; sp.y += sp.vy * dt; sp.z += sp.vz * dt;
-      if (sp.life <= 0 || sp.y < py - 5) { sp.active = false; continue; }
+      sp.life -= dt;
+      sp.vy -= 22 * dt;
+      sp.x += sp.vx * dt;
+      sp.y += sp.vy * dt;
+      sp.z += sp.vz * dt;
+      if (sp.life <= 0 || sp.y < py - 5) {
+        sp.active = false;
+        continue;
+      }
       this.splashPositions[si * 3] = sp.x;
       this.splashPositions[si * 3 + 1] = sp.y;
       this.splashPositions[si * 3 + 2] = sp.z;
@@ -1033,16 +1685,25 @@ export class WeatherSystem {
     this.splashPoints.visible = si > 0;
   }
 
-  private spawnSplash(x: number, y: number, z: number, vx: number, vz: number): void {
-    const n = 2 + Math.floor(Math.random() * 3);
+  private spawnSplash(
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vz: number,
+    storm = 0,
+  ): void {
+    const n = 2 + Math.floor(Math.random() * 3) + (storm > 0.5 ? 2 : 0);
     for (let i = 0; i < n; i++) {
       const sp = this.splashes.find((s) => !s.active);
       if (!sp) return;
       sp.active = true;
-      sp.x = x + (Math.random() - 0.5) * 0.1; sp.y = y; sp.z = z + (Math.random() - 0.5) * 0.1;
-      sp.vx = vx * 0.2 + (Math.random() - 0.5) * 1.8;
-      sp.vz = vz * 0.2 + (Math.random() - 0.5) * 1.8;
-      sp.vy = 2.5 + Math.random() * 3.5;
+      sp.x = x + (Math.random() - 0.5) * 0.12;
+      sp.y = y;
+      sp.z = z + (Math.random() - 0.5) * 0.12;
+      sp.vx = vx * 0.2 + (Math.random() - 0.5) * (1.8 + storm * 1.2);
+      sp.vz = vz * 0.2 + (Math.random() - 0.5) * (1.8 + storm * 1.2);
+      sp.vy = 2.5 + Math.random() * 3.5 + storm * 1.5;
       sp.life = 0.2 + Math.random() * 0.25;
     }
   }
@@ -1147,7 +1808,7 @@ export class WeatherSystem {
     this.group.remove(this.cloudMesh);
     this.cloudGeom.dispose();
     this.cloudMat.dispose();
-    this.rainGeom.dispose(); (this.rainPoints.material as THREE.Material).dispose();
+    this.rainGeom.dispose(); (this.rainLines.material as THREE.Material).dispose();
     this.splashGeom.dispose(); (this.splashPoints.material as THREE.Material).dispose();
     this.scene.remove(this.group);
   }

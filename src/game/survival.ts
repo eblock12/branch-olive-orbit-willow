@@ -223,11 +223,8 @@ export class SurvivalState {
   }
 
   addExhaustion(amount: number): void {
-    this.exhaustion += amount;
-    while (this.exhaustion >= 4 && this.hunger > 0) {
-      this.exhaustion -= 4;
-      this.hunger = Math.max(0, this.hunger - 1);
-    }
+    // Hunger drain disabled for now
+    void amount;
   }
 
   damage(amount: number): boolean {
@@ -284,28 +281,17 @@ export class SurvivalState {
   }
 
   updateHunger(dt: number, moving: boolean, sprinting: boolean, inWater: boolean): void {
-    let drain = 0.02 * dt;
-    if (moving) drain += 0.04 * dt;
-    if (sprinting) drain += 0.08 * dt;
-    if (inWater) drain += 0.03 * dt;
-    this.addExhaustion(drain * 4);
+    // Hunger drain / starvation disabled for now
+    void moving;
+    void sprinting;
+    void inWater;
 
-    if (this.hunger <= 0) {
-      this._starveTimer = (this._starveTimer ?? 0) + dt;
-      if (this._starveTimer >= 4) {
-        this._starveTimer = 0;
-        if (this.health > 1) this.damage(1);
-      }
-    } else {
-      this._starveTimer = 0;
-    }
-
+    // Keep natural regen while "well fed"
     if (this.hunger >= 18 && this.health < MAX_HEALTH) {
       this._regenTimer = (this._regenTimer ?? 0) + dt;
       if (this._regenTimer >= 2) {
         this._regenTimer = 0;
         this.heal(1);
-        this.addExhaustion(1.2);
       }
     } else {
       this._regenTimer = 0;

@@ -71,7 +71,7 @@ function rayleighContribution(
   const b = 0.7 + Math.exp(-0.9 * airMass) * 0.28;
 
   // Zenith saturation toward pure azure
-  const zen = THREE.MathUtils.smoothstep(0.1, 0.75, elev);
+  const zen = THREE.MathUtils.smoothstep(elev, 0.1, 0.75);
   out.r = THREE.MathUtils.lerp(r, 0.28, zen * 0.55);
   out.g = THREE.MathUtils.lerp(g, 0.6, zen * 0.65);
   out.b = THREE.MathUtils.lerp(b, 0.98, zen * 0.85);
@@ -102,17 +102,17 @@ function mieAerosolContribution(
 
   // Slightly warm aerosol albedo (dust / organic haze), not pure white
   // Higher T → browner / more desert-dust; low T → soft white haze
-  const dust = THREE.MathUtils.smoothstep(2.2, 6.5, T);
+  const dust = THREE.MathUtils.smoothstep(T, 2.2, 6.5);
   const ar = THREE.MathUtils.lerp(0.92, 0.78, dust);
   const ag = THREE.MathUtils.lerp(0.94, 0.72, dust);
   const ab = THREE.MathUtils.lerp(0.98, 0.62, dust);
 
   // Horizon bias: Mie is much more visible on long paths (low elev)
-  const horizon = 1 - THREE.MathUtils.smoothstep(0.05, 0.55, elev);
+  const horizon = 1 - THREE.MathUtils.smoothstep(elev, 0.05, 0.55);
   // Forward scatter glow when sun is up (halo washes the sky slightly)
   const sunGlow =
     elev > 0
-      ? THREE.MathUtils.smoothstep(0, 0.35, elev) *
+      ? THREE.MathUtils.smoothstep(elev, 0, 0.35) *
         (0.25 + 0.35 * THREE.MathUtils.clamp(1.2 - elev, 0, 1))
       : 0;
 
@@ -167,7 +167,8 @@ export function atmosphereSkyColor(
 
   // Night — residual aerosol glow dies with sun
   if (h < 0.06) {
-    const n = THREE.MathUtils.smoothstep(0.06, -0.28, h);
+    // GLSL-style smoothstep(0.06, -0.28, h) → Three: 1 - smoothstep(h, -0.28, 0.06)
+    const n = 1 - THREE.MathUtils.smoothstep(h, -0.28, 0.06);
     r = THREE.MathUtils.lerp(r, 0.012, n);
     g = THREE.MathUtils.lerp(g, 0.025, n);
     b = THREE.MathUtils.lerp(b, 0.07, n);
@@ -357,6 +358,21 @@ export class DayNightCycle {
     return this.sample;
   }
 
+  /** Debug: jump to high noon (mid-day). */
+  setToNoon(): void {
+    this.time = CYCLE_LENGTH_SEC * 0.25;
+  }
+
+  /** Debug: jump to midnight. */
+  setToMidnight(): void {
+    this.time = CYCLE_LENGTH_SEC * 0.75;
+  }
+
+  /** True when currently day-ish (for debug toggle). */
+  get isDaytime(): boolean {
+    return this.sample.dayFactor > 0.45;
+  }
+
   private makeDiscTexture(
     core: string,
     rim: string,
@@ -442,7 +458,8 @@ export class DayNightCycle {
 
 
     const sunElevation = sunDir.y;
-    const dayFactor = THREE.MathUtils.smoothstep(-0.08, 0.2, sunElevation);
+    // Three.js smoothstep(x, min, max) — NOT GLSL (edge0, edge1, x)
+    const dayFactor = THREE.MathUtils.smoothstep(sunElevation, -0.08, 0.2);
     const nightFactor = 1 - dayFactor;
 
     const s = this.sample;
@@ -469,44 +486,66 @@ export class DayNightCycle {
     // Sun color: atmosphere reddening + slight artistic horizon boost
     s.sunColor.copy(this.tmpSunCol);
     const horizon =
-      1 - THREE.MathUtils.smoothstep(0.0, 0.35, Math.abs(sunElevation));
+      1 - THREE.MathUtils.smoothstep(Math.abs(sunElevation), 0.0, 0.35);
     s.sunColor.g = Math.min(s.sunColor.g, 0.95 - horizon * 0.12);
     s.sunColor.b = Math.min(s.sunColor.b, 0.88 - horizon * 0.28);
-    s.moonColor.setRGB(0.72, 0.8, 1.0);
+    s.moonColor.setRGB(0.55, 0.68, 0.95);
 
-    // Aerosols slightly soften direct sun (haze extinction)
+    // Aerosols slightly soften direct sun (optical depth)
     const hazeExt = 1 - atm.mieHaze * 0.16;
     const elev = THREE.MathUtils.clamp(sunElevation, 0, 1);
-    // Brighter key + airy fill for a more pleasant Minecraft-like look
+    // Day stays bright; night is darker with cooler fill
     s.sunIntensity = dayFactor * (1.95 + 0.85 * elev) * hazeExt;
     s.moonIntensity =
       nightFactor *
-      (0.58 + 0.4 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
+      (0.32 + 0.28 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
+    // Night ambient floor lowered + cool bias applied via hemi colors
     s.ambientIntensity =
-      0.14 +
-      dayFactor * 0.42 +
-      nightFactor * 0.1 +
+      0.05 +
+      dayFactor * 0.51 +
+      nightFactor * 0.035 +
       atm.mieHaze * 0.04 * dayFactor;
     s.hemiIntensity =
-      0.12 +
-      dayFactor * 0.4 +
-      nightFactor * 0.09 +
+      0.06 +
+      dayFactor * 0.46 +
+      nightFactor * 0.04 +
       atm.mieHaze * 0.03 * dayFactor;
 
-    // Hemisphere: bright sky fill + lively ground bounce
+    // Hemisphere: day airy sky; night deep cool indigo
     s.hemiSky.copy(s.sky).multiplyScalar(1.05);
     if (nightFactor > 0.01) {
-      const nightSky = new THREE.Color(0x2a3c68);
-      s.hemiSky.lerp(nightSky, nightFactor * 0.75);
-      s.hemiSky.multiplyScalar(THREE.MathUtils.lerp(1, 0.72, nightFactor));
+      // Cool cast: deep navy / indigo, not warm grey
+      const nightSky = new THREE.Color(0x0a1528);
+      s.hemiSky.lerp(nightSky, nightFactor * 0.92);
+      s.hemiSky.multiplyScalar(THREE.MathUtils.lerp(1, 0.38, nightFactor));
+      // Pull residual warmth out of sky sample
+      s.hemiSky.r *= THREE.MathUtils.lerp(1, 0.55, nightFactor);
+      s.hemiSky.g *= THREE.MathUtils.lerp(1, 0.72, nightFactor);
+      s.hemiSky.b = Math.min(
+        1,
+        s.hemiSky.b * THREE.MathUtils.lerp(1, 1.15, nightFactor),
+      );
     }
     s.hemiGround.set(
-      THREE.MathUtils.lerp(0.08, 0.38, dayFactor),
-      THREE.MathUtils.lerp(0.1, 0.48, dayFactor),
-      THREE.MathUtils.lerp(0.12, 0.24, dayFactor),
+      THREE.MathUtils.lerp(0.04, 0.38, dayFactor),
+      THREE.MathUtils.lerp(0.06, 0.48, dayFactor),
+      THREE.MathUtils.lerp(0.1, 0.24, dayFactor),
     );
     if (nightFactor > 0.01) {
-      s.hemiGround.lerp(new THREE.Color(0x121c30), nightFactor * 0.55);
+      s.hemiGround.lerp(new THREE.Color(0x060c18), nightFactor * 0.85);
+    }
+
+    // Darken sky/fog sample toward cool night for clear weather baseline
+    if (nightFactor > 0.01) {
+      const nightDeep = new THREE.Color(0x040814);
+      const nightFog = new THREE.Color(0x0a1220);
+      s.sky.lerp(nightDeep, nightFactor * 0.88);
+      s.sky.r *= THREE.MathUtils.lerp(1, 0.45, nightFactor);
+      s.sky.g *= THREE.MathUtils.lerp(1, 0.65, nightFactor);
+      s.fog.lerp(nightFog, nightFactor * 0.85);
+      s.fog.r *= THREE.MathUtils.lerp(1, 0.5, nightFactor);
+      s.fog.g *= THREE.MathUtils.lerp(1, 0.7, nightFactor);
+      s.fog.b = Math.min(1, s.fog.b * THREE.MathUtils.lerp(1, 1.05, nightFactor));
     }
 
     this._aimX = px;

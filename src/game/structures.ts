@@ -1,4 +1,4 @@
-import { Block } from "./blocks";
+import { Block, isPlant } from "./blocks";
 import { Biome, type BiomeId } from "./biomes";
 import { hash2, fbm2 } from "./noise";
 import { CHUNK_SIZE, CHUNK_HEIGHT, SEA_LEVEL } from "./chunkConstants";
@@ -48,7 +48,6 @@ function setBlock(
   if (!inChunk(lx, wy, lz)) return;
   const i = idx(lx, wy, lz);
   if (replaceAirOnly && ctx.blocks[i] !== Block.AIR && ctx.blocks[i] !== Block.WATER) {
-    // allow replacing leaves/wood for clearings
     const cur = ctx.blocks[i]!;
     if (cur !== Block.LEAVES && cur !== Block.WOOD && cur !== Block.CACTUS) return;
   }
@@ -116,8 +115,167 @@ function clearBox(
   }
 }
 
-function groundY(ctx: Ctx, wx: number, wz: number): number {
-  return ctx.surfaceAt(wx, wz).height;
+/** Blocks that can hold a structure (not air/water/plants/leaves). */
+function isSupportBlock(id: number): boolean {
+  if (id === Block.AIR || id === Block.WATER) return false;
+  if (id === Block.LEAVES) return false;
+  if (isPlant(id)) return false;
+  return true;
+}
+
+/**
+ * Topmost solid Y in this column using actual chunk voxels when available
+ * (so caves under the "surface" don't leave floating floors).
+ */
+function topSolidY(ctx: Ctx, wx: number, wz: number): number {
+  const baseX = ctx.cx * CHUNK_SIZE;
+  const baseZ = ctx.cz * CHUNK_SIZE;
+  const lx = wx - baseX;
+  const lz = wz - baseZ;
+  if (lx >= 0 && lz >= 0 && lx < CHUNK_SIZE && lz < CHUNK_SIZE) {
+    for (let y = CHUNK_HEIGHT - 1; y >= 1; y--) {
+      const b = ctx.blocks[idx(lx, y, lz)]!;
+      if (isSupportBlock(b)) return y;
+    }
+    return 1;
+  }
+  // Outside this chunk — terrain estimate only
+  return Math.max(1, ctx.surfaceAt(wx, wz).height);
+}
+
+function footprintStats(
+  ctx: Ctx,
+  x0: number,
+  z0: number,
+  x1: number,
+  z1: number,
+): { minY: number; maxY: number; avgY: number; delta: number } {
+  const minX = Math.min(x0, x1);
+  const maxX = Math.max(x0, x1);
+  const minZ = Math.min(z0, z1);
+  const maxZ = Math.max(z0, z1);
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let sum = 0;
+  let n = 0;
+  for (let z = minZ; z <= maxZ; z++) {
+    for (let x = minX; x <= maxX; x++) {
+      const y = topSolidY(ctx, x, z);
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      sum += y;
+      n++;
+    }
+  }
+  if (n === 0) return { minY: 1, maxY: 1, avgY: 1, delta: 0 };
+  return {
+    minY,
+    maxY,
+    avgY: sum / n,
+    delta: maxY - minY,
+  };
+}
+
+/**
+ * Choose a grounded floor Y for a footprint.
+ * Rejects underwater / too steep sites. Floor sits on the lowest solid so
+ * nothing hangs in air; hills are flattened down to floorY.
+ */
+function siteFloorY(
+  ctx: Ctx,
+  x0: number,
+  z0: number,
+  x1: number,
+  z1: number,
+  opts?: {
+    maxSlope?: number;
+    minAboveSea?: number;
+    allowUnderwater?: boolean;
+  },
+): number | null {
+  const stats = footprintStats(ctx, x0, z0, x1, z1);
+  const minAbove = opts?.minAboveSea ?? 1;
+  const maxSlope = opts?.maxSlope ?? 5;
+  if (!opts?.allowUnderwater && stats.minY <= SEA_LEVEL + minAbove - 1) {
+    return null;
+  }
+  if (stats.minY <= 2) return null;
+  if (stats.delta > maxSlope) return null;
+  return stats.minY;
+}
+
+/**
+ * Make sure every column under [x0..x1]×[z0..z1] has solid blocks from the
+ * real ground up to floorY (fills cave mouths / dips). Optionally flattens
+ * terrain above the floor so the structure isn't buried in a hillside.
+ */
+function ensureFoundations(
+  ctx: Ctx,
+  x0: number,
+  z0: number,
+  x1: number,
+  z1: number,
+  floorY: number,
+  mat: number = Block.COBBLE,
+  flattenAbove = true,
+): void {
+  const minX = Math.min(x0, x1);
+  const maxX = Math.max(x0, x1);
+  const minZ = Math.min(z0, z1);
+  const maxZ = Math.max(z0, z1);
+  for (let z = minZ; z <= maxZ; z++) {
+    for (let x = minX; x <= maxX; x++) {
+      const g = topSolidY(ctx, x, z);
+      // Fill stilts / cave gaps up to just below floor
+      if (g < floorY) {
+        for (let y = g + 1; y < floorY; y++) {
+          setBlock(ctx, x, y, z, mat);
+        }
+        // Pad under floor
+        setBlock(ctx, x, floorY - 1, z, mat);
+      }
+      // Carve hill poking through the floor plane
+      if (flattenAbove && g >= floorY) {
+        for (let y = floorY; y <= g + 1; y++) {
+          // Leave the floor plane for the structure to paint; clear above
+          if (y > floorY) setBlock(ctx, x, y, z, Block.AIR);
+        }
+        // Solid support under floor
+        setBlock(ctx, x, floorY - 1, z, mat);
+      }
+      // Always guarantee a solid under the floor cell
+      if (floorY - 1 >= 1) {
+        const baseX = ctx.cx * CHUNK_SIZE;
+        const baseZ = ctx.cz * CHUNK_SIZE;
+        const lx = x - baseX;
+        const lz = z - baseZ;
+        if (inChunk(lx, floorY - 1, lz)) {
+          const under = ctx.blocks[idx(lx, floorY - 1, lz)]!;
+          if (!isSupportBlock(under)) {
+            setBlock(ctx, x, floorY - 1, z, mat);
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Single-column foundation (posts, stones, masts). */
+function ensureColumnGrounded(
+  ctx: Ctx,
+  wx: number,
+  wz: number,
+  baseY: number,
+  mat: number = Block.COBBLE,
+): number {
+  const g = topSolidY(ctx, wx, wz);
+  if (g < baseY - 1) {
+    for (let y = g + 1; y < baseY; y++) setBlock(ctx, wx, y, wz, mat);
+  }
+  if (baseY - 1 >= 1 && g < baseY) {
+    setBlock(ctx, wx, baseY - 1, wz, mat);
+  }
+  return Math.max(g, baseY - 1);
 }
 
 function pillar(
@@ -134,24 +292,24 @@ function pillar(
 // ─── Structure types ────────────────────────────────────────────
 
 function placeWatchtower(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL + 1) return;
+  const floor = siteFloorY(ctx, ox - 2, oz - 2, ox + 2, oz + 2, {
+    maxSlope: 4,
+    minAboveSea: 2,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - 2, oz - 2, ox + 2, oz + 2, y, Block.COBBLE);
   const H = 10 + Math.floor(hash2(ox, oz, ctx.seed + 3) * 6);
-  // Foundation
   fillBox(ctx, ox - 2, y - 1, oz - 2, ox + 2, y, oz + 2, Block.COBBLE);
-  // Shaft
   for (let dy = 1; dy <= H; dy++) {
     fillBox(ctx, ox - 1, y + dy, oz - 1, ox + 1, y + dy, oz + 1, Block.COBBLE, true);
-    // Floor every few levels
     if (dy % 4 === 0) {
       fillBox(ctx, ox - 1, y + dy, oz - 1, ox + 1, y + dy, oz + 1, Block.PLANKS);
-      setBlock(ctx, ox, y + dy, oz, Block.COBBLE); // ladder column support
+      setBlock(ctx, ox, y + dy, oz, Block.COBBLE);
     }
   }
-  // Door
   setBlock(ctx, ox, y + 1, oz - 1, Block.AIR);
   setBlock(ctx, ox, y + 2, oz - 1, Block.AIR);
-  // Battlements
   const top = y + H;
   fillBox(ctx, ox - 2, top, oz - 2, ox + 2, top, oz + 2, Block.COBBLE);
   for (const [dx, dz] of [
@@ -166,30 +324,28 @@ function placeWatchtower(ctx: Ctx, ox: number, oz: number): void {
   ] as const) {
     setBlock(ctx, ox + dx, top + 1, oz + dz, Block.COBBLE);
   }
-  // Flag pole
   pillar(ctx, ox, top + 1, oz, 3, Block.WOOD);
   setBlock(ctx, ox, top + 4, oz, Block.LEAVES);
 }
 
 function placeCabin(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL) return;
   const w = 4;
   const d = 5;
+  const floor = siteFloorY(ctx, ox - w, oz - d, ox + w, oz + d, {
+    maxSlope: 3,
+    minAboveSea: 1,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - w, oz - d, ox + w, oz + d, y, Block.COBBLE);
   const h = 3;
-  // Floor
   fillBox(ctx, ox - w, y, oz - d, ox + w, y, oz + d, Block.PLANKS);
-  // Walls
   fillBox(ctx, ox - w, y + 1, oz - d, ox + w, y + h, oz + d, Block.WOOD, true);
-  // Hollow interior
   clearBox(ctx, ox - w + 1, y + 1, oz - d + 1, ox + w - 1, y + h - 1, oz + d - 1);
-  // Door
   setBlock(ctx, ox, y + 1, oz - d, Block.AIR);
   setBlock(ctx, ox, y + 2, oz - d, Block.AIR);
-  // Windows
   setBlock(ctx, ox - w, y + 2, oz, Block.AIR);
   setBlock(ctx, ox + w, y + 2, oz, Block.AIR);
-  // Roof gable
   for (let layer = 0; layer <= w + 1; layer++) {
     fillBox(
       ctx,
@@ -202,60 +358,88 @@ function placeCabin(ctx: Ctx, ox: number, oz: number): void {
       Block.PLANKS,
     );
   }
-  // Chimney
   pillar(ctx, ox + w - 1, y + 1, oz + d - 1, h + 3, Block.COBBLE);
 }
 
 function placeStoneCircle(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL - 1) return;
   const R = 5 + Math.floor(hash2(ox, oz, ctx.seed + 9) * 3);
+  const floor = siteFloorY(ctx, ox - R, oz - R, ox + R, oz + R, {
+    maxSlope: 6,
+    minAboveSea: 0,
+  });
+  if (floor === null) return;
+  ensureFoundations(ctx, ox - 1, oz - 1, ox + 1, oz + 1, floor, Block.COBBLE);
   const stones = 7 + Math.floor(hash2(ox, oz, ctx.seed + 10) * 5);
   for (let i = 0; i < stones; i++) {
     const a = (i / stones) * Math.PI * 2;
     const sx = ox + Math.round(Math.cos(a) * R);
     const sz = oz + Math.round(Math.sin(a) * R);
-    const sy = groundY(ctx, sx, sz);
+    const sy = topSolidY(ctx, sx, sz);
+    if (sy <= SEA_LEVEL - 1) continue;
+    ensureColumnGrounded(ctx, sx, sz, sy + 1, Block.STONE);
     const tall = 2 + Math.floor(hash2(sx, sz, ctx.seed + i) * 3);
     pillar(ctx, sx, sy + 1, sz, tall, Block.STONE);
     if (hash2(sx, sz, ctx.seed + 40 + i) > 0.55) {
-      setBlock(ctx, sx, sy + tall + 1, sz, Block.COBBLE); // capstone
+      setBlock(ctx, sx, sy + tall + 1, sz, Block.COBBLE);
     }
   }
-  // Altar
-  fillBox(ctx, ox - 1, y + 1, oz - 1, ox + 1, y + 1, oz + 1, Block.COBBLE);
-  setBlock(ctx, ox, y + 2, oz, Block.ICE);
+  fillBox(ctx, ox - 1, floor + 1, oz - 1, ox + 1, floor + 1, oz + 1, Block.COBBLE);
+  setBlock(ctx, ox, floor + 2, oz, Block.ICE);
 }
 
 function placeObelisk(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y < SEA_LEVEL - 2) return;
+  const floor = siteFloorY(ctx, ox - 2, oz - 2, ox + 2, oz + 2, {
+    maxSlope: 4,
+    minAboveSea: -1,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - 2, oz - 2, ox + 2, oz + 2, y, Block.STONE);
   const H = 14 + Math.floor(hash2(ox, oz, ctx.seed + 11) * 12);
   fillBox(ctx, ox - 2, y, oz - 2, ox + 2, y + 1, oz + 2, Block.STONE);
   for (let dy = 2; dy < H; dy++) {
     const taper = dy > H * 0.7 ? 0 : 1;
-    fillBox(ctx, ox - taper, y + dy, oz - taper, ox + taper, y + dy, oz + taper, Block.STONE);
+    fillBox(
+      ctx,
+      ox - taper,
+      y + dy,
+      oz - taper,
+      ox + taper,
+      y + dy,
+      oz + taper,
+      Block.STONE,
+    );
   }
   setBlock(ctx, ox, y + H, oz, Block.ICE);
   setBlock(ctx, ox, y + H + 1, oz, Block.ICE);
 }
 
 function placePyramid(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y < SEA_LEVEL - 1) return;
-  const biome = ctx.surfaceAt(ox, oz).biome;
-  const mat = biome === Biome.DESERT ? Block.SAND : Block.SAND;
-  const core = Block.STONE;
   const base = 6 + Math.floor(hash2(ox, oz, ctx.seed + 12) * 3);
+  const floor = siteFloorY(ctx, ox - base, oz - base, ox + base, oz + base, {
+    maxSlope: 4,
+    minAboveSea: 0,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(
+    ctx,
+    ox - base,
+    oz - base,
+    ox + base,
+    oz + base,
+    y,
+    Block.SAND,
+  );
+  const mat = Block.SAND;
+  const core = Block.STONE;
   for (let layer = 0; layer <= base; layer++) {
     const r = base - layer;
     fillBox(ctx, ox - r, y + layer, oz - r, ox + r, y + layer, oz + r, mat);
   }
-  // Inner chamber
   clearBox(ctx, ox - 1, y + 1, oz - 1, ox + 1, y + 3, oz + 1);
   setBlock(ctx, ox, y + 1, oz - base, Block.AIR);
   setBlock(ctx, ox, y + 2, oz - base, Block.AIR);
-  // Corridor
   for (let z = -base; z <= 0; z++) {
     setBlock(ctx, ox, y + 1, oz + z, Block.AIR);
     setBlock(ctx, ox, y + 2, oz + z, Block.AIR);
@@ -264,45 +448,56 @@ function placePyramid(ctx: Ctx, ox: number, oz: number): void {
 }
 
 function placeShipwreck(ctx: Ctx, ox: number, oz: number): void {
-  const y = Math.max(groundY(ctx, ox, oz), SEA_LEVEL - 2);
+  // Rest on seafloor / beach solids, not floating mid-water column
+  const g = topSolidY(ctx, ox, oz);
+  if (g < 3) return;
+  const y = Math.min(Math.max(g, SEA_LEVEL - 4), SEA_LEVEL);
   const len = 8 + Math.floor(hash2(ox, oz, ctx.seed + 13) * 5);
-  const dir = hash2(ox, oz, ctx.seed + 14) > 0.5 ? 1 : 0; // along X or Z
+  const dir = hash2(ox, oz, ctx.seed + 14) > 0.5 ? 1 : 0;
   for (let i = -len; i <= len; i++) {
     const t = 1 - Math.abs(i) / (len + 1);
     const beam = Math.max(1, Math.floor(t * 3));
     for (let b = -beam; b <= beam; b++) {
       const wx = dir ? ox + i : ox + b;
       const wz = dir ? oz + b : oz + i;
-      setBlock(ctx, wx, y, wz, Block.WOOD);
+      // Local ground so hull follows sand/rock, not a flat float
+      const gy = topSolidY(ctx, wx, wz);
+      const deck = Math.min(Math.max(gy, SEA_LEVEL - 4), y + 1);
+      ensureColumnGrounded(ctx, wx, wz, deck, Block.SAND);
+      setBlock(ctx, wx, deck, wz, Block.WOOD);
       if (Math.abs(b) === beam) {
-        setBlock(ctx, wx, y + 1, wz, Block.WOOD);
-        if (t > 0.4) setBlock(ctx, wx, y + 2, wz, Block.PLANKS);
+        setBlock(ctx, wx, deck + 1, wz, Block.WOOD);
+        if (t > 0.4) setBlock(ctx, wx, deck + 2, wz, Block.PLANKS);
       }
     }
-    // Ribs
     if (i % 3 === 0) {
       const wx = dir ? ox + i : ox;
       const wz = dir ? oz : oz + i;
-      setBlock(ctx, wx, y + 1, wz, Block.PLANKS);
+      const gy = topSolidY(ctx, wx, wz);
+      const deck = Math.min(Math.max(gy, SEA_LEVEL - 4), y + 1);
+      setBlock(ctx, wx, deck + 1, wz, Block.PLANKS);
     }
   }
-  // Broken mast
-  const mx = ox;
-  const mz = oz;
-  pillar(ctx, mx, y + 1, mz, 5, Block.WOOD);
-  setBlock(ctx, mx + 1, y + 5, mz, Block.PLANKS);
-  setBlock(ctx, mx + 2, y + 4, mz, Block.PLANKS);
+  const mastBase = Math.max(topSolidY(ctx, ox, oz), SEA_LEVEL - 3);
+  ensureColumnGrounded(ctx, ox, oz, mastBase + 1, Block.WOOD);
+  pillar(ctx, ox, mastBase + 1, oz, 5, Block.WOOD);
+  setBlock(ctx, ox + 1, mastBase + 5, oz, Block.PLANKS);
+  setBlock(ctx, ox + 2, mastBase + 4, oz, Block.PLANKS);
 }
 
 function placeWell(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL) return;
+  const floor = siteFloorY(ctx, ox - 1, oz - 1, ox + 1, oz + 1, {
+    maxSlope: 3,
+    minAboveSea: 1,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - 1, oz - 1, ox + 1, oz + 1, y, Block.COBBLE);
   fillBox(ctx, ox - 1, y, oz - 1, ox + 1, y + 1, oz + 1, Block.COBBLE, true);
   clearBox(ctx, ox, y - 6, oz, ox, y + 1, oz);
   for (let dy = 0; dy <= 4; dy++) {
     setBlock(ctx, ox, y - dy, oz, Block.WATER);
   }
-  // Roof posts
   setBlock(ctx, ox - 1, y + 2, oz - 1, Block.WOOD);
   setBlock(ctx, ox + 1, y + 2, oz - 1, Block.WOOD);
   setBlock(ctx, ox - 1, y + 2, oz + 1, Block.WOOD);
@@ -311,11 +506,15 @@ function placeWell(ctx: Ctx, ox: number, oz: number): void {
 }
 
 function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL) return;
+  const floor = siteFloorY(ctx, ox, oz, ox, oz, {
+    maxSlope: 2,
+    minAboveSea: 1,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureColumnGrounded(ctx, ox, oz, y + 1, Block.DIRT);
   const H = 6 + Math.floor(hash2(ox, oz, ctx.seed + 15) * 5);
   pillar(ctx, ox, y + 1, oz, H, Block.WOOD);
-  // Cap
   const r = 3 + Math.floor(hash2(ox, oz, ctx.seed + 16) * 2);
   const capY = y + H;
   for (let dz = -r; dz <= r; dz++) {
@@ -330,11 +529,15 @@ function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
 }
 
 function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL - 1) return;
-  // Crying-obsidian-ish frame using cobble + ice "portal"
-  const h = 5;
   const w = 4;
+  const floor = siteFloorY(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, {
+    maxSlope: 3,
+    minAboveSea: 0,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, y, Block.COBBLE);
+  const h = 5;
   for (let dy = 0; dy <= h; dy++) {
     setBlock(ctx, ox, y + dy, oz, Block.COBBLE);
     setBlock(ctx, ox + w, y + dy, oz, Block.COBBLE);
@@ -343,11 +546,10 @@ function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
     setBlock(ctx, ox + dx, y, oz, Block.COBBLE);
     setBlock(ctx, ox + dx, y + h, oz, Block.COBBLE);
   }
-  // Broken pieces
   setBlock(ctx, ox - 1, y + 1, oz + 1, Block.COBBLE);
   setBlock(ctx, ox + w + 1, y + 2, oz - 1, Block.COBBLE);
+  ensureColumnGrounded(ctx, ox + 1, oz, y, Block.COBBLE);
   setBlock(ctx, ox + 1, y - 1, oz, Block.COBBLE);
-  // Inner ice "portal" glow
   for (let dy = 1; dy < h; dy++) {
     for (let dx = 1; dx < w; dx++) {
       if (hash2(ox + dx, oz + dy, ctx.seed) > 0.35) {
@@ -357,114 +559,140 @@ function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
   }
 }
 
+/** Grounded rocky butte (was a floating sky island). */
 function placeSkyIslet(ctx: Ctx, ox: number, oz: number): void {
-  // Floating island high above surface
-  const base = groundY(ctx, ox, oz);
-  if (base < SEA_LEVEL) return;
-  const y = Math.min(CHUNK_HEIGHT - 12, base + 18 + Math.floor(hash2(ox, oz, ctx.seed + 17) * 14));
   const r = 3 + Math.floor(hash2(ox, oz, ctx.seed + 18) * 3);
+  const floor = siteFloorY(ctx, ox - r, oz - r, ox + r, oz + r, {
+    maxSlope: 5,
+    minAboveSea: 2,
+  });
+  if (floor === null) return;
+  const y = floor;
+  // Solid pedestal from real ground up so it never floats
   for (let dz = -r; dz <= r; dz++) {
     for (let dx = -r; dx <= r; dx++) {
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist > r + 0.2) continue;
-      const depth = Math.floor((1 - dist / (r + 0.5)) * 3) + 1;
-      for (let dy = 0; dy < depth; dy++) {
-        const id = dy === depth - 1 ? Block.GRASS : dy === 0 ? Block.STONE : Block.DIRT;
-        setBlock(ctx, ox + dx, y - dy, oz + dz, id);
+      const g = topSolidY(ctx, ox + dx, oz + dz);
+      const top =
+        y + 2 + Math.floor((1 - dist / (r + 0.5)) * 3);
+      for (let yy = g + 1; yy <= top; yy++) {
+        const id =
+          yy === top
+            ? Block.GRASS
+            : yy >= top - 1
+              ? Block.DIRT
+              : Block.STONE;
+        setBlock(ctx, ox + dx, yy, oz + dz, id);
       }
     }
   }
-  // Mini tree
-  pillar(ctx, ox, y + 1, oz, 3, Block.WOOD);
+  const topY = y + 5;
+  pillar(ctx, ox, topY, oz, 3, Block.WOOD);
   for (let dz = -1; dz <= 1; dz++) {
     for (let dx = -1; dx <= 1; dx++) {
-      setBlock(ctx, ox + dx, y + 4, oz + dz, Block.LEAVES, true);
-      setBlock(ctx, ox + dx, y + 5, oz + dz, Block.LEAVES, true);
-    }
-  }
-  // Vine drip under island
-  for (let i = 0; i < 4; i++) {
-    const vx = ox + Math.floor(hash2(ox, i, ctx.seed) * r * 2) - r;
-    const vz = oz + Math.floor(hash2(oz, i, ctx.seed + 1) * r * 2) - r;
-    for (let dy = 1; dy <= 3; dy++) {
-      setBlock(ctx, vx, y - 1 - dy, vz, Block.LEAVES, true);
+      setBlock(ctx, ox + dx, topY + 3, oz + dz, Block.LEAVES, true);
+      setBlock(ctx, ox + dx, topY + 4, oz + dz, Block.LEAVES, true);
     }
   }
 }
 
 function placeDungeonMouth(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL + 2) return;
-  // Cobble frame over a shaft
+  const floor = siteFloorY(ctx, ox - 2, oz - 2, ox + 2, oz + 2, {
+    maxSlope: 4,
+    minAboveSea: 2,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - 2, oz - 2, ox + 2, oz + 2, y, Block.COBBLE);
   fillBox(ctx, ox - 2, y, oz - 2, ox + 2, y + 1, oz + 2, Block.COBBLE);
   clearBox(ctx, ox - 1, y - 12, oz - 1, ox + 1, y + 1, oz + 1);
-  // Stairs-ish ledges
   for (let i = 0; i < 10; i++) {
     const sy = y - 1 - i;
     setBlock(ctx, ox - 1 + (i % 3), sy, oz - 1, Block.COBBLE);
   }
-  // Torch substitutes: ice lanterns
   setBlock(ctx, ox - 2, y + 2, oz, Block.ICE);
   setBlock(ctx, ox + 2, y + 2, oz, Block.ICE);
-  // Arch
   setBlock(ctx, ox - 1, y + 2, oz - 2, Block.COBBLE);
   setBlock(ctx, ox, y + 3, oz - 2, Block.COBBLE);
   setBlock(ctx, ox + 1, y + 2, oz - 2, Block.COBBLE);
 }
 
 function placeBridgeRuin(ctx: Ctx, ox: number, oz: number): void {
-  const y = Math.max(groundY(ctx, ox, oz), SEA_LEVEL + 1);
   const len = 10 + Math.floor(hash2(ox, oz, ctx.seed + 19) * 8);
   const alongX = hash2(ox, oz, ctx.seed + 20) > 0.5;
+  // Deck height from center support — must clear local ground
+  const centerG = topSolidY(ctx, ox, oz);
+  if (centerG < 3) return;
+  const y = Math.max(centerG + 2, SEA_LEVEL + 1);
   for (let i = -len; i <= len; i++) {
-    if (hash2(ox + i, oz, ctx.seed + 21) < 0.12) continue; // missing segments
+    if (hash2(ox + i, oz, ctx.seed + 21) < 0.12) continue;
     const wx = alongX ? ox + i : ox;
     const wz = alongX ? oz : oz + i;
+    const g = topSolidY(ctx, wx, wz);
+    // Always support deck with a pillar — no floating planks
+    if (g < y + 3) {
+      for (let yy = g + 1; yy <= y + 2; yy++) {
+        setBlock(ctx, wx, yy, wz, Block.STONE);
+      }
+    }
     setBlock(ctx, wx, y + 3, wz, Block.COBBLE);
     setBlock(ctx, wx, y + 3, wz + (alongX ? 1 : 0), Block.COBBLE);
-    if (i % 4 === 0) {
-      pillar(ctx, wx, groundY(ctx, wx, wz) + 1, wz, y + 3 - groundY(ctx, wx, wz), Block.STONE);
+    if (alongX) {
+      const g2 = topSolidY(ctx, wx, wz + 1);
+      if (g2 < y + 3) {
+        for (let yy = g2 + 1; yy <= y + 2; yy++) {
+          setBlock(ctx, wx, yy, wz + 1, Block.STONE);
+        }
+      }
     }
   }
 }
 
 function placeIceSpire(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
+  const floor = siteFloorY(ctx, ox - 2, oz - 2, ox + 2, oz + 2, {
+    maxSlope: 5,
+    minAboveSea: -2,
+    allowUnderwater: false,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - 2, oz - 2, ox + 2, oz + 2, y, Block.ICE);
   const H = 10 + Math.floor(hash2(ox, oz, ctx.seed + 22) * 16);
   for (let dy = 0; dy < H; dy++) {
     const r = Math.max(0, 2 - Math.floor(dy / (H / 3)));
     fillBox(ctx, ox - r, y + dy, oz - r, ox + r, y + dy, oz + r, Block.ICE);
   }
-  // Crystals at base
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * Math.PI * 2;
     const sx = ox + Math.round(Math.cos(a) * 3);
     const sz = oz + Math.round(Math.sin(a) * 3);
-    pillar(ctx, sx, y + 1, sz, 2 + (i % 3), Block.ICE);
+    const sy = topSolidY(ctx, sx, sz);
+    if (sy <= 2) continue;
+    ensureColumnGrounded(ctx, sx, sz, sy + 1, Block.ICE);
+    pillar(ctx, sx, sy + 1, sz, 2 + (i % 3), Block.ICE);
   }
 }
 
 function placeArena(ctx: Ctx, ox: number, oz: number): void {
-  const y = groundY(ctx, ox, oz);
-  if (y <= SEA_LEVEL) return;
   const R = 7;
+  const floor = siteFloorY(ctx, ox - R, oz - R, ox + R, oz + R, {
+    maxSlope: 6,
+    minAboveSea: 1,
+  });
+  if (floor === null) return;
+  const y = floor;
+  ensureFoundations(ctx, ox - R, oz - R, ox + R, oz + R, y, Block.COBBLE, true);
   for (let dz = -R; dz <= R; dz++) {
     for (let dx = -R; dx <= R; dx++) {
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist > R) continue;
-      const sy = groundY(ctx, ox + dx, oz + dz);
-      // Flatten floor
       setBlock(ctx, ox + dx, y, oz + dz, Block.COBBLE);
-      if (sy > y) {
-        for (let yy = y + 1; yy <= sy + 2; yy++) setBlock(ctx, ox + dx, yy, oz + dz, Block.AIR);
-      }
-      // Wall ring
       if (dist > R - 1.2 && dist <= R) {
         pillar(ctx, ox + dx, y + 1, oz + dz, 3, Block.STONE);
       }
     }
   }
-  // Center pillar
   pillar(ctx, ox, y + 1, oz, 2, Block.COBBLE);
   setBlock(ctx, ox, y + 3, oz, Block.ICE);
 }
@@ -473,7 +701,6 @@ const STRUCTURES: Array<{
   name: string;
   weight: number;
   place: (ctx: Ctx, ox: number, oz: number) => void;
-  /** Biomes where this is more likely; empty = anywhere suitable */
   biomes?: BiomeId[];
   avoidOcean?: boolean;
 }> = [
@@ -500,10 +727,8 @@ function pickStructure(
   biome: BiomeId,
 ): (typeof STRUCTURES)[number] | null {
   const roll = hash2(ox, oz, seed + 7777);
-  // Density: ~14% of structure cells spawn something
   if (roll < 0.86) return null;
 
-  // Build weighted list filtered by biome
   let total = 0;
   const picks: Array<{ s: (typeof STRUCTURES)[number]; w: number }> = [];
   for (const s of STRUCTURES) {
@@ -511,7 +736,6 @@ function pickStructure(
       if (s.name !== "shipwreck") continue;
     }
     if (s.biomes && !s.biomes.includes(biome)) {
-      // still allow rarely
       if (hash2(ox, oz, seed + s.weight * 99) < 0.92) continue;
     }
     let w = s.weight;
@@ -543,7 +767,6 @@ export function placeStructuresInChunk(
   const baseX = cx * CHUNK_SIZE;
   const baseZ = cz * CHUNK_SIZE;
 
-  // Structure origins live on STRUCT_CELL grid; visit neighbors so edges span chunks
   const minCellX = Math.floor((baseX - 24) / STRUCT_CELL);
   const maxCellX = Math.floor((baseX + CHUNK_SIZE + 24) / STRUCT_CELL);
   const minCellZ = Math.floor((baseZ - 24) / STRUCT_CELL);
@@ -551,7 +774,6 @@ export function placeStructuresInChunk(
 
   for (let czCell = minCellZ; czCell <= maxCellZ; czCell++) {
     for (let cxCell = minCellX; cxCell <= maxCellX; cxCell++) {
-      // Skip near world spawn so player isn't inside a pyramid
       const ox =
         cxCell * STRUCT_CELL +
         Math.floor(hash2(cxCell, czCell, seed + 100) * (STRUCT_CELL - 8)) +
@@ -562,13 +784,13 @@ export function placeStructuresInChunk(
         4;
       if (ox * ox + oz * oz < 40 * 40) continue;
 
-      const { height, biome } = surfaceAt(ox, oz);
-      // Don't plant structures mid-air over deep oceans with no interest (except shipwrecks)
-      void height;
+      const { biome } = surfaceAt(ox, oz);
+      // Reject if origin column has no real solid ground
+      if (topSolidY(ctx, ox, oz) <= 2) continue;
+
       const s = pickStructure(ox, oz, seed, biome);
       if (!s) continue;
 
-      // Extra noise gate for variety clusters
       if (fbm2(ox * 0.02, oz * 0.02, seed + 50, 2) < 0.28) continue;
 
       s.place(ctx, ox, oz);

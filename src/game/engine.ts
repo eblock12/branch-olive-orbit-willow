@@ -11,6 +11,8 @@ import { raycastVoxel, type VoxelHit } from "./raycast";
 import { CHUNK_HEIGHT } from "./chunk";
 import { CaterpillarSystem } from "./caterpillars";
 import { PassiveMobSystem } from "./passiveMobs";
+import { HostileSystem } from "./hostiles";
+import { SlenderGiantSystem } from "./slenderGiant";
 import { BirdSystem } from "./birds";
 import { AmbianceFX } from "./ambiance";
 import { GameAudio, surfaceFromBlock } from "./audio";
@@ -45,6 +47,9 @@ export type HudSnapshot = {
   caterpillars: number;
   banished: number;
   animals: number;
+  hostiles: number;
+  hostilesKilled: number;
+  slenderNearby: boolean;
   weather: WeatherKind;
   rain: number;
   dayPhase: number;
@@ -87,6 +92,8 @@ export class GameEngine {
   private player: Player;
   private caterpillars: CaterpillarSystem;
   private animals: PassiveMobSystem;
+  private hostiles: HostileSystem;
+  private slenderGiant: SlenderGiantSystem;
   private birds: BirdSystem;
   private ambiance: AmbianceFX;
   private audio = new GameAudio();
@@ -229,6 +236,8 @@ export class GameEngine {
     this.player = new Player();
     this.caterpillars = new CaterpillarSystem();
     this.animals = new PassiveMobSystem();
+    this.hostiles = new HostileSystem();
+    this.slenderGiant = new SlenderGiantSystem();
     this.birds = new BirdSystem();
     this.ambiance = new AmbianceFX();
     this.itemDrops = new ItemDropSystem(this.atlas);
@@ -240,12 +249,20 @@ export class GameEngine {
     this.world.ensureChunksAround(0, 0);
     this.world.flushMeshes();
     this.spawnPlayer();
-    this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 8);
+    this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 3);
     this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
+    // TEST: slender giant near spawn (day or night)
+    this.slenderGiant.spawnTestNear(
+      this.world,
+      this.player.x,
+      this.player.z,
+    );
 
     this.scene.add(this.world.group);
     this.scene.add(this.caterpillars.group);
     this.scene.add(this.animals.group);
+    this.scene.add(this.hostiles.group);
+    this.scene.add(this.slenderGiant.group);
     this.scene.add(this.birds.group);
     this.scene.add(this.ambiance.group);
     this.scene.add(this.itemDrops.group);
@@ -429,6 +446,13 @@ export class GameEngine {
         y: this.player.y,
         z: this.player.z,
       }),
+      getBirds: () => this.birds.getDebug(),
+      getDayNight: () => ({
+        dayFactor: this.dayNight.state.dayFactor,
+        sunElevation: this.dayNight.state.sunElevation,
+        phase: this.dayNight.state.phase,
+        timeOfDay: this.dayNight.state.timeOfDay,
+      }),
     };
   }
 
@@ -466,6 +490,8 @@ export class GameEngine {
     this.viewHand.dispose();
     this.caterpillars.dispose();
     this.animals.dispose();
+    this.hostiles.dispose();
+    this.slenderGiant.dispose();
     this.birds.dispose();
     this.ambiance.dispose();
     this.audio.dispose();
@@ -610,6 +636,11 @@ export class GameEngine {
       e.preventDefault();
       this.toggleCrafting();
     }
+    // Debug: toggle day/night without releasing pointer lock
+    if (e.code === "F3" || (e.code === "KeyN" && e.shiftKey)) {
+      e.preventDefault();
+      this.toggleDayNightDebug();
+    }
     if (e.code === "Escape" && this.craftingOpen) {
       e.preventDefault();
       this.setCraftingOpen(false);
@@ -671,13 +702,21 @@ export class GameEngine {
 
   private onTouchMove = (e: TouchEvent) => {
     e.preventDefault();
+    // Slightly snappier look on short landscape phones only
+    const phoneLandscape =
+      this.isTouch &&
+      typeof window !== "undefined" &&
+      window.matchMedia(
+        "(orientation: landscape) and (max-height: 520px)",
+      ).matches;
+    const lookMul = phoneLandscape ? 2.05 : 1.6;
     for (const t of Array.from(e.changedTouches)) {
       if (t.identifier === this.touchLookId) {
         const dx = t.clientX - this.lastTouchLook.x;
         const dy = t.clientY - this.lastTouchLook.y;
         this.lastTouchLook = { x: t.clientX, y: t.clientY };
         if (!this.survival.dead) {
-          this.player.applyLook(dx, dy, MOUSE_SENS * 1.6);
+          this.player.applyLook(dx, dy, MOUSE_SENS * lookMul);
         }
       }
     }
@@ -797,7 +836,7 @@ export class GameEngine {
     }
   }
 
-  /** LMB attack caterpillars when not mining a block (or sword preferred) */
+  /** LMB attack hostiles first, then caterpillars, then animals */
   private tryAttack(): void {
     const now = performance.now();
     if (now - this.lastAttack < 320) return;
@@ -805,29 +844,38 @@ export class GameEngine {
     const [lx, ly, lz] = this.player.lookDir();
     const tool = getTool(this.survival.heldToolId());
     const dmg = tool.attack;
-    // Prefer entity hit order: caterpillars (hostile) then animals
-    let result = this.caterpillars.tryPunch(
-      this.player.x,
-      this.player.eyeY,
-      this.player.z,
-      lx,
-      ly,
-      lz,
-      tool.kind === "sword" ? 4.2 : 3.2,
-      dmg,
-    );
-    if (!result) {
-      result = this.animals.tryPunch(
+    const range = tool.kind === "sword" ? 4.2 : 3.2;
+    let result =
+      this.hostiles.tryPunch(
         this.player.x,
         this.player.eyeY,
         this.player.z,
         lx,
         ly,
         lz,
-        tool.kind === "sword" ? 4.2 : 3.2,
+        range,
+        dmg,
+      ) ||
+      this.caterpillars.tryPunch(
+        this.player.x,
+        this.player.eyeY,
+        this.player.z,
+        lx,
+        ly,
+        lz,
+        range,
+        dmg,
+      ) ||
+      this.animals.tryPunch(
+        this.player.x,
+        this.player.eyeY,
+        this.player.z,
+        lx,
+        ly,
+        lz,
+        range,
         dmg,
       );
-    }
     if (result) {
       this.lastAttack = now;
       this.viewHand.punch();
@@ -849,6 +897,25 @@ export class GameEngine {
       this.emitHud();
     }
     return ok;
+  }
+
+  /** Debug: snap between noon and midnight for testing hostiles / lighting. */
+  toggleDayNightDebug(): void {
+    if (this.dayNight.isDaytime) {
+      this.dayNight.setToMidnight();
+    } else {
+      this.dayNight.setToNoon();
+    }
+    const dn = this.dayNight.update(
+      0,
+      this.player.x,
+      this.player.y,
+      this.player.z,
+      this.camera,
+    );
+    this.weather.setDayNight(dn);
+    this.dayNight.finalizeKeyLight();
+    this.emitHud();
   }
 
   private toggleCrafting(): void {
@@ -942,6 +1009,29 @@ export class GameEngine {
       this.animals.update(dt, this.world, this.player);
     }
 
+    // Day/night first so hostiles know sun state
+    const dn = this.dayNight.update(
+      dt,
+      this.player.x,
+      this.player.y,
+      this.player.z,
+      this.camera,
+    );
+
+    if (this.playing || this.hostiles.count > 0) {
+      const hits = this.hostiles.update(
+        dt,
+        this.world,
+        this.player,
+        dn.dayFactor,
+      );
+      if (hits.length > 0 && !this.survival.dead && this.playing) {
+        for (const h of hits) {
+          this.applyHostileHit(h.damage, h.kind);
+        }
+      }
+    }
+
     if (this.playing || this.itemDrops.count > 0) {
       const collected = this.itemDrops.update(
         dt,
@@ -957,17 +1047,14 @@ export class GameEngine {
 
     this.world.ensureChunksAround(this.player.x, this.player.z);
 
-
-
-    const dn = this.dayNight.update(
+    this.birds.setDayFactor(dn.dayFactor);
+    this.birds.update(
       dt,
       this.player.x,
       this.player.y,
       this.player.z,
-      this.camera,
+      this.player.yaw,
     );
-    this.birds.setDayFactor(dn.dayFactor);
-    this.birds.update(dt, this.player.x, this.player.y, this.player.z);
     this.weather.setDayNight(dn);
     this.weather.update(
       dt,
@@ -976,6 +1063,21 @@ export class GameEngine {
       this.player.y,
       this.player.z,
     );
+
+    // Cloth wind after weather so storm vectors are current (per-giant sample)
+    if (this.playing || this.slenderGiant.count > 0) {
+      this.slenderGiant.update(
+        dt,
+        this.world,
+        this.player,
+        dn.dayFactor,
+        (x, z) => {
+          const s = this.weather.sampleAt(x, z);
+          return { windX: s.windX, windZ: s.windZ };
+        },
+      );
+    }
+
     // Ambiance after weather so we can use wind/rain sample
     {
       const w = this.weather.sample;
@@ -1338,7 +1440,6 @@ export class GameEngine {
   }
 
   private hurtFromCaterpillars(dt: number): void {
-
     this._caterHurt = Math.max(0, this._caterHurt - dt);
     if (this._caterHurt > 0) return;
     const d = this.caterpillars.distanceToNearest(
@@ -1346,25 +1447,50 @@ export class GameEngine {
       this.player.y,
       this.player.z,
     );
-    if (d < 1.15) {
-      this.survival.damage(2);
-      this._caterHurt = 0.85;
+    // Caterpillars barely nibble now — real danger is night hostiles
+    if (d < 0.95) {
+      this.survival.damage(1);
+      this._caterHurt = 1.4;
       const ang = Math.random() * Math.PI * 2;
-      this.player.vx += Math.cos(ang) * 4;
-      this.player.vz += Math.sin(ang) * 4;
-      this.player.vy = Math.max(this.player.vy, 4);
+      this.player.vx += Math.cos(ang) * 2.2;
+      this.player.vz += Math.sin(ang) * 2.2;
+      this.player.vy = Math.max(this.player.vy, 2.5);
     }
+  }
+
+  private applyHostileHit(
+    damage: number,
+    kind: "shambler" | "crawler" | "slender",
+  ): void {
+    if (this.survival.dead) return;
+    this.survival.damage(damage);
+    this.audio.hurt();
+    // Knockback away from nearest threat direction (generic push)
+    const ang = this.player.yaw + Math.PI + (Math.random() - 0.5) * 0.8;
+    const force = kind === "slender" ? 7.5 : kind === "crawler" ? 5.5 : 6.2;
+    this.player.vx += Math.sin(ang) * force;
+    this.player.vz += Math.cos(ang) * force;
+    this.player.vy = Math.max(this.player.vy, kind === "slender" ? 5.5 : 4.2);
+    this.emitHud();
   }
 
   private emitHud(): void {
     const stats = this.caterpillars.stats;
+    const hs = this.hostiles.stats;
     const w = this.weather.sample;
     const sel = this.survival.selectedSlot?.id ?? 0;
+    const night = this.dayNight.state.dayFactor < 0.4;
     const tip = !this.survival.craftedFirst
       ? "Press E to craft · wood → planks → sticks → tools"
       : !this.survival.madePick
         ? "Craft a pickaxe to mine stone efficiently"
-        : "Stone tools unlock faster progression";
+        : night && hs.alive > 0
+          ? hs.slender > 0
+            ? "Something tall is watching — craft a sword, find shelter"
+            : "Hostiles nearby — fight or hide until dawn"
+          : night
+            ? "Night falls — stay alert outdoors"
+            : "Stone tools unlock faster progression";
 
     this.onHud?.({
       playing: this.playing,
@@ -1382,10 +1508,13 @@ export class GameEngine {
       caterpillars: stats.alive,
       banished: stats.banished,
       animals: this.animals.count,
+      hostiles: hs.alive,
+      hostilesKilled: hs.killed,
+      slenderNearby: hs.slender > 0,
       weather: w.kind,
       rain: w.rain,
       dayPhase: this.dayNight.state.phase,
-      isDay: this.dayNight.state.sunElevation >= 0,
+      isDay: this.dayNight.state.dayFactor > 0.45,
       biome: this.world.getBiomeLabel(this.player.x, this.player.z),
       health: this.survival.health,
       maxHealth: MAX_HEALTH,
@@ -1430,6 +1559,17 @@ declare global {
       getPitch: () => number;
       getSpeed: () => number;
       getPosition: () => { x: number; y: number; z: number };
+      getBirds: () => {
+        count: number;
+        day: number;
+        samples: { x: number; y: number; z: number; op: number }[];
+      };
+      getDayNight: () => {
+        dayFactor: number;
+        sunElevation: number;
+        phase: number;
+        timeOfDay: number;
+      };
     };
   }
 }

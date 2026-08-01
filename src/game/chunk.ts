@@ -277,10 +277,13 @@ function emitQuad(
   uvs: [number, number][],
   normal: [number, number, number],
   shade: number,
-  wind: number,
+  /** Single wind weight, or 4 per-corner weights (stem=0 → tip=1 for plants) */
+  wind: number | [number, number, number, number],
   doubleSided: boolean,
 ): void {
   const base = m.base;
+  const windAt = (c: number) =>
+    typeof wind === "number" ? wind : wind[c]!;
   for (let c = 0; c < 4; c++) {
     const p = positions[c]!;
     m.positions.push(p[0]!, p[1]!, p[2]!);
@@ -288,7 +291,7 @@ function emitQuad(
     const uv = uvs[c]!;
     m.uvs.push(uv[0], uv[1]);
     m.colors.push(shade, shade, shade);
-    m.winds.push(wind);
+    m.winds.push(windAt(c));
   }
   m.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
   m.base += 4;
@@ -301,7 +304,7 @@ function emitQuad(
       const uv = uvs[c]!;
       m.uvs.push(uv[0], uv[1]);
       m.colors.push(shade * 0.92, shade * 0.92, shade * 0.92);
-      m.winds.push(wind);
+      m.winds.push(windAt(c));
     }
     // opposite winding
     m.indices.push(b2, b2 + 2, b2 + 1, b2, b2 + 3, b2 + 2);
@@ -338,7 +341,11 @@ function emitCrossPlant(
   const y0 = wy;
   const y1 = wy + 1;
 
-  // Plane A: (x0,z0) -> (x1,z1)
+  // Bottom corners stay planted (wind 0); top corners take full sway → shear
+  const tip = Math.min(1.2, wind * 1.15);
+  const plantWinds: [number, number, number, number] = [0, 0, tip, tip];
+
+  // Plane A: (x0,z0) -> (x1,z1) — verts: bot, bot, top, top
   emitQuad(
     m,
     [
@@ -350,7 +357,7 @@ function emitCrossPlant(
     uvPairs,
     [0.707, 0, -0.707],
     1,
-    wind,
+    plantWinds,
     true,
   );
   // Plane B: (x0,z1) -> (x1,z0)
@@ -364,8 +371,8 @@ function emitCrossPlant(
     ],
     uvPairs,
     [0.707, 0, 0.707],
-    0.95,
-    wind,
+    1,
+    plantWinds,
     true,
   );
 }

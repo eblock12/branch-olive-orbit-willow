@@ -34,8 +34,12 @@ function scaleNoteHz(
 export class GameAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private readonly masterLevel = 1.45;
   private sfx: GainNode | null = null;
   private amb: GainNode | null = null;
+  /** Post-ambience bus — thunder ducks this so rain/wind/bed clear for the boom */
+  private ambDuck: GainNode | null = null;
+  private ambDuckUntil = 0;
 
   private sfxDry: GainNode | null = null;
   private verbEarly: ConvolverNode | null = null;
@@ -98,7 +102,7 @@ export class GameAudio {
 
   setMuted(m: boolean): void {
     this.muted = m;
-    if (this.master) this.master.gain.value = m ? 0 : 1;
+    if (this.master) this.master.gain.value = m ? 0 : this.masterLevel;
   }
 
   get isMuted(): boolean {
@@ -288,7 +292,8 @@ export class GameAudio {
   ): void {
     if (!this.started || this.muted) return;
     const d = Math.max(0, dist);
-    const delayMs = Math.min(8000, (d / 343) * 1000);
+    // Slightly slower-than-light delay so distant strikes feel delayed
+    const delayMs = Math.min(10000, (d / 300) * 1000 * (0.9 + Math.random() * 0.25));
     const near = Math.max(0, 1 - d / 120);
     const vol = Math.min(1.35, strength * 1.25) * (0.35 + near * 0.85);
     if (vol < 0.04) return;
@@ -307,25 +312,29 @@ export class GameAudio {
           .webkitAudioContext;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.muted ? 0 : 1;
+      this.master.gain.value = this.muted ? 0 : this.masterLevel;
       this.master.connect(this.ctx.destination);
 
       this.sfx = this.ctx.createGain();
-      this.sfx.gain.value = 0.55;
+      this.sfx.gain.value = 0.72;
       this.sfxDry = this.ctx.createGain();
-      this.sfxDry.gain.value = 0.92;
+      this.sfxDry.gain.value = 0.94;
       this.sfx.connect(this.sfxDry);
       this.sfxDry.connect(this.master);
 
       this.buildLayeredReverb(this.ctx, this.sfx, this.master);
 
+      // Ambience bed (rain / wind / day-night) → duck bus → master
       this.amb = this.ctx.createGain();
-      this.amb.gain.value = 0.7;
-      this.amb.connect(this.master);
+      this.amb.gain.value = 0.85;
+      this.ambDuck = this.ctx.createGain();
+      this.ambDuck.gain.value = 1;
+      this.amb.connect(this.ambDuck);
+      this.ambDuck.connect(this.master);
       if (this.verbHall) {
         const ambSend = this.ctx.createGain();
         ambSend.gain.value = 0.04;
-        this.amb.connect(ambSend);
+        this.ambDuck.connect(ambSend);
         ambSend.connect(this.verbHall);
       }
 
@@ -473,15 +482,20 @@ export class GameAudio {
   }
 
   /**
-   * Route through a 3D panner at world position, then into SFX bus.
-   * Returns the panner so callers can hang sources off it.
+   * Route through a 3D panner at world position, then into SFX or ambience bus.
    */
   private outSpatial(
     node: AudioNode,
     x: number,
     y: number,
     z: number,
-    opts?: { thunder?: boolean; refDistance?: number; maxDistance?: number },
+    opts?: {
+      thunder?: boolean;
+      refDistance?: number;
+      maxDistance?: number;
+      /** Bird / bed sounds that should duck under thunder */
+      ambience?: boolean;
+    },
   ): PannerNode | null {
     if (!this.ctx || !this.sfx) {
       this.outSfx(node, opts?.thunder);
@@ -498,7 +512,11 @@ export class GameAudio {
     p.coneOuterGain = 1;
     this.setPannerPos(p, x, y, z);
     node.connect(p);
-    p.connect(this.sfx);
+    if (opts?.ambience && this.ambDuck) {
+      p.connect(this.ambDuck);
+    } else {
+      p.connect(this.sfx);
+    }
     if (opts?.thunder && this.thunderVerbSend) {
       const send = this.ctx.createGain();
       send.gain.value = 0.4;
@@ -506,6 +524,31 @@ export class GameAudio {
       send.connect(this.thunderVerbSend);
     }
     return p;
+  }
+
+  /**
+   * Duck rain/wind/day-night bed under a loud event (thunder).
+   * amount: 0..1 reduction (0.7 ≈ −10 dB-ish). Hold then slow release.
+   */
+  private duckAmbience(
+    amount: number,
+    attack = 0.05,
+    hold = 0.8,
+    release = 2.2,
+  ): void {
+    if (!this.ctx || !this.ambDuck) return;
+    const g = this.ambDuck.gain;
+    const t0 = this.ctx.currentTime;
+    const floor = Math.max(0.12, 1 - Math.min(0.92, amount));
+    const end = t0 + attack + hold + release;
+    // Don't let a weak far duck cancel a stronger close duck mid-way
+    if (end < this.ambDuckUntil && floor > g.value + 0.05) return;
+    this.ambDuckUntil = end;
+    g.cancelScheduledValues(t0);
+    g.setValueAtTime(Math.max(floor, g.value), t0);
+    g.linearRampToValueAtTime(floor, t0 + Math.max(0.02, attack));
+    g.setValueAtTime(floor, t0 + attack + hold);
+    g.linearRampToValueAtTime(1, end);
   }
 
   private setPannerPos(p: PannerNode, x: number, y: number, z: number): void {
@@ -955,7 +998,9 @@ export class GameAudio {
     );
   }
 
-  /** Punchy thunder through a master low-pass bus + spatial panner */
+  /**
+   * Thunder: punchy when close, slow deep rolls when far, with strike-to-strike variation.
+   */
   private playThunder(
     vol: number,
     dist: number,
@@ -966,13 +1011,33 @@ export class GameAudio {
     if (!this.ctx || !this.sfx || !this.noiseBuf) return;
     const ctx = this.ctx;
     const t0 = ctx.currentTime;
-    const close = Math.max(0, 1 - dist / 50);
+    // close: 0 at ≥90m, 1 at 0m — extended so mid-range still has some crack
+    const close = Math.max(0, 1 - dist / 90);
     const far = 1 - close;
-    const bodyDur = 2.6 + far * 4.2 + Math.random() * 1.6;
+    const mid = close * far * 4; // peaks around medium distance
     const rumbleBuf = this.thunderNoiseBuf ?? this.noiseBuf;
-    const V = vol * 1.25;
+    const V = vol * 1.2;
 
-    // World pos: use provided strike, else invent one at distance along random bearing
+    // Strike character roll
+    const roll = Math.random();
+    type Profile = "crack" | "roll" | "double" | "canyon" | "clatter";
+    let profile: Profile;
+    if (close > 0.55 && roll < 0.45) profile = "crack";
+    else if (far > 0.55 && roll < 0.5) profile = "canyon";
+    else if (roll < 0.22) profile = "double";
+    else if (roll < 0.45) profile = "clatter";
+    else profile = "roll";
+
+    // Duration: distant = long slow rumble; close = shorter punch
+    let bodyDur =
+      2.2 +
+      far * 7.5 + // up to ~10s far
+      Math.random() * (1.2 + far * 2.5);
+    if (profile === "canyon") bodyDur *= 1.25 + Math.random() * 0.3;
+    if (profile === "crack") bodyDur *= 0.65 + Math.random() * 0.2;
+    if (profile === "double") bodyDur *= 0.9;
+
+    // World pos
     let sx = wx;
     let sy = wy;
     let sz = wz;
@@ -980,7 +1045,7 @@ export class GameAudio {
       const ang = this.listenYaw + (Math.random() - 0.5) * Math.PI;
       const d = Math.max(8, dist);
       sx = this.listenX + Math.sin(ang) * d;
-      sy = this.listenY + 12;
+      sy = this.listenY + 12 + far * 20;
       sz = this.listenZ + Math.cos(ang) * d;
     }
 
@@ -988,29 +1053,43 @@ export class GameAudio {
     bus.gain.value = 1;
     const masterLp = ctx.createBiquadFilter();
     masterLp.type = "lowpass";
-    const openHz = 900 + close * 1400;
-    const bodyHz = 280 + close * 120;
+    // Distant: stays dark; close: brief bright open then boom
+    const openHz =
+      profile === "crack"
+        ? 1400 + close * 900
+        : 500 + close * 1200 + Math.random() * 200;
+    const bodyHz = 90 + far * 40 + close * 160 + (profile === "canyon" ? -25 : 0);
+    const tailHz = 45 + far * 25 + Math.random() * 15;
     masterLp.frequency.setValueAtTime(openHz, t0);
     masterLp.frequency.exponentialRampToValueAtTime(
-      Math.max(120, openHz * 0.55),
-      t0 + 0.04 + far * 0.05,
+      Math.max(80, openHz * (0.4 + far * 0.25)),
+      t0 + 0.05 + far * 0.25 + (profile === "canyon" ? 0.2 : 0),
     );
     masterLp.frequency.exponentialRampToValueAtTime(
-      bodyHz,
-      t0 + 0.35 + far * 0.4,
+      Math.max(60, bodyHz),
+      t0 + 0.4 + far * 1.1,
     );
     masterLp.frequency.exponentialRampToValueAtTime(
-      90 + far * 40,
-      t0 + bodyDur * 0.7,
+      Math.max(40, tailHz),
+      t0 + bodyDur * 0.75,
     );
-    masterLp.Q.value = 0.7;
+    masterLp.Q.value = 0.55 + Math.random() * 0.35;
     bus.connect(masterLp);
     this.outSpatial(masterLp, sx, sy, sz, {
       thunder: true,
-      refDistance: 18,
-      maxDistance: 160,
+      refDistance: 18 + far * 12,
+      maxDistance: 180,
     });
 
+    // Clear rain/wind bed under the boom (stronger when close)
+    this.duckAmbience(
+      0.5 + close * 0.35 + (profile === "crack" ? 0.08 : 0),
+      0.04 + far * 0.08,
+      0.35 + close * 0.55 + bodyDur * 0.12,
+      1.4 + far * 2.2 + bodyDur * 0.2,
+    );
+
+    // Reverb duck: more canyon wet for distant
     if (this.sfxDry && this.verbCanyonGain) {
       const dry = this.sfxDry.gain;
       const wet = this.verbCanyonGain.gain;
@@ -1018,174 +1097,241 @@ export class GameAudio {
       wet.cancelScheduledValues(t0);
       dry.setValueAtTime(dry.value, t0);
       wet.setValueAtTime(wet.value, t0);
-      dry.linearRampToValueAtTime(0.7, t0 + 0.03);
-      wet.linearRampToValueAtTime(0.22, t0 + 0.08);
-      dry.linearRampToValueAtTime(0.92, t0 + bodyDur + 2);
-      wet.linearRampToValueAtTime(0.03, t0 + bodyDur + 2.5);
+      dry.linearRampToValueAtTime(0.68 + close * 0.1, t0 + 0.04);
+      wet.linearRampToValueAtTime(0.12 + far * 0.18, t0 + 0.12);
+      dry.linearRampToValueAtTime(0.92, t0 + bodyDur + 2.5);
+      wet.linearRampToValueAtTime(0.03, t0 + bodyDur + 3);
     }
     if (this.verbHallGain) {
       const h = this.verbHallGain.gain;
       h.cancelScheduledValues(t0);
       h.setValueAtTime(h.value, t0);
-      h.linearRampToValueAtTime(0.16, t0 + 0.08);
-      h.linearRampToValueAtTime(0.055, t0 + bodyDur + 2);
+      h.linearRampToValueAtTime(0.1 + far * 0.1, t0 + 0.1);
+      h.linearRampToValueAtTime(0.055, t0 + bodyDur + 2.5);
     }
 
-    if (close > 0.12) {
-      {
+    // —— Close crack / slap (skipped for pure distant canyon) ——
+    if (close > 0.1 && profile !== "canyon") {
+      const crackN = profile === "crack" ? 2 : profile === "clatter" ? 3 : 1;
+      for (let c = 0; c < crackN; c++) {
+        const tc = t0 + c * (0.04 + Math.random() * 0.06);
         const src = ctx.createBufferSource();
         src.buffer = this.noiseBuf;
+        src.playbackRate.value = 0.9 + Math.random() * 0.35;
         const bp = ctx.createBiquadFilter();
         bp.type = "bandpass";
-        bp.frequency.value = 200 + close * 400;
-        bp.Q.value = 0.8;
+        bp.frequency.value = 180 + close * 500 + Math.random() * 200;
+        bp.Q.value = 0.6 + Math.random() * 0.6;
         const g = ctx.createGain();
-        const peak = 0.7 * V * close;
-        g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(peak, t0 + 0.004);
-        g.gain.exponentialRampToValueAtTime(peak * 0.35, t0 + 0.05);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+        const peak = 0.55 * V * close * (profile === "crack" ? 1.15 : 0.85);
+        g.gain.setValueAtTime(0.0001, tc);
+        g.gain.exponentialRampToValueAtTime(peak, tc + 0.003 + Math.random() * 0.004);
+        g.gain.exponentialRampToValueAtTime(peak * 0.3, tc + 0.04);
+        g.gain.exponentialRampToValueAtTime(0.0001, tc + 0.14 + Math.random() * 0.08);
         src.connect(bp);
         bp.connect(g);
         g.connect(bus);
-        src.start(t0);
-        src.stop(t0 + 0.2);
+        src.start(tc);
+        src.stop(tc + 0.25);
       }
-      {
+      // Sub kick on near hits
+      if (close > 0.2) {
         const o = ctx.createOscillator();
         o.type = "sine";
-        o.frequency.setValueAtTime(95 + Math.random() * 30, t0);
-        o.frequency.exponentialRampToValueAtTime(32, t0 + 0.18);
-        o.frequency.exponentialRampToValueAtTime(22, t0 + 0.55);
+        o.frequency.setValueAtTime(70 + Math.random() * 50 + close * 40, t0);
+        o.frequency.exponentialRampToValueAtTime(28, t0 + 0.2);
+        o.frequency.exponentialRampToValueAtTime(18, t0 + 0.65);
         const g = ctx.createGain();
-        const peak = 0.55 * V * (0.4 + close * 0.7);
+        const peak = 0.5 * V * (0.35 + close * 0.75);
         g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(peak, t0 + 0.006);
-        g.gain.exponentialRampToValueAtTime(peak * 0.45, t0 + 0.12);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.7);
+        g.gain.exponentialRampToValueAtTime(peak, t0 + 0.005);
+        g.gain.exponentialRampToValueAtTime(peak * 0.4, t0 + 0.14);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.8);
         o.connect(g);
         g.connect(bus);
         o.start(t0);
-        o.stop(t0 + 0.75);
-      }
-      if (close > 0.35 && Math.random() < 0.7) {
-        const t1 = t0 + 0.03 + Math.random() * 0.05;
-        const src = ctx.createBufferSource();
-        src.buffer = this.noiseBuf;
-        const lp = ctx.createBiquadFilter();
-        lp.type = "lowpass";
-        lp.frequency.value = 400;
-        const g = ctx.createGain();
-        g.gain.setValueAtTime(0.0001, t1);
-        g.gain.exponentialRampToValueAtTime(0.35 * V * close, t1 + 0.005);
-        g.gain.exponentialRampToValueAtTime(0.0001, t1 + 0.15);
-        src.connect(lp);
-        lp.connect(g);
-        g.connect(bus);
-        src.start(t1);
-        src.stop(t1 + 0.18);
+        o.stop(t0 + 0.85);
       }
     }
 
-    for (let L = 0; L < 3; L++) {
+    // Double strike: delayed secondary crack
+    if (profile === "double" && close > 0.15) {
+      const t1 = t0 + 0.12 + Math.random() * 0.18;
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.value = 350 + Math.random() * 200;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t1);
+      g.gain.exponentialRampToValueAtTime(0.4 * V * close, t1 + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, t1 + 0.2);
+      src.connect(lp);
+      lp.connect(g);
+      g.connect(bus);
+      src.start(t1);
+      src.stop(t1 + 0.25);
+    }
+
+    // —— Layered rumble body (slower & lower when far) ——
+    const layers = 3 + (far > 0.45 ? 1 : 0) + (profile === "canyon" ? 1 : 0);
+    for (let L = 0; L < layers; L++) {
       const src = ctx.createBufferSource();
       src.buffer = rumbleBuf;
       src.loop = true;
-      src.playbackRate.value = 0.7 + L * 0.1 + Math.random() * 0.05;
+      // Distant: very slow playback = deep, lazy rumble
+      const rateBase =
+        profile === "canyon"
+          ? 0.28 + L * 0.06
+          : 0.38 + L * 0.08 + close * 0.35;
+      src.playbackRate.value =
+        rateBase + Math.random() * 0.06 - far * 0.08;
 
       const lp = ctx.createBiquadFilter();
       lp.type = "lowpass";
-      lp.frequency.setValueAtTime(70 + L * 40 + close * 50, t0);
+      const startF = 40 + L * 28 + close * 70 + mid * 15;
+      const endF = 22 + L * 10 + far * 8;
+      lp.frequency.setValueAtTime(startF, t0);
       lp.frequency.exponentialRampToValueAtTime(
-        35 + L * 12,
-        t0 + bodyDur * 0.85,
+        Math.max(18, endF),
+        t0 + bodyDur * (0.8 + Math.random() * 0.15),
       );
-      lp.Q.value = 0.6 + L * 0.1;
+      lp.Q.value = 0.5 + L * 0.08 + Math.random() * 0.15;
 
+      // Slow modulation — much slower at distance
       const lfo = ctx.createOscillator();
-      lfo.type = "sine";
-      lfo.frequency.value = 0.3 + L * 0.18 + Math.random() * 0.12;
+      lfo.type = Math.random() < 0.3 ? "triangle" : "sine";
+      lfo.frequency.value =
+        (0.06 + L * 0.05) * (0.35 + close * 0.9) + Math.random() * 0.04;
       const lfoG = ctx.createGain();
-      lfoG.gain.value = 18 + L * 10;
+      lfoG.gain.value = 12 + L * 8 + far * 10;
       lfo.connect(lfoG);
       lfoG.connect(lp.frequency);
       lfo.start(t0);
-      lfo.stop(t0 + bodyDur + 0.2);
+      lfo.stop(t0 + bodyDur + 0.4);
+
+      // Optional second slow LFO for irregular distant rolls
+      if (far > 0.35 && L === 0) {
+        const lfo2 = ctx.createOscillator();
+        lfo2.type = "sine";
+        lfo2.frequency.value = 0.04 + Math.random() * 0.05;
+        const lfo2G = ctx.createGain();
+        lfo2G.gain.value = 8 + far * 12;
+        lfo2.connect(lfo2G);
+        lfo2G.connect(lp.frequency);
+        lfo2.start(t0);
+        lfo2.stop(t0 + bodyDur + 0.4);
+      }
 
       const g = ctx.createGain();
-      const peak = (0.42 - L * 0.07) * V * (0.85 + far * 0.35);
+      const peak =
+        (0.4 - L * 0.05) *
+        V *
+        (0.75 + far * 0.45) *
+        (profile === "canyon" ? 1.1 : 1);
+      // Distant attack is slow (swell); close is snappy
       const attack =
-        close > 0.3 ? 0.02 + L * 0.03 : 0.08 + far * 0.2 + L * 0.06;
+        profile === "canyon"
+          ? 0.35 + far * 0.9 + L * 0.15
+          : close > 0.35
+            ? 0.025 + L * 0.03
+            : 0.15 + far * 0.55 + L * 0.1 + Math.random() * 0.12;
       g.gain.setValueAtTime(0.0001, t0);
       g.gain.exponentialRampToValueAtTime(peak, t0 + attack);
+      // Irregular swell shape for variation
+      const midA = 0.22 + Math.random() * 0.2;
+      const midB = 0.48 + Math.random() * 0.2;
       g.gain.exponentialRampToValueAtTime(
-        peak * (0.5 + Math.random() * 0.2),
-        t0 + bodyDur * (0.28 + L * 0.08),
+        peak * (0.4 + Math.random() * 0.25),
+        t0 + bodyDur * midA,
       );
       g.gain.exponentialRampToValueAtTime(
-        peak * (0.65 + Math.random() * 0.2),
-        t0 + bodyDur * (0.55 + L * 0.05),
+        peak * (0.55 + Math.random() * 0.3 + far * 0.1),
+        t0 + bodyDur * midB,
       );
+      // Distant: extra late swell
+      if (far > 0.4) {
+        g.gain.exponentialRampToValueAtTime(
+          peak * (0.35 + Math.random() * 0.25),
+          t0 + bodyDur * (0.72 + Math.random() * 0.1),
+        );
+      }
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + bodyDur);
 
       src.connect(lp);
       lp.connect(g);
       g.connect(bus);
       src.start(t0);
-      src.stop(t0 + bodyDur + 0.05);
+      src.stop(t0 + bodyDur + 0.1);
     }
 
+    // Deep sub foundation — slower glide when far
     {
       const o = ctx.createOscillator();
       o.type = "sine";
-      const base = 36 + Math.random() * 10;
-      o.frequency.setValueAtTime(base * (1 + close * 0.5), t0);
-      o.frequency.exponentialRampToValueAtTime(20, t0 + bodyDur * 0.75);
+      const base = 28 + Math.random() * 14 + (profile === "canyon" ? -4 : 0);
+      o.frequency.setValueAtTime(base * (1 + close * 0.45), t0);
+      o.frequency.exponentialRampToValueAtTime(
+        16 + Math.random() * 4,
+        t0 + bodyDur * (0.7 + far * 0.15),
+      );
       const g = ctx.createGain();
-      const subPeak = 0.38 * V * (0.55 + far * 0.55 + close * 0.25);
+      const subPeak = 0.36 * V * (0.5 + far * 0.65 + close * 0.2);
+      const subAtk = 0.03 + far * 0.35 + (profile === "canyon" ? 0.25 : 0);
       g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(subPeak, t0 + 0.02 + far * 0.1);
-      g.gain.exponentialRampToValueAtTime(subPeak * 0.5, t0 + bodyDur * 0.4);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + bodyDur * 0.95);
+      g.gain.exponentialRampToValueAtTime(subPeak, t0 + subAtk);
+      g.gain.exponentialRampToValueAtTime(subPeak * 0.55, t0 + bodyDur * 0.45);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + bodyDur * 0.98);
       o.connect(g);
       g.connect(bus);
       o.start(t0);
-      o.stop(t0 + bodyDur);
+      o.stop(t0 + bodyDur + 0.05);
     }
 
-    const echoes = 2 + (far > 0.4 ? 1 : 0) + (Math.random() < 0.5 ? 1 : 0);
+    // Echo / multipath rolls — wider spacing & slower when distant
+    const echoes =
+      1 +
+      (far > 0.25 ? 1 : 0) +
+      (far > 0.5 ? 1 : 0) +
+      (profile === "canyon" ? 1 : 0) +
+      (Math.random() < 0.4 ? 1 : 0);
     for (let e = 0; e < echoes; e++) {
-      const delay = 0.35 + e * (0.55 + Math.random() * 0.45) + far * 0.3;
-      const eVol = V * (0.5 - e * 0.1) * (0.65 + far * 0.5);
-      if (eVol < 0.03) continue;
+      const delay =
+        0.45 +
+        e * (0.7 + far * 0.85 + Math.random() * 0.55) +
+        far * 0.5 +
+        Math.random() * 0.3;
+      const eVol = V * (0.48 - e * 0.08) * (0.55 + far * 0.6);
+      if (eVol < 0.025) continue;
 
       const src = ctx.createBufferSource();
       src.buffer = rumbleBuf;
-      src.playbackRate.value = 0.65 + Math.random() * 0.2;
+      src.playbackRate.value = 0.32 + far * 0.08 + Math.random() * 0.12;
       const lp = ctx.createBiquadFilter();
       lp.type = "lowpass";
-      lp.frequency.value = 55 + Math.random() * 40;
+      lp.frequency.value = 35 + Math.random() * 30 + close * 20;
       const g = ctx.createGain();
       const te = t0 + delay;
-      const edur = 1.4 + far * 2.2 + Math.random() * 0.8;
+      const edur = 1.8 + far * 3.5 + Math.random() * 1.4;
+      const eAtk = 0.12 + far * 0.35 + Math.random() * 0.15;
       g.gain.setValueAtTime(0.0001, te);
-      g.gain.exponentialRampToValueAtTime(0.32 * eVol, te + 0.08);
-      g.gain.exponentialRampToValueAtTime(0.2 * eVol, te + edur * 0.4);
+      g.gain.exponentialRampToValueAtTime(0.3 * eVol, te + eAtk);
+      g.gain.exponentialRampToValueAtTime(0.18 * eVol, te + edur * 0.45);
       g.gain.exponentialRampToValueAtTime(0.0001, te + edur);
       src.connect(lp);
       lp.connect(g);
       g.connect(bus);
       src.start(te);
-      src.stop(te + edur + 0.05);
+      src.stop(te + edur + 0.08);
 
       const o = ctx.createOscillator();
       o.type = "sine";
-      o.frequency.setValueAtTime(44 - e * 4, te);
-      o.frequency.exponentialRampToValueAtTime(22, te + edur * 0.6);
+      o.frequency.setValueAtTime(38 - e * 3 + Math.random() * 6, te);
+      o.frequency.exponentialRampToValueAtTime(18, te + edur * 0.65);
       const og = ctx.createGain();
       og.gain.setValueAtTime(0.0001, te);
-      og.gain.exponentialRampToValueAtTime(0.2 * eVol, te + 0.06);
-      og.gain.exponentialRampToValueAtTime(0.0001, te + edur * 0.7);
+      og.gain.exponentialRampToValueAtTime(0.16 * eVol, te + eAtk);
+      og.gain.exponentialRampToValueAtTime(0.0001, te + edur * 0.75);
       o.connect(og);
       og.connect(bus);
       o.start(te);
@@ -1370,7 +1516,11 @@ export class GameAudio {
       g.gain.exponentialRampToValueAtTime(0.04, t + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
       o.connect(g);
-      this.outSpatial(g, bx, by, bz, { refDistance: 10, maxDistance: 80 });
+      this.outSpatial(g, bx, by, bz, {
+        refDistance: 10,
+        maxDistance: 80,
+        ambience: true,
+      });
       o.start(t);
       o.stop(t + 0.1);
     }

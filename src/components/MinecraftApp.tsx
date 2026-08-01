@@ -22,6 +22,9 @@ const DEFAULT_HUD: HudSnapshot = {
   caterpillars: 0,
   banished: 0,
   animals: 0,
+  hostiles: 0,
+  hostilesKilled: 0,
+  slenderNearby: false,
   weather: "clear",
   rain: 0,
   dayPhase: 0.2,
@@ -135,8 +138,20 @@ function GameShell() {
   const engineRef = useRef<GameEngine | null>(null);
   const [hud, setHud] = useState<HudSnapshot>(DEFAULT_HUD);
   const [ready, setReady] = useState(false);
+  /** Short landscape + touch only — phones held sideways; not tablets/desktop. */
+  const [phoneLandscape, setPhoneLandscape] = useState(false);
   const stickRef = useRef<HTMLDivElement>(null);
   const stickActive = useRef(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia(
+      "(orientation: landscape) and (max-height: 520px)",
+    );
+    const sync = () => setPhoneLandscape(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,6 +194,10 @@ function GameShell() {
     engineRef.current?.setCraftingOpen(false);
   }, []);
 
+  const onToggleDayNight = useCallback(() => {
+    engineRef.current?.toggleDayNightDebug();
+  }, []);
+
 
   const onStickDown = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -213,10 +232,15 @@ function GameShell() {
     }
     engineRef.current?.setTouchMove(dx, dy);
     const knob = el.querySelector("[data-knob]") as HTMLElement | null;
+    // Scale knob travel to stick size (smaller in phone landscape)
+    const travel = Math.min(rect.width, rect.height) * 0.28;
     if (knob) {
-      knob.style.transform = `translate(calc(-50% + ${dx * 28}px), calc(-50% + ${dy * 28}px))`;
+      knob.style.transform = `translate(calc(-50% + ${dx * travel}px), calc(-50% + ${dy * travel}px))`;
     }
   };
+
+  // Landscape phone + touch only — never alters portrait / desktop chrome
+  const lsTouch = phoneLandscape && hud.isTouch;
 
   return (
 
@@ -240,70 +264,136 @@ function GameShell() {
       )}
 
       {ready && (
-        <div className="pointer-events-none absolute left-0 right-0 top-0 z-20 flex items-start justify-between gap-3 p-4 pt-[max(1rem,env(safe-area-inset-top))]">
-          <div className="rounded-xl border border-border bg-surface/85 px-3 py-2 backdrop-blur-sm">
-            <p className="text-xs font-medium tracking-wide text-muted">Blockworld</p>
-            <p className="mt-0.5 font-mono text-xs tabular-nums text-subtle">
+        <div
+          className={`pointer-events-none absolute left-0 right-0 top-0 z-20 flex items-start justify-between gap-2 ${
+            lsTouch
+              ? "p-2 pl-[max(0.5rem,env(safe-area-inset-left))] pr-[max(0.5rem,env(safe-area-inset-right))] pt-[max(0.35rem,env(safe-area-inset-top))]"
+              : "gap-3 p-4 pt-[max(1rem,env(safe-area-inset-top))]"
+          }`}
+        >
+          <div
+            className={`rounded-xl border border-border bg-surface/85 backdrop-blur-sm ${
+              lsTouch ? "px-2 py-1" : "px-3 py-2"
+            }`}
+          >
+            <p
+              className={`font-medium tracking-wide text-muted ${
+                lsTouch ? "text-[10px]" : "text-xs"
+              }`}
+            >
+              Blockworld
+            </p>
+            <p
+              className={`mt-0.5 font-mono tabular-nums text-subtle ${
+                lsTouch ? "text-[10px]" : "text-xs"
+              }`}
+            >
               {hud.fps > 0 ? `${hud.fps} fps` : "—"} ·{" "}
-              {Math.floor(hud.pos.x)}, {Math.floor(hud.pos.y)}, {Math.floor(hud.pos.z)}
+              {Math.floor(hud.pos.x)}, {Math.floor(hud.pos.y)},{" "}
+              {Math.floor(hud.pos.z)}
             </p>
           </div>
-          <div className="flex flex-col items-end gap-2">
+          <div
+            className={`flex items-end gap-1.5 ${
+              lsTouch ? "flex-row flex-wrap justify-end" : "flex-col gap-2"
+            }`}
+          >
             {hud.playing && (
-              <div className="rounded-xl border border-border bg-surface/85 px-3 py-2 text-right backdrop-blur-sm">
-                <p className="text-xs text-muted">Selected</p>
-                <p className="text-sm font-medium text-fg">
+              <div
+                className={`rounded-xl border border-border bg-surface/85 text-right backdrop-blur-sm ${
+                  lsTouch ? "px-2 py-1" : "px-3 py-2"
+                }`}
+              >
+                {!lsTouch && (
+                  <p className="text-xs text-muted">Selected</p>
+                )}
+                <p
+                  className={`font-medium text-fg ${
+                    lsTouch ? "text-xs" : "text-sm"
+                  }`}
+                >
                   {hud.selectedName || "—"}
                 </p>
               </div>
             )}
-            <div className="rounded-xl border border-border bg-surface/85 px-3 py-2 text-right backdrop-blur-sm">
-              <p className="text-xs text-muted">Biome</p>
-              <p className="text-sm font-medium text-fg">{hud.biome}</p>
+            <div
+              className={`rounded-xl border border-border bg-surface/85 text-right backdrop-blur-sm ${
+                lsTouch ? "px-2 py-1" : "px-3 py-2"
+              }`}
+            >
+              {!lsTouch && <p className="text-xs text-muted">Biome</p>}
+              <p
+                className={`font-medium text-fg ${
+                  lsTouch ? "text-xs" : "text-sm"
+                }`}
+              >
+                {lsTouch ? "" : null}
+                {hud.biome}
+              </p>
             </div>
 
-            <div className="rounded-xl border border-border bg-surface/85 px-3 py-2 text-right backdrop-blur-sm">
-              <p className="text-xs text-muted">Weather</p>
-              <p className="text-sm font-medium text-fg">
+            <div
+              className={`rounded-xl border border-border bg-surface/85 text-right backdrop-blur-sm ${
+                lsTouch ? "px-2 py-1" : "px-3 py-2"
+              }`}
+            >
+              {!lsTouch && <p className="text-xs text-muted">Weather</p>}
+              <p
+                className={`font-medium text-fg ${
+                  lsTouch ? "text-xs" : "text-sm"
+                }`}
+              >
                 {WEATHER_LABEL[hud.weather] ?? hud.weather}
                 {hud.rain > 0.15 ? (
-                  <span className="font-mono text-xs text-subtle">
+                  <span className="font-mono text-[10px] text-subtle">
                     {" "}
-                    · {Math.round(hud.rain * 100)}% rain
+                    · {Math.round(hud.rain * 100)}%
                   </span>
                 ) : null}
               </p>
-              <p className="mt-1 font-mono text-xs tabular-nums text-subtle">
+              <p className="mt-0.5 font-mono text-[10px] tabular-nums text-subtle">
                 {hud.isDay ? "Day" : "Night"}
                 {" · "}
                 {formatClock(hud.dayPhase)}
               </p>
-            </div>
-
-            <div className="rounded-xl border border-border bg-surface/85 px-3 py-2 text-right backdrop-blur-sm">
-              <p className="text-xs text-muted">Naughty caterpillars</p>
-              <p className="font-mono text-sm tabular-nums text-fg">
-                {hud.caterpillars} about
-                {hud.banished > 0 ? (
-                  <span className="text-subtle"> · {hud.banished} banished</span>
-                ) : null}
-              </p>
-              <p className="mt-1 text-xs text-muted">Wildlife</p>
-              <p className="font-mono text-sm tabular-nums text-fg">
-                {hud.animals} nearby
-              </p>
+              {!lsTouch && (
+                <button
+                  type="button"
+                  onClick={onToggleDayNight}
+                  className="pointer-events-auto mt-2 w-full rounded-lg border border-border bg-bg/70 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted transition-colors hover:bg-bg hover:text-fg"
+                  title="Or press F3 while playing (keeps mouse look)"
+                >
+                  Debug: {hud.isDay ? "→ Night" : "→ Day"} · F3
+                </button>
+              )}
             </div>
           </div>
         </div>
       )}
 
       {ready && (
-        <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-col items-center gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <div
+          className={`absolute bottom-0 left-0 right-0 z-20 flex flex-col items-center ${
+            lsTouch
+              ? "gap-1 px-2 py-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pl-[max(6.75rem,env(safe-area-inset-left))] pr-[max(6.75rem,env(safe-area-inset-right))]"
+              : "gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+          }`}
+        >
           {/* Health + hunger */}
-          <div className="flex w-full max-w-md flex-col gap-1.5 px-1">
-            <div className="flex items-center gap-1.5">
-              <span className="w-12 shrink-0 text-[10px] font-medium uppercase tracking-wide text-subtle">
-                Health
+          <div
+            className={`flex w-full max-w-md px-1 ${
+              lsTouch
+                ? "max-w-sm flex-row items-center gap-3"
+                : "flex-col gap-1.5"
+            }`}
+          >
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span
+                className={`shrink-0 font-medium uppercase tracking-wide text-subtle ${
+                  lsTouch ? "w-8 text-[9px]" : "w-12 text-[10px]"
+                }`}
+              >
+                {lsTouch ? "HP" : "Health"}
               </span>
               <div className="flex flex-1 gap-0.5">
                 {Array.from({ length: 10 }, (_, i) => {
@@ -312,7 +402,9 @@ function GameShell() {
                   return (
                     <div
                       key={`h${i}`}
-                      className="h-2.5 flex-1 overflow-hidden rounded-sm bg-bg/80 ring-1 ring-border"
+                      className={`flex-1 overflow-hidden rounded-sm bg-bg/80 ring-1 ring-border ${
+                        lsTouch ? "h-2" : "h-2.5"
+                      }`}
                     >
                       <div
                         className="h-full bg-rose-500 transition-[width] duration-150"
@@ -323,9 +415,13 @@ function GameShell() {
                 })}
               </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-12 shrink-0 text-[10px] font-medium uppercase tracking-wide text-subtle">
-                Hunger
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span
+                className={`shrink-0 font-medium uppercase tracking-wide text-subtle ${
+                  lsTouch ? "w-8 text-[9px]" : "w-12 text-[10px]"
+                }`}
+              >
+                {lsTouch ? "Fd" : "Hunger"}
               </span>
               <div className="flex flex-1 gap-0.5">
                 {Array.from({ length: 10 }, (_, i) => {
@@ -334,7 +430,9 @@ function GameShell() {
                   return (
                     <div
                       key={`f${i}`}
-                      className="h-2.5 flex-1 overflow-hidden rounded-sm bg-bg/80 ring-1 ring-border"
+                      className={`flex-1 overflow-hidden rounded-sm bg-bg/80 ring-1 ring-border ${
+                        lsTouch ? "h-2" : "h-2.5"
+                      }`}
                     >
                       <div
                         className="h-full bg-amber-500 transition-[width] duration-150"
@@ -345,7 +443,7 @@ function GameShell() {
                 })}
               </div>
             </div>
-            {hud.mineProgress > 0 && (
+            {hud.mineProgress > 0 && !lsTouch && (
               <div className="h-1 overflow-hidden rounded-full bg-bg/80 ring-1 ring-border">
                 <div
                   className="h-full bg-accent transition-[width] duration-75"
@@ -354,8 +452,22 @@ function GameShell() {
               </div>
             )}
           </div>
+          {hud.mineProgress > 0 && lsTouch && (
+            <div className="h-1 w-full max-w-sm overflow-hidden rounded-full bg-bg/80 ring-1 ring-border">
+              <div
+                className="h-full bg-accent transition-[width] duration-75"
+                style={{ width: `${Math.min(1, hud.mineProgress) * 100}%` }}
+              />
+            </div>
+          )}
 
-          <div className="flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-border bg-surface/90 p-2 backdrop-blur-sm">
+          <div
+            className={`flex flex-wrap items-center justify-center backdrop-blur-sm ${
+              lsTouch
+                ? "gap-1 rounded-xl border border-border bg-surface/90 p-1"
+                : "gap-1.5 rounded-2xl border border-border bg-surface/90 p-2"
+            }`}
+          >
             {Array.from({ length: 9 }, (_, i) => {
               const slot = hud.inventory[i];
               const id = slot?.id;
@@ -367,7 +479,9 @@ function GameShell() {
                   key={i}
                   type="button"
                   onClick={() => onSelect(i)}
-                  className={`relative flex h-11 w-11 items-center justify-center rounded-lg border transition-colors duration-150 ${
+                  className={`relative flex items-center justify-center rounded-lg border transition-colors duration-150 ${
+                    lsTouch ? "h-9 w-9" : "h-11 w-11"
+                  } ${
                     active
                       ? "border-accent bg-elevated ring-1 ring-accent/40"
                       : "border-border bg-bg/60 hover:bg-elevated"
@@ -380,15 +494,28 @@ function GameShell() {
                       id={id}
                       atlasUrl={hud.atlasUrl}
                       blockIcons={hud.blockIcons}
+                      className={lsTouch ? "h-6 w-6" : "h-7 w-7"}
                     />
                   ) : (
-                    <span className="h-7 w-7 rounded-sm bg-bg/40" />
+                    <span
+                      className={`rounded-sm bg-bg/40 ${
+                        lsTouch ? "h-6 w-6" : "h-7 w-7"
+                      }`}
+                    />
                   )}
-                  <span className="absolute bottom-0.5 left-1 font-mono text-[9px] text-subtle">
-                    {i + 1}
-                  </span>
+                  {!lsTouch && (
+                    <span className="absolute bottom-0.5 left-1 font-mono text-[9px] text-subtle">
+                      {i + 1}
+                    </span>
+                  )}
                   {slot && slot.count > 1 ? (
-                    <span className="absolute bottom-0.5 right-0.5 font-mono text-[10px] font-semibold text-fg">
+                    <span
+                      className={`absolute font-mono font-semibold text-fg ${
+                        lsTouch
+                          ? "bottom-0 right-0.5 text-[9px]"
+                          : "bottom-0.5 right-0.5 text-[10px]"
+                      }`}
+                    >
                       {slot.count}
                     </span>
                   ) : null}
@@ -409,11 +536,13 @@ function GameShell() {
               );
             })}
           </div>
-          <p className="pointer-events-none text-center text-[11px] text-subtle">
-            {hud.tip}
-            {" · "}
-            <span className="text-muted">E craft</span>
-          </p>
+          {!lsTouch && (
+            <p className="pointer-events-none text-center text-[11px] text-subtle">
+              {hud.tip}
+              {" · "}
+              <span className="text-muted">E craft</span>
+            </p>
+          )}
         </div>
       )}
 
@@ -485,7 +614,11 @@ function GameShell() {
         <>
           <div
             ref={stickRef}
-            className="absolute bottom-28 left-6 z-30 h-28 w-28 rounded-full border border-border bg-surface/50 backdrop-blur-sm"
+            className={
+              lsTouch
+                ? "absolute bottom-[max(0.4rem,env(safe-area-inset-bottom))] left-[max(0.4rem,env(safe-area-inset-left))] z-30 h-[5.5rem] w-[5.5rem] rounded-full border border-border bg-surface/45 backdrop-blur-sm"
+                : "absolute bottom-28 left-6 z-30 h-28 w-28 rounded-full border border-border bg-surface/50 backdrop-blur-sm"
+            }
             onPointerDown={onStickDown}
             onPointerMove={onStickMove}
             onPointerUp={onStickUp}
@@ -493,13 +626,39 @@ function GameShell() {
           >
             <div
               data-knob
-              className="absolute left-1/2 top-1/2 h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full border border-border bg-elevated/90"
+              className={
+                lsTouch
+                  ? "absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-border bg-elevated/90"
+                  : "absolute left-1/2 top-1/2 h-12 w-12 -translate-x-1/2 -translate-y-1/2 rounded-full border border-border bg-elevated/90"
+              }
             />
           </div>
-          <div className="absolute bottom-28 right-4 z-30 flex flex-col gap-2">
+          <div
+            className={
+              lsTouch
+                ? "absolute bottom-[max(0.4rem,env(safe-area-inset-bottom))] right-[max(0.4rem,env(safe-area-inset-right))] z-30 flex flex-row items-end gap-1.5"
+                : "absolute bottom-28 right-4 z-30 flex flex-col gap-2"
+            }
+          >
+            {lsTouch && (
+              <button
+                type="button"
+                className="h-11 w-11 rounded-full border border-border bg-surface/80 text-[10px] font-medium text-fg backdrop-blur-sm active:scale-95"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  engineRef.current?.setCraftingOpen(true);
+                }}
+              >
+                Craft
+              </button>
+            )}
             <button
               type="button"
-              className="h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+              className={
+                lsTouch
+                  ? "h-11 w-11 rounded-full border border-border bg-surface/80 text-[10px] font-medium text-fg backdrop-blur-sm active:scale-95"
+                  : "h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+              }
               onPointerDown={(e) => {
                 e.preventDefault();
                 engineRef.current?.touchJump();
@@ -509,7 +668,11 @@ function GameShell() {
             </button>
             <button
               type="button"
-              className="h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+              className={
+                lsTouch
+                  ? "h-12 w-12 rounded-full border border-accent/50 bg-accent/25 text-[10px] font-semibold text-fg backdrop-blur-sm active:scale-95"
+                  : "h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+              }
               onPointerDown={(e) => {
                 e.preventDefault();
                 engineRef.current?.touchBreak();
@@ -519,7 +682,11 @@ function GameShell() {
             </button>
             <button
               type="button"
-              className="h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+              className={
+                lsTouch
+                  ? "h-11 w-11 rounded-full border border-border bg-surface/80 text-[10px] font-medium text-fg backdrop-blur-sm active:scale-95"
+                  : "h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+              }
               onPointerDown={(e) => {
                 e.preventDefault();
                 engineRef.current?.touchPlace();
@@ -561,8 +728,9 @@ function GameShell() {
             </p>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight text-fg">Blockworld</h1>
             <p className="mt-3 text-sm leading-relaxed text-muted">
-              Gather resources, manage health and hunger, and survive storms,
-              falls, and naughty caterpillars across living biomes.
+              Gather resources, craft tools, and survive the night. Hostiles
+              hunt after dark — rare slender stalkers included — while storms
+              and biomes keep the world alive.
             </p>
             <ul className="mt-5 space-y-2 text-sm text-muted">
               <li className="flex gap-2">
@@ -575,7 +743,7 @@ function GameShell() {
               </li>
               <li className="flex gap-2">
                 <span className="w-28 shrink-0 font-mono text-xs text-subtle">Survive</span>
-                <span>Fall damage, drowning, hunger, cactus & caterpillars</span>
+                <span>Night hostiles, fall damage, drowning · hide till dawn</span>
               </li>
               <li className="flex gap-2">
                 <span className="w-28 shrink-0 font-mono text-xs text-subtle">1–9</span>
