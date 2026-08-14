@@ -17,6 +17,23 @@ export const Item = {
   IRON_AXE: 112,
   IRON_SHOVEL: 113,
   IRON_SWORD: 114,
+  RAW_PORK: 115,
+  COOKED_PORK: 116,
+  RAW_BEEF: 117,
+  COOKED_BEEF: 118,
+  RAW_MUTTON: 119,
+  COOKED_MUTTON: 120,
+  RAW_CHICKEN: 121,
+  COOKED_CHICKEN: 122,
+  RAW_RABBIT: 123,
+  COOKED_RABBIT: 124,
+  ROTTEN_FLESH: 125,
+  LEATHER: 126,
+  FEATHER: 127,
+  WOOL: 128,
+  STRING: 129,
+  BONE: 130,
+  BREAD: 131,
 } as const;
 
 export type ItemId = number;
@@ -35,6 +52,8 @@ export type ItemDef = {
   maxDurability?: number;
   /** Attack damage bonus (caterpillars / future mobs) */
   attack?: number;
+  /** Restores health now; hunger value stored for when drain is on */
+  food?: { heal: number; hunger: number };
   /** Hotbar / UI color when no sprite */
   color: string;
 };
@@ -187,9 +206,29 @@ const TOOLS: ItemDef[] = [
   },
 ];
 
+const FOODS: ItemDef[] = [
+  { id: Item.RAW_PORK, name: "Raw Pork", maxStack: 64, food: { heal: 3, hunger: 3 }, color: "#e07080" },
+  { id: Item.COOKED_PORK, name: "Cooked Pork", maxStack: 64, food: { heal: 8, hunger: 8 }, color: "#c07040" },
+  { id: Item.RAW_BEEF, name: "Raw Beef", maxStack: 64, food: { heal: 3, hunger: 3 }, color: "#c04048" },
+  { id: Item.COOKED_BEEF, name: "Steak", maxStack: 64, food: { heal: 8, hunger: 8 }, color: "#8a4a28" },
+  { id: Item.RAW_MUTTON, name: "Raw Mutton", maxStack: 64, food: { heal: 3, hunger: 3 }, color: "#d06070" },
+  { id: Item.COOKED_MUTTON, name: "Cooked Mutton", maxStack: 64, food: { heal: 8, hunger: 8 }, color: "#a05830" },
+  { id: Item.RAW_CHICKEN, name: "Raw Chicken", maxStack: 64, food: { heal: 2, hunger: 2 }, color: "#f0d0b0" },
+  { id: Item.COOKED_CHICKEN, name: "Cooked Chicken", maxStack: 64, food: { heal: 6, hunger: 6 }, color: "#d49848" },
+  { id: Item.RAW_RABBIT, name: "Raw Rabbit", maxStack: 64, food: { heal: 3, hunger: 3 }, color: "#e8a090" },
+  { id: Item.COOKED_RABBIT, name: "Cooked Rabbit", maxStack: 64, food: { heal: 6, hunger: 5 }, color: "#c08048" },
+  { id: Item.ROTTEN_FLESH, name: "Rotten Flesh", maxStack: 64, food: { heal: 2, hunger: 4 }, color: "#6a8040" },
+  { id: Item.LEATHER, name: "Leather", maxStack: 64, color: "#8a5a32" },
+  { id: Item.FEATHER, name: "Feather", maxStack: 64, color: "#f4f0e4" },
+  { id: Item.WOOL, name: "Wool", maxStack: 64, color: "#f0ece4" },
+  { id: Item.STRING, name: "String", maxStack: 64, color: "#d8d0c4" },
+  { id: Item.BONE, name: "Bone", maxStack: 64, color: "#f0ead8" },
+  { id: Item.BREAD, name: "Bread", maxStack: 64, food: { heal: 5, hunger: 6 }, color: "#d4a04a" },
+];
+
 /** All non-block items */
 export const ITEM_DEFS: Record<number, ItemDef> = Object.fromEntries(
-  TOOLS.map((t) => [t.id, t]),
+  [...TOOLS, ...FOODS].map((t) => [t.id, t]),
 );
 
 export function isBlockItem(id: ItemId): boolean {
@@ -198,6 +237,10 @@ export function isBlockItem(id: ItemId): boolean {
 
 export function isTool(id: ItemId): boolean {
   return !!ITEM_DEFS[id]?.tool && ITEM_DEFS[id]!.tool !== "none";
+}
+
+export function isFood(id: ItemId): boolean {
+  return !!ITEM_DEFS[id]?.food;
 }
 
 export function itemName(id: ItemId): string {
@@ -255,6 +298,8 @@ export function baseMineTime(blockId: number): number {
       return 0.55;
     case Block.WOOD:
     case Block.PLANKS:
+    case Block.CHEST:
+    case Block.BED:
       return 1.0;
     case Block.COBBLE:
     case Block.STONE:
@@ -287,7 +332,9 @@ function preferredTool(blockId: number): ToolKind {
   if (
     blockId === Block.WOOD ||
     blockId === Block.PLANKS ||
-    blockId === Block.LEAVES
+    blockId === Block.LEAVES ||
+    blockId === Block.CHEST ||
+    blockId === Block.BED
   ) {
     return "axe";
   }
@@ -508,6 +555,23 @@ export const RECIPES: Recipe[] = [
     hint: "Right-click to smelt ore",
   },
   {
+    id: "chest",
+    name: "Chest",
+    inputs: [{ id: Block.PLANKS, count: 8 }],
+    output: { id: Block.CHEST, count: 1 },
+    hint: "27 slots — stash your extras",
+  },
+  {
+    id: "bed",
+    name: "Bed",
+    inputs: [
+      { id: Item.WOOL, count: 3 },
+      { id: Block.PLANKS, count: 3 },
+    ],
+    output: { id: Block.BED, count: 1 },
+    hint: "Sleep through the night",
+  },
+  {
     id: "iron_pick",
     name: "Iron Pickaxe",
     inputs: [
@@ -628,6 +692,110 @@ function paintItemIcon(id: ItemId): string {
     ctx.fillRect(6, 20, 20, 2);
     ctx.fillStyle = "#d0d4dc";
     ctx.fillRect(8, 15, 6, 3);
+    return c.toDataURL("image/png");
+  }
+
+  if (id === Item.LEATHER) {
+    ctx.fillStyle = "#8a5a32";
+    ctx.beginPath();
+    ctx.moveTo(8, 10);
+    ctx.lineTo(16, 6);
+    ctx.lineTo(24, 10);
+    ctx.lineTo(26, 22);
+    ctx.lineTo(6, 22);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#6a4020";
+    ctx.fillRect(12, 14, 8, 4);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.FEATHER) {
+    ctx.fillStyle = "#f4f0e4";
+    ctx.beginPath();
+    ctx.moveTo(16, 4);
+    ctx.quadraticCurveTo(26, 14, 18, 28);
+    ctx.quadraticCurveTo(10, 16, 16, 4);
+    ctx.fill();
+    ctx.strokeStyle = "#c8c0b0";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(16, 6);
+    ctx.lineTo(16, 26);
+    ctx.stroke();
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.WOOL) {
+    ctx.fillStyle = "#f0ece4";
+    ctx.beginPath();
+    ctx.arc(12, 16, 7, 0, Math.PI * 2);
+    ctx.arc(20, 16, 7, 0, Math.PI * 2);
+    ctx.arc(16, 11, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#d8d4cc";
+    ctx.fillRect(14, 18, 4, 3);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.STRING) {
+    ctx.strokeStyle = "#d8d0c4";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(8, 8);
+    ctx.bezierCurveTo(20, 10, 10, 18, 24, 24);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(10, 6);
+    ctx.bezierCurveTo(22, 12, 8, 20, 22, 26);
+    ctx.stroke();
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.BONE) {
+    ctx.fillStyle = "#f0ead8";
+    ctx.fillRect(14, 8, 4, 16);
+    ctx.beginPath();
+    ctx.arc(13, 8, 4, 0, Math.PI * 2);
+    ctx.arc(19, 8, 4, 0, Math.PI * 2);
+    ctx.arc(13, 24, 4, 0, Math.PI * 2);
+    ctx.arc(19, 24, 4, 0, Math.PI * 2);
+    ctx.fill();
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.BREAD) {
+    ctx.fillStyle = "#c88838";
+    ctx.beginPath();
+    ctx.ellipse(16, 18, 12, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#e8b868";
+    ctx.beginPath();
+    ctx.ellipse(16, 15, 11, 6, 0, Math.PI, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#f4d090";
+    ctx.beginPath();
+    ctx.ellipse(16, 14, 7, 3.2, 0, Math.PI, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#a86828";
+    ctx.fillRect(8, 18, 2, 2);
+    ctx.fillRect(22, 17, 2, 2);
+    return c.toDataURL("image/png");
+  }
+
+  const food = def?.food;
+  if (food) {
+    const cooked = id === Item.COOKED_PORK || id === Item.COOKED_BEEF ||
+      id === Item.COOKED_MUTTON || id === Item.COOKED_CHICKEN || id === Item.COOKED_RABBIT;
+    const rotten = id === Item.ROTTEN_FLESH;
+    ctx.fillStyle = rotten ? "#6a8040" : cooked ? "#a05828" : "#d05058";
+    ctx.beginPath();
+    ctx.ellipse(16, 17, 10, 7, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = rotten ? "#4a6030" : cooked ? "#6a3818" : "#f0c0b0";
+    ctx.beginPath();
+    ctx.ellipse(13, 15, 4, 3, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    if (cooked) {
+      ctx.fillStyle = "#3a2010";
+      ctx.fillRect(10, 14, 2, 2);
+      ctx.fillRect(18, 18, 2, 2);
+    }
     return c.toDataURL("image/png");
   }
 

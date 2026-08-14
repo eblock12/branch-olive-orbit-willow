@@ -277,6 +277,34 @@ export class GameAudio {
     this.pop(0.25);
   }
 
+  eat(): void {
+    this.noiseBurst(0.07, "bandpass", 900, 0.08, 0.8);
+    this.tone(220 + Math.random() * 40, 0.06, 0.05, "triangle");
+    this.tone(140, 0.08, 0.04, "sine");
+  }
+
+  sleep(): void {
+    this.tone(196, 0.18, 0.05, "sine");
+    this.tone(247, 0.22, 0.04, "triangle");
+    this.noiseBurst(0.35, "lowpass", 280, 0.06, 0.6);
+  }
+
+  chestOpen(wx: number, wy: number, wz: number): void {
+    const w = { x: wx, y: wy, z: wz };
+    this.tone(620 + Math.random() * 80, 0.04, 0.07, "square", 0, w);
+    this.tone(180 + Math.random() * 30, 0.08, 0.05, "triangle", 0, w);
+    this.noiseBurst(0.22, "bandpass", 520, 0.12, 1.4, w);
+    this.noiseBurst(0.28, "lowpass", 280, 0.08, 0.7, w);
+  }
+
+  chestClose(wx: number, wy: number, wz: number): void {
+    const w = { x: wx, y: wy, z: wz };
+    this.noiseBurst(0.12, "bandpass", 380, 0.1, 1.1, w);
+    this.tone(140, 0.07, 0.08, "triangle", 0, w);
+    this.tone(90, 0.1, 0.06, "sine", 0, w);
+    this.noiseBurst(0.08, "lowpass", 160, 0.1, 0.8, w);
+  }
+
   splash(intensity = 0.5): void {
     this.waterSplash(intensity);
   }

@@ -7,6 +7,9 @@ import {
   updateEntityShadow,
 } from "./entityShadow";
 import { RaggedCloth, type ClothCollider } from "./raggedCloth";
+import { isSolid, isWater } from "./blocks";
+import { CHUNK_HEIGHT } from "./chunkConstants";
+import { columnHasWaterSurface, findShore } from "./entityWater";
 
 /**
  * Slender Giant — rare tall entity with 2-bone leg IK.
@@ -35,7 +38,14 @@ type FootState = {
 };
 
 function surfaceY(world: World, x: number, z: number): number {
-  return world.getSurfaceY(Math.floor(x), Math.floor(z));
+  const wx = Math.floor(x);
+  const wz = Math.floor(z);
+  for (let y = CHUNK_HEIGHT - 1; y >= 0; y--) {
+    const id = world.getBlock(wx, y, wz);
+    if (isWater(id)) return y + 1;
+    if (isSolid(id)) return y + 1;
+  }
+  return world.getSurfaceY(wx, wz);
 }
 
 const _v1 = new THREE.Vector3();
@@ -427,12 +437,33 @@ export class SlenderGiant {
       if (this.wandering) this.yaw += (Math.random() - 0.5) * 1.4;
     }
 
-    if (chasing) {
+    const wading = columnHasWaterSurface(world, this.x, this.z);
+    if (wading && (!chasing || pDist > 10)) {
+      const shore = findShore(world, this.x, this.z, this.y - LEG_LEN * 0.85, 16);
+      if (shore) {
+        const desiredYaw = Math.atan2(shore.x - this.x, shore.z - this.z);
+        let dyaw = desiredYaw - this.yaw;
+        while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+        while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+        this.yaw += dyaw * Math.min(1, 1.6 * dt);
+        this.wandering = true;
+      }
+    } else if (chasing) {
       const desiredYaw = pDist > 0.5 ? Math.atan2(pdx, pdz) : this.yaw;
       let dyaw = desiredYaw - this.yaw;
       while (dyaw > Math.PI) dyaw -= Math.PI * 2;
       while (dyaw < -Math.PI) dyaw += Math.PI * 2;
       this.yaw += dyaw * Math.min(1, 1.15 * dt);
+    } else if (columnHasWaterSurface(world, this.x, this.z)) {
+      const shore = findShore(world, this.x, this.z, this.y - LEG_LEN * 0.85, 16);
+      if (shore) {
+        const desiredYaw = Math.atan2(shore.x - this.x, shore.z - this.z);
+        let dyaw = desiredYaw - this.yaw;
+        while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+        while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+        this.yaw += dyaw * Math.min(1, 1.6 * dt);
+        this.wandering = true;
+      }
     }
 
     const walking = chasing || this.wandering;
@@ -674,7 +705,11 @@ export class SlenderGiant {
       // Don't plant into a wall column (solid at shin/hip)
       if (world.isSolidAt(cx, base.y + 1.2, cz)) continue;
       if (world.isSolidAt(cx, base.y + 2.2, cz)) continue;
-      const score = dist * 2 - Math.abs(rise) * 2.4 - Math.abs(sideJ) * 0.5;
+      const score =
+        dist * 2 -
+        Math.abs(rise) * 2.4 -
+        Math.abs(sideJ) * 0.5 +
+        (columnHasWaterSurface(world, cx, cz) ? -3.5 : 1.6);
       if (score > bestScore) {
         bestScore = score;
         bestX = cx;
@@ -853,6 +888,17 @@ export class SlenderGiantSystem {
 
   get count(): number {
     return this.giants.filter((g) => g.alive).length;
+  }
+
+  anyNear(x: number, z: number, r: number): boolean {
+    const r2 = r * r;
+    for (const g of this.giants) {
+      if (!g.alive) continue;
+      const dx = g.x - x;
+      const dz = g.z - z;
+      if (dx * dx + dz * dz <= r2) return true;
+    }
+    return false;
   }
 
   update(

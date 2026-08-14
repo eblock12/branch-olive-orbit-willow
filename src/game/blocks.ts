@@ -50,6 +50,13 @@ export const Block = {
   IRON_ORE: 45,
   FURNACE: 46,
   FURNACE_LIT: 47,
+  CHEST: 48,
+  BED: 49,
+  /** Wall torches — attached to the neighbor in that direction */
+  TORCH_NX: 50,
+  TORCH_PX: 51,
+  TORCH_NZ: 52,
+  TORCH_PZ: 53,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
@@ -294,6 +301,10 @@ export const BLOCKS: Record<number, BlockDef> = {
   [Block.CATTAIL]: plant(Block.CATTAIL, "Cattail", 35, "#6a8a48"),
   [Block.FIREWEED]: plant(Block.FIREWEED, "Fireweed", 36, "#d05090"),
   [Block.TORCH]: plant(Block.TORCH, "Torch", 37, "#f0a020"),
+  [Block.TORCH_NX]: plant(Block.TORCH_NX, "Torch", 37, "#f0a020"),
+  [Block.TORCH_PX]: plant(Block.TORCH_PX, "Torch", 37, "#f0a020"),
+  [Block.TORCH_NZ]: plant(Block.TORCH_NZ, "Torch", 37, "#f0a020"),
+  [Block.TORCH_PZ]: plant(Block.TORCH_PZ, "Torch", 37, "#f0a020"),
   [Block.COAL_ORE]: {
     id: Block.COAL_ORE,
     name: "Coal Ore",
@@ -325,6 +336,22 @@ export const BLOCKS: Record<number, BlockDef> = {
     transparent: false,
     tiles: [40, 40, 43],
     color: "#c87830",
+  },
+  [Block.CHEST]: {
+    id: Block.CHEST,
+    name: "Chest",
+    solid: true,
+    transparent: false,
+    tiles: [44, 46, 45],
+    color: "#b07a32",
+  },
+  [Block.BED]: {
+    id: Block.BED,
+    name: "Bed",
+    solid: true,
+    transparent: false,
+    tiles: [47, 47, 48],
+    color: "#b04048",
   },
 };
 
@@ -361,6 +388,8 @@ export const PLACEABLE: BlockId[] = [
   Block.COAL_ORE,
   Block.IRON_ORE,
   Block.FURNACE,
+  Block.CHEST,
+  Block.BED,
 ];
 
 export function isSolid(id: number): boolean {
@@ -408,9 +437,17 @@ export function isFurnace(id: number): boolean {
   return id === Block.FURNACE || id === Block.FURNACE_LIT;
 }
 
+export function isChest(id: number): boolean {
+  return id === Block.CHEST;
+}
+
+export function isBed(id: number): boolean {
+  return id === Block.BED;
+}
+
 /** How much light this block emits (0–15). */
 export function lightEmission(id: number): number {
-  if (id === Block.TORCH) return 14;
+  if (isTorch(id)) return 14;
   if (id === Block.FURNACE_LIT) return 13;
   return 0;
 }
@@ -429,8 +466,67 @@ export function lightLoss(id: number): number {
   return 0;
 }
 
+export function isTorch(id: number): boolean {
+  return (
+    id === Block.TORCH ||
+    id === Block.TORCH_NX ||
+    id === Block.TORCH_PX ||
+    id === Block.TORCH_NZ ||
+    id === Block.TORCH_PZ
+  );
+}
+
+/** Direction from the torch cell to the block it hangs on. */
+export function torchAttachDir(id: number): [number, number, number] {
+  switch (id) {
+    case Block.TORCH_NX:
+      return [-1, 0, 0];
+    case Block.TORCH_PX:
+      return [1, 0, 0];
+    case Block.TORCH_NZ:
+      return [0, 0, -1];
+    case Block.TORCH_PZ:
+      return [0, 0, 1];
+    default:
+      return [0, -1, 0];
+  }
+}
+
+export function canSupportTorch(id: number): boolean {
+  if (!isSolid(id) || isPlant(id) || isWater(id) || isTorch(id)) return false;
+  if (id === Block.LEAVES || id === Block.ICE || id === Block.CACTUS) return false;
+  return true;
+}
+
+/**
+ * Hit face normal of the support block → torch id to place in the adjacent cell.
+ * Ceiling (ny = -1) is rejected.
+ */
+export function torchIdFromHitFace(
+  nx: number,
+  ny: number,
+  nz: number,
+): number | null {
+  if (ny === 1) return Block.TORCH;
+  if (ny === -1) return null;
+  if (nx === 1) return Block.TORCH_NX;
+  if (nx === -1) return Block.TORCH_PX;
+  if (nz === 1) return Block.TORCH_NZ;
+  if (nz === -1) return Block.TORCH_PZ;
+  return Block.TORCH;
+}
+
+export type PlantBox = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+};
+
 /** Tight selection box for cross plants (local 0–1). Corners of the cell are empty. */
-export const PLANT_HITBOX = {
+export const PLANT_HITBOX: PlantBox = {
   minX: 0.3,
   maxX: 0.7,
   minY: 0,
@@ -438,6 +534,23 @@ export const PLANT_HITBOX = {
   minZ: 0.3,
   maxZ: 0.7,
 } as const;
+
+export function plantHitbox(id: number): PlantBox {
+  switch (id) {
+    case Block.TORCH_NX:
+      return { minX: 0, maxX: 0.44, minY: 0.1, maxY: 0.94, minZ: 0.28, maxZ: 0.72 };
+    case Block.TORCH_PX:
+      return { minX: 0.56, maxX: 1, minY: 0.1, maxY: 0.94, minZ: 0.28, maxZ: 0.72 };
+    case Block.TORCH_NZ:
+      return { minX: 0.28, maxX: 0.72, minY: 0.1, maxY: 0.94, minZ: 0, maxZ: 0.44 };
+    case Block.TORCH_PZ:
+      return { minX: 0.28, maxX: 0.72, minY: 0.1, maxY: 0.94, minZ: 0.56, maxZ: 1 };
+    case Block.TORCH:
+      return { minX: 0.32, maxX: 0.68, minY: 0, maxY: 0.9, minZ: 0.32, maxZ: 0.68 };
+    default:
+      return PLANT_HITBOX;
+  }
+}
 
 /** Blocks the player can mine / target with the crosshair (solids + plants) */
 export function isMineable(id: number): boolean {

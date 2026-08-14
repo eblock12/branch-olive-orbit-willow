@@ -53,10 +53,13 @@ const DEFAULT_HUD: HudSnapshot = {
   craftingOpen: false,
   furnaceOpen: false,
   furnace: null,
+  chestOpen: false,
+  chest: null,
   recipes: [],
   freeCraft: false,
   cursor: null,
-  tip: "Press E to craft",
+  tip: "Press E for inventory",
+  notice: "",
 };
 
 function ItemIcon({
@@ -71,16 +74,17 @@ function ItemIcon({
   className?: string;
 }) {
   const name = itemName(id);
+  const box = `${className} block shrink-0`;
   if (isBlockItem(id)) {
     const def = BLOCKS[id];
     if (!def) {
-      return <span className={`${className} rounded-sm bg-bg/40`} />;
+      return <span className={`${box} rounded-sm bg-bg/40`} />;
     }
     const iso = blockIcons[id];
     if (iso) {
       return (
         <span
-          className={`${className} rounded-sm`}
+          className={`${box} rounded-sm`}
           style={{
             backgroundImage: `url(${iso})`,
             backgroundSize: "contain",
@@ -94,10 +98,9 @@ function ItemIcon({
         />
       );
     }
-    // Fallback color chip
     return (
       <span
-        className={`${className} rounded-sm shadow-inner`}
+        className={`${box} rounded-sm shadow-inner`}
         style={{ background: def.color }}
         title={name}
       />
@@ -107,7 +110,7 @@ function ItemIcon({
   if (url) {
     return (
       <span
-        className={`${className} rounded-sm bg-bg/40`}
+        className={`${box} rounded-sm bg-bg/40`}
         style={{
           backgroundImage: `url(${url})`,
           backgroundSize: "contain",
@@ -123,7 +126,7 @@ function ItemIcon({
   }
   return (
     <span
-      className={`${className} rounded-sm shadow-inner`}
+      className={`${box} rounded-sm shadow-inner`}
       style={{ background: itemColor(id) }}
       title={name}
     />
@@ -176,6 +179,103 @@ function FurnaceSlot({
   );
 }
 
+function SlotCell({
+  slot,
+  atlasUrl,
+  blockIcons,
+  active,
+  indexLabel,
+  onClick,
+}: {
+  slot: HotbarSlot;
+  atlasUrl: string;
+  blockIcons: Record<number, string>;
+  active?: boolean;
+  indexLabel?: string;
+  onClick: (shift: boolean) => void;
+}) {
+  const id = slot?.id;
+  const name = id != null ? itemName(id) : "Empty";
+  const dur = slot?.durability;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        onClick(e.shiftKey);
+      }}
+      className={`relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors ${
+        active
+          ? "border-accent bg-elevated ring-1 ring-accent/40"
+          : "border-border bg-bg/60 hover:bg-elevated"
+      }`}
+      title={name}
+      aria-label={name}
+    >
+      {id != null ? (
+        <ItemIcon
+          id={id}
+          atlasUrl={atlasUrl}
+          blockIcons={blockIcons}
+          className="h-full w-full"
+        />
+      ) : null}
+      {indexLabel ? (
+        <span className="absolute bottom-0 left-0.5 font-mono text-[8px] text-subtle">
+          {indexLabel}
+        </span>
+      ) : null}
+      {slot && slot.count > 1 ? (
+        <span className="absolute bottom-0 right-0.5 font-mono text-[10px] font-semibold text-fg">
+          {slot.count}
+        </span>
+      ) : null}
+      {dur != null && slot ? (
+        <span className="absolute left-1 right-1 top-0.5 h-0.5 overflow-hidden rounded-full bg-bg/80">
+          <span
+            className="block h-full bg-emerald-400"
+            style={{
+              width: `${Math.max(0, Math.min(1, dur / (ITEM_DEFS[slot.id]?.maxDurability ?? 140))) * 100}%`,
+            }}
+          />
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function InvGrid({
+  slots,
+  atlasUrl,
+  blockIcons,
+  selected,
+  showHotbarNums,
+  onSlot,
+}: {
+  slots: HotbarSlot[];
+  atlasUrl: string;
+  blockIcons: Record<number, string>;
+  selected?: number;
+  showHotbarNums?: boolean;
+  onSlot: (i: number, shift: boolean) => void;
+}) {
+  return (
+    <div className="grid grid-cols-9 gap-1">
+      {slots.map((slot, i) => (
+        <SlotCell
+          key={i}
+          slot={slot}
+          atlasUrl={atlasUrl}
+          blockIcons={blockIcons}
+          active={selected === i}
+          indexLabel={showHotbarNums && i < 9 ? String(i + 1) : undefined}
+          onClick={(shift) => onSlot(i, shift)}
+        />
+      ))}
+    </div>
+  );
+}
+
 const WEATHER_LABEL: Record<string, string> = {
   clear: "Clear",
   overcast: "Overcast",
@@ -197,10 +297,17 @@ function GameShell() {
   const engineRef = useRef<GameEngine | null>(null);
   const [hud, setHud] = useState<HudSnapshot>(DEFAULT_HUD);
   const [ready, setReady] = useState(false);
+  const [pointer, setPointer] = useState({ x: 0, y: 0 });
   /** Short landscape + touch only — phones held sideways; not tablets/desktop. */
   const [phoneLandscape, setPhoneLandscape] = useState(false);
   const stickRef = useRef<HTMLDivElement>(null);
   const stickActive = useRef(false);
+  const [selectFlash, setSelectFlash] = useState<{
+    name: string;
+    token: number;
+  } | null>(null);
+  const selectFlashToken = useRef(0);
+  const selectFlashKey = useRef("");
 
   useEffect(() => {
     const mq = window.matchMedia(
@@ -211,6 +318,30 @@ function GameShell() {
     mq.addEventListener("change", sync);
     return () => mq.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    if (!hud.furnaceOpen && !hud.craftingOpen && !hud.chestOpen && !hud.cursor) return;
+    const move = (e: PointerEvent) => setPointer({ x: e.clientX, y: e.clientY });
+    window.addEventListener("pointermove", move);
+    return () => window.removeEventListener("pointermove", move);
+  }, [hud.furnaceOpen, hud.craftingOpen, hud.chestOpen, hud.cursor]);
+
+  const selectedItemId = hud.inventory[hud.selectedSlot]?.id ?? 0;
+  useEffect(() => {
+    if (!hud.playing) return;
+    const key = `${hud.selectedSlot}:${selectedItemId}`;
+    if (selectFlashKey.current === key) return;
+    selectFlashKey.current = key;
+    if (!selectedItemId) {
+      setSelectFlash(null);
+      return;
+    }
+    selectFlashToken.current += 1;
+    setSelectFlash({
+      name: itemName(selectedItemId),
+      token: selectFlashToken.current,
+    });
+  }, [hud.playing, hud.selectedSlot, selectedItemId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,11 +373,8 @@ function GameShell() {
   }, []);
 
   const onSelect = useCallback((i: number, shift = false) => {
-    const eng = engineRef.current;
-    if (!eng) return;
-    if (hud.furnaceOpen) eng.inventoryClickHotbar(i, shift);
-    else eng.selectHotbar(i);
-  }, [hud.furnaceOpen]);
+    engineRef.current?.inventoryClickHotbar(i, shift);
+  }, []);
 
   const onCraft = useCallback((recipeId: string) => {
     engineRef.current?.craftRecipe(recipeId);
@@ -258,6 +386,14 @@ function GameShell() {
 
   const onCloseFurnace = useCallback(() => {
     engineRef.current?.closeFurnace();
+  }, []);
+
+  const onCloseChest = useCallback(() => {
+    engineRef.current?.closeChest();
+  }, []);
+
+  const onChestSlot = useCallback((i: number, shift = false) => {
+    engineRef.current?.chestClickSlot(i, shift);
   }, []);
 
   const onFurnaceSlot = useCallback((slot: "input" | "fuel" | "output", shift = false) => {
@@ -334,6 +470,14 @@ function GameShell() {
             <div className="absolute left-1/2 top-0 h-full w-0.5 -translate-x-1/2 bg-fg/80" />
             <div className="absolute top-1/2 left-0 h-0.5 w-full -translate-y-1/2 bg-fg/80" />
           </div>
+        </div>
+      )}
+
+      {ready && hud.playing && hud.notice && (
+        <div className="pointer-events-none absolute left-1/2 top-[4.75rem] z-30 w-[min(92vw,28rem)] -translate-x-1/2 px-3">
+          <p className="rounded-xl border border-border bg-surface/92 px-4 py-2 text-center text-sm font-medium text-fg shadow-lg">
+            {hud.notice}
+          </p>
         </div>
       )}
 
@@ -561,12 +705,30 @@ function GameShell() {
           )}
 
           <div
-            className={`flex flex-wrap items-center justify-center backdrop-blur-sm ${
+            className={`relative flex flex-wrap items-center justify-center backdrop-blur-sm ${
               lsTouch
                 ? "gap-1 rounded-xl border border-border bg-surface/90 p-1"
                 : "gap-1.5 rounded-2xl border border-border bg-surface/90 p-2"
             }`}
           >
+            {selectFlash && (
+              <div
+                key={selectFlash.token}
+                className="item-select-name pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 -translate-x-1/2 whitespace-nowrap text-center"
+              >
+                <span
+                  className={`font-semibold tracking-wide text-fg ${
+                    lsTouch ? "text-[11px]" : "text-sm"
+                  }`}
+                  style={{
+                    textShadow:
+                      "0 1px 0 #000, 0 -1px 0 #000, 1px 0 0 #000, -1px 0 0 #000, 0 2px 6px rgba(0,0,0,0.55)",
+                  }}
+                >
+                  {selectFlash.name}
+                </span>
+              </div>
+            )}
             {Array.from({ length: 9 }, (_, i) => {
               const slot = hud.inventory[i];
               const id = slot?.id;
@@ -579,9 +741,10 @@ function GameShell() {
                   type="button"
                   onClick={(e) => {
                     e.preventDefault();
+                    setPointer({ x: e.clientX, y: e.clientY });
                     onSelect(i, e.shiftKey);
                   }}
-                  className={`relative flex items-center justify-center rounded-lg border transition-colors duration-150 ${
+                  className={`relative flex items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors duration-150 ${
                     lsTouch ? "h-9 w-9" : "h-11 w-11"
                   } ${
                     active
@@ -596,14 +759,10 @@ function GameShell() {
                       id={id}
                       atlasUrl={hud.atlasUrl}
                       blockIcons={hud.blockIcons}
-                      className={lsTouch ? "h-6 w-6" : "h-7 w-7"}
+                      className="h-full w-full"
                     />
                   ) : (
-                    <span
-                      className={`rounded-sm bg-bg/40 ${
-                        lsTouch ? "h-6 w-6" : "h-7 w-7"
-                      }`}
-                    />
+                    <span className="block h-full w-full rounded-sm bg-bg/40" />
                   )}
                   {!lsTouch && (
                     <span className="absolute bottom-0.5 left-1 font-mono text-[9px] text-subtle">
@@ -642,23 +801,23 @@ function GameShell() {
             <p className="pointer-events-none text-center text-[11px] text-subtle">
               {hud.tip}
               {" · "}
-              <span className="text-muted">E craft</span>
+              <span className="text-muted">E inventory</span>
             </p>
           )}
         </div>
       )}
 
-      {/* Crafting panel */}
+      {/* Inventory + crafting */}
       {ready && hud.craftingOpen && (
         <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
-          <div className="pointer-events-auto max-h-[min(70vh,560px)] w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
+          <div className="pointer-events-auto flex max-h-[min(82vh,720px)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-xl backdrop-blur-sm">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
-                <h2 className="text-sm font-semibold text-fg">Crafting</h2>
+                <h2 className="text-sm font-semibold text-fg">Inventory</h2>
                 <p className="text-xs text-muted">
                   {hud.freeCraft
                     ? "Free craft ON — recipes ignore ingredients"
-                    : "Wood → planks → sticks → tools · cobble → furnace → iron"}
+                    : "Click to move · Shift-click hotbar ↔ pack"}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -682,46 +841,61 @@ function GameShell() {
                 </button>
               </div>
             </div>
-            <div className="max-h-[min(70vh,520px)] space-y-2 overflow-y-auto p-3">
-              {hud.recipes.map((r) => (
-                <div
-                  key={r.id}
-                  className={`flex items-center gap-3 rounded-xl border p-3 ${
-                    r.canCraft
-                      ? "border-accent/40 bg-elevated/80"
-                      : "border-border bg-bg/40 opacity-80"
-                  }`}
-                >
-                  <ItemIcon
-                    id={r.output.id}
-                    atlasUrl={hud.atlasUrl}
-                    blockIcons={hud.blockIcons}
-                    className="h-10 w-10 shrink-0"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-fg">
-                      {r.name}
-                      {r.output.count > 1 ? (
-                        <span className="text-subtle"> ×{r.output.count}</span>
-                      ) : null}
-                    </p>
-                    <p className="truncate text-xs text-muted">
-                      {r.inputs
-                        .map((i) => `${i.count}× ${i.name}`)
-                        .join(" + ")}
-                      {r.hint ? ` · ${r.hint}` : ""}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={!r.canCraft}
-                    onClick={() => onCraft(r.id)}
-                    className="shrink-0 rounded-lg border border-border bg-accent/90 px-3 py-1.5 text-xs font-semibold text-bg disabled:cursor-not-allowed disabled:bg-bg disabled:text-subtle"
-                  >
-                    Craft
-                  </button>
+            <div className="space-y-3 overflow-y-auto p-3">
+              <InvGrid
+                slots={hud.inventory}
+                atlasUrl={hud.atlasUrl}
+                blockIcons={hud.blockIcons}
+                selected={hud.selectedSlot}
+                showHotbarNums
+                onSlot={onSelect}
+              />
+              <div className="border-t border-border pt-2">
+                <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-subtle">
+                  Crafting
+                </p>
+                <div className="max-h-[min(32vh,280px)] space-y-2 overflow-y-auto">
+                  {hud.recipes.map((r) => (
+                    <div
+                      key={r.id}
+                      className={`flex items-center gap-3 rounded-xl border p-2.5 ${
+                        r.canCraft
+                          ? "border-accent/40 bg-elevated/80"
+                          : "border-border bg-bg/40 opacity-80"
+                      }`}
+                    >
+                      <ItemIcon
+                        id={r.output.id}
+                        atlasUrl={hud.atlasUrl}
+                        blockIcons={hud.blockIcons}
+                        className="h-9 w-9 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-fg">
+                          {r.name}
+                          {r.output.count > 1 ? (
+                            <span className="text-subtle"> ×{r.output.count}</span>
+                          ) : null}
+                        </p>
+                        <p className="truncate text-xs text-muted">
+                          {r.inputs
+                            .map((i) => `${i.count}× ${i.name}`)
+                            .join(" + ")}
+                          {r.hint ? ` · ${r.hint}` : ""}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!r.canCraft}
+                        onClick={() => onCraft(r.id)}
+                        className="shrink-0 rounded-lg border border-border bg-accent/90 px-3 py-1.5 text-xs font-semibold text-bg disabled:cursor-not-allowed disabled:bg-bg disabled:text-subtle"
+                      >
+                        Craft
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
             </div>
           </div>
         </div>
@@ -734,7 +908,8 @@ function GameShell() {
               <div>
                 <h2 className="text-sm font-semibold text-fg">Furnace</h2>
                 <p className="text-xs text-muted">
-                  Click a hotbar stack to load · click a slot to take out
+                  Click to pick up · click a slot to place · Shift-click sends
+                  ore/fuel to the furnace
                 </p>
               </div>
               <button
@@ -752,7 +927,7 @@ function GameShell() {
                   slot={hud.furnace.input}
                   atlasUrl={hud.atlasUrl}
                   blockIcons={hud.blockIcons}
-                  onClick={() => onFurnaceSlot("input")}
+                  onClick={(shift) => onFurnaceSlot("input", shift)}
                 />
                 <div className="flex w-16 flex-col items-center gap-1">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg ring-1 ring-border">
@@ -772,7 +947,7 @@ function GameShell() {
                   slot={hud.furnace.output}
                   atlasUrl={hud.atlasUrl}
                   blockIcons={hud.blockIcons}
-                  onClick={() => onFurnaceSlot("output")}
+                  onClick={(shift) => onFurnaceSlot("output", shift)}
                 />
               </div>
               <div className="flex items-center gap-3">
@@ -781,7 +956,7 @@ function GameShell() {
                   slot={hud.furnace.fuel}
                   atlasUrl={hud.atlasUrl}
                   blockIcons={hud.blockIcons}
-                  onClick={() => onFurnaceSlot("fuel")}
+                  onClick={(shift) => onFurnaceSlot("fuel", shift)}
                 />
                 <div className="flex w-16 flex-col items-center gap-1">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg ring-1 ring-border">
@@ -799,9 +974,73 @@ function GameShell() {
                 <div className="w-11" />
               </div>
               <p className="text-center text-xs text-muted">
-                Coal smelts 10 items. Wood and sticks work in a pinch.
+                Coal smelts 10 items. Shift-click result to take it.
               </p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {ready && hud.chestOpen && hud.chest && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
+          <div className="pointer-events-auto w-full max-w-xl overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-xl backdrop-blur-sm">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold text-fg">Chest</h2>
+                <p className="text-xs text-muted">
+                  Shift-click to dump into your pack
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onCloseChest}
+                className="rounded-lg border border-border bg-elevated px-3 py-1.5 text-xs font-medium text-fg hover:bg-bg"
+              >
+                Close (E)
+              </button>
+            </div>
+            <div className="space-y-3 p-3">
+              <InvGrid
+                slots={hud.chest}
+                atlasUrl={hud.atlasUrl}
+                blockIcons={hud.blockIcons}
+                onSlot={onChestSlot}
+              />
+              <div className="border-t border-border pt-2">
+                <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-subtle">
+                  Your items
+                </p>
+                <InvGrid
+                  slots={hud.inventory}
+                  atlasUrl={hud.atlasUrl}
+                  blockIcons={hud.blockIcons}
+                  selected={hud.selectedSlot}
+                  showHotbarNums
+                  onSlot={onSelect}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {ready && hud.cursor && (
+        <div
+          className="pointer-events-none fixed z-[60]"
+          style={{ left: pointer.x + 12, top: pointer.y + 12 }}
+        >
+          <div className="relative flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface/95 shadow-lg">
+            <ItemIcon
+              id={hud.cursor.id}
+              atlasUrl={hud.atlasUrl}
+              blockIcons={hud.blockIcons}
+              className="h-8 w-8"
+            />
+            {hud.cursor.count > 1 ? (
+              <span className="absolute -bottom-1 -right-1 font-mono text-[11px] font-semibold text-fg drop-shadow">
+                {hud.cursor.count}
+              </span>
+            ) : null}
           </div>
         </div>
       )}
@@ -916,7 +1155,7 @@ function GameShell() {
         </div>
       )}
 
-      {ready && !hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.dead && (
+      {ready && !hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && !hud.dead && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-bg/55 p-6 backdrop-blur-[2px]">
           <div className="w-full max-w-md rounded-3xl border border-border bg-surface p-8 shadow-2xl shadow-black/40">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-subtle">
@@ -939,7 +1178,7 @@ function GameShell() {
               </li>
               <li className="flex gap-2">
                 <span className="w-28 shrink-0 font-mono text-xs text-subtle">Survive</span>
-                <span>Night hostiles, fall damage, drowning · hide till dawn</span>
+                <span>Night hostiles · sleep in a bed · loot ruin chests</span>
               </li>
               <li className="flex gap-2">
                 <span className="w-28 shrink-0 font-mono text-xs text-subtle">1–9</span>

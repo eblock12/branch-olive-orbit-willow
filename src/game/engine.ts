@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isFurnace, isPlant, isSolid, isWater, PLANT_HITBOX, type BlockId } from "./blocks";
+import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, canSupportTorch, plantHitbox, torchIdFromHitFace, torchAttachDir, type BlockId } from "./blocks";
 
 import { Player, MOUSE_SENS } from "./player";
 import { World } from "./world";
@@ -22,6 +22,7 @@ import {
   SurvivalState,
   blockDrop,
   HOTBAR_SIZE,
+  INV_SIZE,
   MAX_HEALTH,
   MAX_HUNGER,
   CRAFTABLE_RECIPES,
@@ -33,11 +34,15 @@ import {
   type ItemId,
   type ItemStack,
 } from "./survival";
-import { itemName, isTool, Item, itemMaxStack } from "./items";
+import { itemName, isTool, isFood, Item, itemMaxStack } from "./items";
 import { ItemDropSystem } from "./itemDrops";
 import { WaterFX } from "./water";
 import { ViewHand } from "./viewHand";
 import { FurnaceSystem, COOK_TIME, isFuel, isSmeltable, type FurnaceSlot, type FurnaceState } from "./furnace";
+import { ChestSystem } from "./chest";
+import { ChestVisuals } from "./chestVisuals";
+import { mobLoot } from "./loot";
+import { TorchFlame } from "./torchFlame";
 
 export type HudSnapshot = {
   playing: boolean;
@@ -79,6 +84,8 @@ export type HudSnapshot = {
   blockIcons: Record<number, string>;
   craftingOpen: boolean;
   furnaceOpen: boolean;
+  chestOpen: boolean;
+  chest: HotbarSlot[] | null;
   furnace: {
     input: HotbarSlot;
     fuel: HotbarSlot;
@@ -97,6 +104,7 @@ export type HudSnapshot = {
   freeCraft: boolean;
   cursor: HotbarSlot;
   tip: string;
+  notice: string;
 };
 
 
@@ -145,6 +153,7 @@ export class GameEngine {
   private hemi: THREE.HemisphereLight;
   private torchLights: THREE.PointLight[] = [];
   private torchLightT = 0;
+  private torchFlame!: TorchFlame;
 
   private lastTime = 0;
   private raf = 0;
@@ -188,7 +197,13 @@ export class GameEngine {
   private craftingOpen = false;
   private furnaces = new FurnaceSystem();
   private openFurnacePos: { x: number; y: number; z: number } | null = null;
+  private chests = new ChestSystem();
+  private openChestPos: { x: number; y: number; z: number } | null = null;
+  private chestVisuals!: ChestVisuals;
   private lastAttack = 0;
+  private lastEat = 0;
+  private notice = "";
+  private noticeT = 0;
   /** Subtle grounded walk bob (phase + smoothed strength) */
   private viewBobPhase = 0;
   private viewBobAmt = 0;
@@ -244,6 +259,7 @@ export class GameEngine {
     this.atlas = atlas.texture;
     this.atlasUrl = atlas.dataUrl;
     this.blockIcons = atlas.icons;
+    this.torchFlame = new TorchFlame(this.atlas);
     this.material = new THREE.MeshLambertMaterial({
       map: this.atlas,
       vertexColors: true,
@@ -251,6 +267,7 @@ export class GameEngine {
       transparent: false,
       side: THREE.FrontSide,
     });
+    this.torchFlame.applyTo(this.material);
 
     this.particleGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
     this.particleMat = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
@@ -273,8 +290,9 @@ export class GameEngine {
     this.slenderGiant = new SlenderGiantSystem();
     this.birds = new BirdSystem();
     this.ambiance = new AmbianceFX();
-    this.itemDrops = new ItemDropSystem(this.atlas);
-    this.viewHand = new ViewHand(this.atlas);
+    this.itemDrops = new ItemDropSystem(this.atlas, this.torchFlame.emissiveMap);
+    this.chestVisuals = new ChestVisuals(this.atlas);
+    this.viewHand = new ViewHand(this.atlas, this.torchFlame.emissiveMap);
     this.viewHand.attachTo(this.camera);
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
 
@@ -293,6 +311,7 @@ export class GameEngine {
     this.scene.add(this.birds.group);
     this.scene.add(this.ambiance.group);
     this.scene.add(this.itemDrops.group);
+    this.scene.add(this.chestVisuals.group);
 
     this.dayNight = new DayNightCycle(this.scene, this.sun);
     this.sun = this.dayNight.light;
@@ -369,6 +388,22 @@ export class GameEngine {
   }
 
   private spawnPlayer(): void {
+    const bed = this.survival.bedSpawn;
+    if (bed && isBed(this.world.getBlock(bed.x, bed.y, bed.z))) {
+      this.world.ensureChunkAt(bed.x, bed.z);
+      this.player.x = bed.x + 0.5;
+      this.player.y = bed.y + 1.02;
+      this.player.z = bed.z + 0.5;
+      this.player.vx = 0;
+      this.player.vy = 0;
+      this.player.vz = 0;
+      if (!this.player.collides(this.world, this.player.x, this.player.y, this.player.z)) {
+        this.player.yaw = 0;
+        this.player.pitch = 0;
+        this.player.onGround = true;
+        return;
+      }
+    }
     // Spiral search for dry land — never spawn underwater / on ocean floor
     const tryAt = (sx: number, sz: number): boolean => {
       this.world.ensureChunkAt(sx, sz);
@@ -517,12 +552,17 @@ export class GameEngine {
         continue;
       }
       const flicker =
-        0.88 +
-        0.08 * Math.sin(this.torchLightT * 9.1 + e.x * 1.7) +
-        0.06 * Math.sin(this.torchLightT * 14.3 + e.z * 2.2);
+        0.72 +
+        0.28 * this.torchFlame.intensity +
+        0.05 * Math.sin(this.torchLightT * 14.3 + e.z * 2.2);
       // Daytime surface torches are subtle; caves/night they pop
       const nightBoost = 1.15 + (1 - dayFactor) * 0.55;
       pl.position.set(e.x + 0.5, e.y + 0.72, e.z + 0.5);
+      const tid = this.world.getBlock(e.x, e.y, e.z);
+      if (tid === Block.TORCH_NX) pl.position.set(e.x + 0.28, e.y + 0.78, e.z + 0.5);
+      else if (tid === Block.TORCH_PX) pl.position.set(e.x + 0.72, e.y + 0.78, e.z + 0.5);
+      else if (tid === Block.TORCH_NZ) pl.position.set(e.x + 0.5, e.y + 0.78, e.z + 0.28);
+      else if (tid === Block.TORCH_PZ) pl.position.set(e.x + 0.5, e.y + 0.78, e.z + 0.72);
       pl.intensity = 1.35 * flicker * nightBoost;
       pl.distance = 12;
     }
@@ -542,6 +582,7 @@ export class GameEngine {
     this.weather.dispose();
     this.dayNight.dispose(this.scene);
     this.itemDrops.dispose();
+    this.chestVisuals.dispose();
     this.viewHand.dispose();
     this.caterpillars.dispose();
     this.animals.dispose();
@@ -552,6 +593,7 @@ export class GameEngine {
     this.audio.dispose();
     this.waterFX.dispose();
     this.world.dispose?.();
+    this.torchFlame.dispose();
     for (const pl of this.torchLights) {
       this.scene.remove(pl);
       pl.dispose();
@@ -681,7 +723,7 @@ export class GameEngine {
       this.mouseDown.right = false;
       // Crafting / death unlock the pointer on purpose — keep session
       // "playing" so the start overlay doesn't cover those UIs.
-      if (!this.craftingOpen && !this.openFurnacePos && !this.survival.dead) {
+      if (!this.craftingOpen && !this.openFurnacePos && !this.openChestPos && !this.survival.dead) {
         this.playing = false;
       }
     }
@@ -700,6 +742,7 @@ export class GameEngine {
     if (e.code === "KeyE") {
       e.preventDefault();
       if (this.openFurnacePos) this.closeFurnace();
+      else if (this.openChestPos) this.closeChest();
       else this.toggleCrafting();
     }
     // Debug: toggle day/night without releasing pointer lock
@@ -711,10 +754,11 @@ export class GameEngine {
       e.preventDefault();
       this.toggleFreeCraft();
     }
-    if (e.code === "Escape" && (this.craftingOpen || this.openFurnacePos)) {
+    if (e.code === "Escape" && (this.craftingOpen || this.openFurnacePos || this.openChestPos)) {
       e.preventDefault();
       this.setCraftingOpen(false);
       this.closeFurnace();
+      this.closeChest();
     }
     if (e.code === "KeyQ") {
       e.preventDefault();
@@ -735,7 +779,7 @@ export class GameEngine {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (!this.playing || this.survival.dead || this.craftingOpen || this.openFurnacePos) return;
+    if (!this.playing || this.survival.dead || this.craftingOpen || this.openFurnacePos || this.openChestPos) return;
     if (e.button === 0) {
       this.mouseDown.left = true;
       this.tryBreak(true);
@@ -890,6 +934,36 @@ export class GameEngine {
         this.closeFurnace();
       }
     }
+    if (isChest(id)) {
+      const st =
+        this.chests.get(x, y, z) ??
+        this.chests.ensure(x, y, z, { seed: this.world.seed });
+      this.chests.remove(x, y, z);
+      if (st) {
+        for (const stack of this.chests.contents(st)) {
+          const show = Math.min(stack.count, 8);
+          for (let n = 0; n < show; n++) this.itemDrops.spawn(stack.id, x, y, z);
+          if (stack.count > show) {
+            this.survival.addItem(stack.id, stack.count - show);
+          }
+        }
+      }
+      if (
+        this.openChestPos &&
+        this.openChestPos.x === x &&
+        this.openChestPos.y === y &&
+        this.openChestPos.z === z
+      ) {
+        this.closeChest();
+      }
+    }
+    if (isBed(id) && this.survival.bedSpawn &&
+      this.survival.bedSpawn.x === x &&
+      this.survival.bedSpawn.y === y &&
+      this.survival.bedSpawn.z === z
+    ) {
+      this.survival.bedSpawn = null;
+    }
     this.spawnBreakParticles(x + 0.5, y + 0.5, z + 0.5);
     this.survival.addExhaustion(0.5);
     this.emitHud();
@@ -899,8 +973,15 @@ export class GameEngine {
     const now = performance.now();
     if (!force && now - this.lastPlace < 200) return;
     if (this.survival.dead) return;
-    if (this.craftingOpen || this.openFurnacePos) return;
-    if (!this.target) return;
+    if (this.craftingOpen || this.openFurnacePos || this.openChestPos) return;
+    const held = this.survival.selectedSlot?.id;
+    if (!this.target) {
+      if (held && isFood(held)) {
+        this.tryEat();
+        this.lastPlace = now;
+      }
+      return;
+    }
     const lookId = this.world.getBlock(
       this.target.x,
       this.target.y,
@@ -908,6 +989,21 @@ export class GameEngine {
     );
     if (isFurnace(lookId)) {
       this.openFurnaceAt(this.target.x, this.target.y, this.target.z);
+      this.lastPlace = now;
+      return;
+    }
+    if (isChest(lookId)) {
+      this.openChestAt(this.target.x, this.target.y, this.target.z);
+      this.lastPlace = now;
+      return;
+    }
+    if (isBed(lookId)) {
+      this.trySleep(this.target.x, this.target.y, this.target.z);
+      this.lastPlace = now;
+      return;
+    }
+    if (held && isFood(held)) {
+      this.tryEat();
       this.lastPlace = now;
       return;
     }
@@ -926,6 +1022,33 @@ export class GameEngine {
 
     if (isPlant(blockId)) {
       if (isWater(dest)) return;
+      if (isTorch(blockId)) {
+        const placed = torchIdFromHitFace(
+          this.target.nx,
+          this.target.ny,
+          this.target.nz,
+        );
+        if (placed === null) return;
+        const [ax, ay, az] = torchAttachDir(placed);
+        const support = this.world.getBlock(px + ax, py + ay, pz + az);
+        if (!canSupportTorch(support)) return;
+        const ok = this.world.setBlock(px, py, pz, placed);
+        if (ok) {
+          this.viewHand.punch();
+          this.audio.placeBlock(
+            surfaceFromBlock(placed),
+            px + 0.5,
+            py + 0.5,
+            pz + 0.5,
+          );
+          this.survival.consumeSelected();
+          this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+          this.lastPlace = now;
+          this.survival.addExhaustion(0.15);
+          this.emitHud();
+        }
+        return;
+      }
       const below = this.world.getBlock(px, py - 1, pz);
       if (!isSolid(below) || isPlant(below) || isWater(below)) return;
     }
@@ -943,6 +1066,9 @@ export class GameEngine {
       if (blockId === Block.FURNACE) {
         this.furnaces.ensure(px, py, pz);
       }
+      if (blockId === Block.CHEST) {
+        this.chests.ensure(px, py, pz, { empty: true });
+      }
       this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
       this.lastPlace = now;
       this.survival.addExhaustion(0.15);
@@ -954,7 +1080,7 @@ export class GameEngine {
   private tryAttack(): void {
     const now = performance.now();
     if (now - this.lastAttack < 320) return;
-    if (this.survival.dead || this.craftingOpen || this.openFurnacePos) return;
+    if (this.survival.dead || this.craftingOpen || this.openFurnacePos || this.openChestPos) return;
     const [lx, ly, lz] = this.player.lookDir();
     const tool = getTool(this.survival.heldToolId());
     const dmg = tool.attack;
@@ -994,6 +1120,13 @@ export class GameEngine {
       this.lastAttack = now;
       this.viewHand.punch();
       this.audio.swing();
+      if (result.outcome === "dead") {
+        for (const stack of mobLoot(result.kind)) {
+          for (let i = 0; i < stack.count; i++) {
+            this.itemDrops.spawn(stack.id, result.x, result.y, result.z);
+          }
+        }
+      }
       if (isTool(this.survival.heldToolId() ?? 0)) {
         this.survival.damageHeldTool(1);
       }
@@ -1066,7 +1199,10 @@ export class GameEngine {
   }
 
   setCraftingOpen(open: boolean): void {
-    if (open) this.closeFurnace(false);
+    if (open) {
+      this.closeFurnace(false);
+      this.closeChest(false);
+    } else this.returnCursorOrDrop();
     this.craftingOpen = open;
     this.mouseDown.left = false;
     this.mouseDown.right = false;
@@ -1074,7 +1210,7 @@ export class GameEngine {
       if (document.pointerLockElement === this.canvas) {
         document.exitPointerLock();
       }
-    } else if (!this.isTouch && this.playing && !this.openFurnacePos) {
+    } else if (!this.isTouch && this.playing && !this.openFurnacePos && !this.openChestPos) {
       this.canvas.requestPointerLock();
     }
     this.emitHud();
@@ -1082,6 +1218,7 @@ export class GameEngine {
 
   private openFurnaceAt(x: number, y: number, z: number): void {
     this.craftingOpen = false;
+    this.closeChest(false);
     this.openFurnacePos = { x, y, z };
     this.furnaces.ensure(x, y, z);
     this.mouseDown.left = false;
@@ -1099,7 +1236,7 @@ export class GameEngine {
     this.openFurnacePos = null;
     this.mouseDown.left = false;
     this.mouseDown.right = false;
-    if (relock && !this.isTouch && this.playing && !this.craftingOpen) {
+    if (relock && !this.isTouch && this.playing && !this.craftingOpen && !this.openChestPos) {
       this.canvas.requestPointerLock();
     }
     this.emitHud();
@@ -1124,16 +1261,117 @@ export class GameEngine {
     this.survival.cursor = null;
   }
 
-  /** Click hotbar: pick/place/swap, or shift-click into the furnace. */
+  /** Click inventory / hotbar. Shift-click routes to furnace, chest, or backpack. */
   inventoryClickHotbar(i: number, shift = false): void {
-    if (!this.openFurnacePos) {
-      this.selectHotbar(i);
-      return;
+    if (i < 0 || i >= INV_SIZE) return;
+    if (shift && this.openFurnacePos) {
+      this.shiftHotbarToFurnace(i);
+    } else if (shift && this.openChestPos) {
+      const st = this.chests.ensure(
+        this.openChestPos.x,
+        this.openChestPos.y,
+        this.openChestPos.z,
+        { seed: this.world.seed },
+      );
+      this.survival.shiftInto(i, st.slots);
+    } else if (shift && this.craftingOpen) {
+      this.survival.shiftHotbarBackpack(i);
+    } else {
+      this.survival.clickSlot(i);
     }
-    if (shift) this.shiftHotbarToFurnace(i);
-    else this.survival.clickHotbar(i);
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
     this.audio.ui();
+    this.emitHud();
+  }
+
+  private openChestAt(x: number, y: number, z: number): void {
+    this.craftingOpen = false;
+    this.closeFurnace(false);
+    this.openChestPos = { x, y, z };
+    this.chests.ensure(x, y, z, { seed: this.world.seed });
+    this.chestVisuals.setOpen(x, y, z, true);
+    this.mouseDown.left = false;
+    this.mouseDown.right = false;
+    if (document.pointerLockElement === this.canvas) {
+      document.exitPointerLock();
+    }
+    this.audio.chestOpen(x + 0.5, y + 0.5, z + 0.5);
+    this.emitHud();
+  }
+
+  closeChest(relock = true): void {
+    if (!this.openChestPos) return;
+    const pos = this.openChestPos;
+    this.chestVisuals.setOpen(pos.x, pos.y, pos.z, false);
+    this.audio.chestClose(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5);
+    this.returnCursorOrDrop();
+    this.openChestPos = null;
+    this.mouseDown.left = false;
+    this.mouseDown.right = false;
+    if (relock && !this.isTouch && this.playing && !this.craftingOpen && !this.openFurnacePos) {
+      this.canvas.requestPointerLock();
+    }
+    this.emitHud();
+  }
+
+  chestClickSlot(i: number, shift = false): void {
+    const pos = this.openChestPos;
+    if (!pos) return;
+    const st = this.chests.ensure(pos.x, pos.y, pos.z, { seed: this.world.seed });
+    if (shift) {
+      this.survival.shiftFrom(st.slots, i);
+    } else {
+      this.survival.cursor = this.chests.clickSlot(st, i, this.survival.cursor);
+    }
+    this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+    this.audio.ui();
+    this.emitHud();
+  }
+
+  private tryEat(): void {
+    const now = performance.now();
+    if (now - this.lastEat < 450) return;
+    if (this.survival.eatSelected()) {
+      this.lastEat = now;
+      this.audio.eat();
+      this.viewHand.punch();
+      this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+      this.emitHud();
+    }
+  }
+
+  private trySleep(x: number, y: number, z: number): void {
+    this.survival.bedSpawn = { x, y, z };
+    if (this.dayNight.isDaytime) {
+      this.flashNotice("You can only sleep at night");
+      this.audio.ui();
+      return;
+    }
+    if (this.hostiles.anyNear(this.player.x, this.player.z, 16) ||
+      this.slenderGiant.anyNear(this.player.x, this.player.z, 22)
+    ) {
+      this.flashNotice("You can't sleep — monsters nearby");
+      this.audio.ui();
+      return;
+    }
+    this.dayNight.skipToDawn();
+    const dn = this.dayNight.update(
+      0,
+      this.player.x,
+      this.player.y,
+      this.player.z,
+      this.camera,
+    );
+    this.weather.setDayNight(dn);
+    this.dayNight.finalizeKeyLight();
+    this.audio.sleep();
+    this.flashNotice("You sleep until dawn");
+    this.emitHud();
+  }
+
+  private flashNotice(msg: string): void {
+    this.notice = msg;
+    this.noticeT = 3.2;
     this.emitHud();
   }
 
@@ -1341,6 +1579,19 @@ export class GameEngine {
       }
     }
 
+    if (this.noticeT > 0) {
+      this.noticeT -= dt;
+      if (this.noticeT <= 0) this.notice = "";
+    }
+
+    this.chestVisuals.update(
+      dt,
+      this.world,
+      this.player.x,
+      this.player.eyeY,
+      this.player.z,
+    );
+
     this.world.ensureChunksAround(this.player.x, this.player.z);
 
     this.birds.setDayFactor(dn.dayFactor);
@@ -1360,6 +1611,10 @@ export class GameEngine {
       this.player.z,
       this.player.submerged,
     );
+    {
+      const w = this.weather.sample;
+      this.torchFlame.update(dt, w.windX);
+    }
     this.updateTorchLights(dt, dn.dayFactor);
 
     // Cloth wind after weather so storm vectors are current (per-giant sample)
@@ -1507,14 +1762,17 @@ export class GameEngine {
         this.world.getBlock(this.target.x, this.target.y, this.target.z),
       );
       if (plant) {
-        const sx = PLANT_HITBOX.maxX - PLANT_HITBOX.minX;
-        const sy = PLANT_HITBOX.maxY - PLANT_HITBOX.minY;
-        const sz = PLANT_HITBOX.maxZ - PLANT_HITBOX.minZ;
+        const box = plantHitbox(
+          this.world.getBlock(this.target.x, this.target.y, this.target.z),
+        );
+        const sx = box.maxX - box.minX;
+        const sy = box.maxY - box.minY;
+        const sz = box.maxZ - box.minZ;
         this.highlight.scale.set(sx, sy, sz);
         this.highlight.position.set(
-          this.target.x + (PLANT_HITBOX.minX + PLANT_HITBOX.maxX) * 0.5,
-          this.target.y + (PLANT_HITBOX.minY + PLANT_HITBOX.maxY) * 0.5,
-          this.target.z + (PLANT_HITBOX.minZ + PLANT_HITBOX.maxZ) * 0.5,
+          this.target.x + (box.minX + box.maxX) * 0.5,
+          this.target.y + (box.minY + box.maxY) * 0.5,
+          this.target.z + (box.minZ + box.maxZ) * 0.5,
         );
       } else {
         this.highlight.scale.set(1, 1, 1);
@@ -1828,14 +2086,26 @@ export class GameEngine {
     };
   }
 
+  private snapshotChest(): HotbarSlot[] | null {
+    const pos = this.openChestPos;
+    if (!pos) return null;
+    const st = this.chests.get(pos.x, pos.y, pos.z);
+    if (!st) return null;
+    return st.slots.map((s) =>
+      s ? { id: s.id, count: s.count, durability: s.durability } : null,
+    );
+  }
+
   private emitHud(): void {
     const stats = this.caterpillars.stats;
     const hs = this.hostiles.stats;
     const w = this.weather.sample;
     const sel = this.survival.selectedSlot?.id ?? 0;
     const night = this.dayNight.state.dayFactor < 0.4;
-    const tip = !this.survival.craftedFirst
-      ? "Press E to craft · wood → planks → sticks → tools"
+    const tip = this.noticeT > 0 && this.notice
+      ? this.notice
+      : !this.survival.craftedFirst
+      ? "Press E for inventory · wood → planks → chest / bed"
       : !this.survival.madePick
         ? "Craft a pickaxe to mine stone efficiently"
         : !this.survival.madeFurnace
@@ -1847,8 +2117,8 @@ export class GameEngine {
                 ? "Something tall is watching — craft a sword, find shelter"
                 : "Hostiles nearby — fight or hide until dawn"
               : night
-                ? "Night falls — stay alert outdoors"
-                : "Iron tools unlock the midgame";
+                ? "Sleep in a bed to skip the night"
+                : "Hunt animals · cook meat · 3 wool + 3 planks = bed";
 
     this.onHud?.({
       playing: this.playing,
@@ -1892,6 +2162,8 @@ export class GameEngine {
       craftingOpen: this.craftingOpen,
       furnaceOpen: !!this.openFurnacePos,
       furnace: this.snapshotFurnace(),
+      chestOpen: !!this.openChestPos,
+      chest: this.snapshotChest(),
       recipes: CRAFTABLE_RECIPES.map((r) => ({
         id: r.id,
         name: r.name,
@@ -1913,6 +2185,7 @@ export class GameEngine {
         ? { ...this.survival.cursor }
         : null,
       tip,
+      notice: this.noticeT > 0 ? this.notice : "",
     });
   }
 }

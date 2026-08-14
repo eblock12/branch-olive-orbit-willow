@@ -12,6 +12,20 @@ import {
   unstickEntity,
   type EntityBox,
 } from "./entityCollision";
+import {
+  applyEntitySwim,
+  findShore,
+  sampleEntityWater,
+} from "./entityWater";
+import type { MobPunch } from "./loot";
+import {
+  createHurtOverlay,
+  tickHurtOverlay,
+  disposeHurtOverlay,
+  knockbackImpulse,
+  integrateKnockback,
+  HURT_FLASH,
+} from "./entityHitFx";
 
 export type PassiveKind = "pig" | "cow" | "sheep" | "chicken" | "rabbit";
 
@@ -380,6 +394,13 @@ class PassiveMob {
   private climbHopT = 0;
   private climbDx = 0;
   private climbDz = 0;
+  private shoreX = 0;
+  private shoreZ = 0;
+  private shoreT = 0;
+  private inWater = false;
+  private kbX = 0;
+  private kbZ = 0;
+  private hurtOverlay: THREE.Mesh;
   /** Seconds until next blink starts */
   private blinkWait = 1 + Math.random() * 3;
   /** Blink progress 0..1 while blinking; <0 when idle open */
@@ -401,6 +422,13 @@ class PassiveMob {
     this.mesh.scale.setScalar(kindDef.scale);
     this.shadow = createEntityShadow(kindDef.shadowR);
     this.headObj = this.mesh.getObjectByName("head") ?? null;
+    this.hurtOverlay = createHurtOverlay(
+      (kindDef.halfW * 2) / kindDef.scale,
+      kindDef.height / kindDef.scale,
+      (kindDef.halfW * 2.2) / kindDef.scale,
+      (kindDef.height * 0.5) / kindDef.scale,
+    );
+    this.mesh.add(this.hurtOverlay);
     this.pickWander();
   }
 
@@ -416,9 +444,14 @@ class PassiveMob {
   hit(fromX: number, fromZ: number, damage: number): "hurt" | "dead" | "miss" {
     if (!this.alive) return "miss";
     this.hp -= damage;
-    this.hurtFlash = 0.3;
+    this.hurtFlash = HURT_FLASH;
     this.state = "flee";
     this.stateT = 2.5 + Math.random();
+    const kb = knockbackImpulse(this.x, this.z, fromX, fromZ, 10.5);
+    this.kbX = kb.kbX;
+    this.kbZ = kb.kbZ;
+    this.vy = Math.max(this.vy, kb.vy);
+    this.onGround = false;
     const dx = this.x - fromX;
     const dz = this.z - fromZ;
     const len = Math.hypot(dx, dz) || 1;
@@ -466,6 +499,54 @@ class PassiveMob {
       halfW: this.def.halfW * s,
       height: this.def.height * s,
     };
+  }
+
+  private tickSwim(dt: number, world: World, box: EntityBox): void {
+    this.shoreT -= dt;
+    if (this.shoreT <= 0) {
+      this.shoreT = 0.45 + Math.random() * 0.25;
+      const shore = findShore(world, this.x, this.z, this.y, 14);
+      if (shore) {
+        this.shoreX = shore.x;
+        this.shoreZ = shore.z;
+        this.targetX = shore.x;
+        this.targetZ = shore.z;
+      }
+    }
+    let wx = this.targetX - this.x;
+    let wz = this.targetZ - this.z;
+    if (Math.hypot(wx, wz) < 0.35) {
+      const shore = findShore(world, this.x, this.z, this.y, 14);
+      if (shore) {
+        this.targetX = shore.x;
+        this.targetZ = shore.z;
+        wx = shore.x - this.x;
+        wz = shore.z - this.z;
+      }
+    }
+    if (Math.hypot(wx, wz) > 0.05) {
+      const desired = Math.atan2(wx, wz);
+      let dyaw = desired - this.yaw;
+      while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+      while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+      this.yaw += dyaw * Math.min(1, 5 * dt);
+    }
+    const r = applyEntitySwim(world, box, this.vy, dt, wx, wz, 1.85);
+    this.vy = r.vy;
+    this.onGround = r.onGround;
+    this.x = box.x;
+    this.y = box.y;
+    this.z = box.z;
+    if (r.hopped) {
+      this.hopCooldown = 0.4;
+      this.climbHopT = 0.55;
+      this.climbDx = Math.sin(this.yaw);
+      this.climbDz = Math.cos(this.yaw);
+    }
+    if (this.state === "idle" || this.state === "look") {
+      this.state = "wander";
+      this.stateT = 2;
+    }
   }
 
   update(dt: number, world: World, player: Player): void {
@@ -530,6 +611,7 @@ class PassiveMob {
     let speed = 0;
     if (this.state === "wander") speed = this.def.speed;
     else if (this.state === "flee") speed = this.def.fleeSpeed;
+    if (this.hurtFlash > 0.18) speed *= 0.1;
     // idle + look → stop
 
     const box = this.bodyBox();
@@ -538,8 +620,11 @@ class PassiveMob {
     this.y = box.y;
     this.z = box.z;
 
-    // Horizontal move — no auto step-up; hop to climb
-    if (speed > 0) {
+    const wet = sampleEntityWater(world, box);
+    this.inWater = wet.any;
+    if (wet.any) {
+      this.tickSwim(dt, world, box);
+    } else if (speed > 0) {
       const tdx = this.targetX - this.x;
       const tdz = this.targetZ - this.z;
       const td = Math.hypot(tdx, tdz);
@@ -641,8 +726,8 @@ class PassiveMob {
       if (this.headObj) this.headObj.rotation.y = this.headYaw;
     }
 
-    // Gravity / fall — never snap to surface
-    {
+    // Gravity / fall — never snap to surface (swim already integrated)
+    if (!this.inWater) {
       const gbox = this.bodyBox();
       const g = applyEntityGravity(world, gbox, this.vy, dt, 28, 40);
       this.vy = g.vy;
@@ -652,8 +737,27 @@ class PassiveMob {
       this.z = gbox.z;
     }
 
-    // Visual bob — real climb hop uses physics y, keep bob subtle
-    if (this.kind === "rabbit" || this.kind === "chicken") {
+    {
+      const kbox = this.bodyBox();
+      const kb = integrateKnockback(
+        world,
+        kbox,
+        this.kbX,
+        this.kbZ,
+        dt,
+        this.onGround,
+      );
+      this.x = kbox.x;
+      this.y = kbox.y;
+      this.z = kbox.z;
+      this.kbX = kb.kbX;
+      this.kbZ = kb.kbZ;
+    }
+
+    // Visual bob — paddle in water, hop on land
+    if (this.inWater) {
+      this.hop = Math.sin(this.bob * 2.2) * 0.04;
+    } else if (this.kind === "rabbit" || this.kind === "chicken") {
       this.hop =
         this.onGround && this.state !== "idle"
           ? Math.abs(Math.sin(this.bob * 1.4)) * 0.06
@@ -692,24 +796,11 @@ class PassiveMob {
       }
     }
 
+    tickHurtOverlay(this.hurtOverlay, this.hurtFlash);
     if (this.hurtFlash > 0) {
-      this.mesh.traverse((o) => {
-        if (
-          o instanceof THREE.Mesh &&
-          o.material instanceof THREE.MeshLambertMaterial
-        ) {
-          o.material.emissive.setHex(0x551111);
-        }
-      });
+      this.mesh.scale.setScalar(this.def.scale * (1 + this.hurtFlash * 0.2));
     } else {
-      this.mesh.traverse((o) => {
-        if (
-          o instanceof THREE.Mesh &&
-          o.material instanceof THREE.MeshLambertMaterial
-        ) {
-          o.material.emissive.setHex(0x000000);
-        }
-      });
+      this.mesh.scale.setScalar(this.def.scale);
     }
 
     updateEntityShadow(
@@ -724,6 +815,7 @@ class PassiveMob {
   }
 
   dispose(): void {
+    disposeHurtOverlay(this.hurtOverlay);
     disposeEntityShadow(this.shadow);
     // geometries are shared — only clear group
     this.mesh.clear();
@@ -814,7 +906,7 @@ export class PassiveMobSystem {
     dz: number,
     maxDist: number,
     damage = 1,
-  ): "hurt" | "dead" | null {
+  ): MobPunch | null {
     let bestT = Math.min(maxDist, HIT_RANGE);
     let best: PassiveMob | null = null;
     for (const m of this.list) {
@@ -826,8 +918,9 @@ export class PassiveMobSystem {
     }
     if (!best) return null;
     const result = best.hit(ox, oz, damage);
+    if (result === "miss") return null;
     if (result === "dead") this.killed++;
-    return result === "miss" ? null : result;
+    return { outcome: result, kind: best.kind, x: best.x, y: best.y, z: best.z };
   }
 
   dispose(): void {

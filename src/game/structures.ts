@@ -289,6 +289,14 @@ function pillar(
   for (let i = 0; i < h; i++) setBlock(ctx, wx, y0 + i, wz, id);
 }
 
+/** One loot chest on/above a solid cell. */
+function placeLootChest(ctx: Ctx, wx: number, wy: number, wz: number): void {
+  const g = topSolidY(ctx, wx, wz);
+  const y = wy > g ? wy : g + 1;
+  if (y < 2 || y >= CHUNK_HEIGHT - 1) return;
+  setBlock(ctx, wx, y, wz, Block.CHEST);
+}
+
 // ─── Structure types ────────────────────────────────────────────
 
 function placeWatchtower(ctx: Ctx, ox: number, oz: number): void {
@@ -326,6 +334,7 @@ function placeWatchtower(ctx: Ctx, ox: number, oz: number): void {
   }
   pillar(ctx, ox, top + 1, oz, 3, Block.WOOD);
   setBlock(ctx, ox, top + 4, oz, Block.LEAVES);
+  setBlock(ctx, ox + 1, y + 1, oz, Block.CHEST);
 }
 
 function placeCabin(ctx: Ctx, ox: number, oz: number): void {
@@ -359,6 +368,8 @@ function placeCabin(ctx: Ctx, ox: number, oz: number): void {
     );
   }
   pillar(ctx, ox + w - 1, y + 1, oz + d - 1, h + 3, Block.COBBLE);
+  setBlock(ctx, ox + w - 1, y + 1, oz - d + 1, Block.CHEST);
+  setBlock(ctx, ox - w + 1, y + 1, oz + d - 1, Block.BED);
 }
 
 function placeStoneCircle(ctx: Ctx, ox: number, oz: number): void {
@@ -385,6 +396,7 @@ function placeStoneCircle(ctx: Ctx, ox: number, oz: number): void {
   }
   fillBox(ctx, ox - 1, floor + 1, oz - 1, ox + 1, floor + 1, oz + 1, Block.COBBLE);
   setBlock(ctx, ox, floor + 2, oz, Block.ICE);
+  placeLootChest(ctx, ox + 2, floor + 1, oz);
 }
 
 function placeObelisk(ctx: Ctx, ox: number, oz: number): void {
@@ -412,6 +424,7 @@ function placeObelisk(ctx: Ctx, ox: number, oz: number): void {
   }
   setBlock(ctx, ox, y + H, oz, Block.ICE);
   setBlock(ctx, ox, y + H + 1, oz, Block.ICE);
+  placeLootChest(ctx, ox + 2, y + 1, oz + 1);
 }
 
 function placePyramid(ctx: Ctx, ox: number, oz: number): void {
@@ -445,6 +458,7 @@ function placePyramid(ctx: Ctx, ox: number, oz: number): void {
     setBlock(ctx, ox, y + 2, oz + z, Block.AIR);
   }
   setBlock(ctx, ox, y + 1, oz, core);
+  setBlock(ctx, ox + 1, y + 1, oz, Block.CHEST);
 }
 
 function placeShipwreck(ctx: Ctx, ox: number, oz: number): void {
@@ -483,6 +497,7 @@ function placeShipwreck(ctx: Ctx, ox: number, oz: number): void {
   pillar(ctx, ox, mastBase + 1, oz, 5, Block.WOOD);
   setBlock(ctx, ox + 1, mastBase + 5, oz, Block.PLANKS);
   setBlock(ctx, ox + 2, mastBase + 4, oz, Block.PLANKS);
+  placeLootChest(ctx, ox - 2, mastBase + 1, oz);
 }
 
 function placeWell(ctx: Ctx, ox: number, oz: number): void {
@@ -503,6 +518,7 @@ function placeWell(ctx: Ctx, ox: number, oz: number): void {
   setBlock(ctx, ox - 1, y + 2, oz + 1, Block.WOOD);
   setBlock(ctx, ox + 1, y + 2, oz + 1, Block.WOOD);
   fillBox(ctx, ox - 1, y + 3, oz - 1, ox + 1, y + 3, oz + 1, Block.PLANKS);
+  placeLootChest(ctx, ox + 2, y + 1, oz);
 }
 
 function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
@@ -526,6 +542,7 @@ function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
       }
     }
   }
+  placeLootChest(ctx, ox + 2, y + 1, oz + 2);
 }
 
 function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
@@ -557,6 +574,7 @@ function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
       }
     }
   }
+  placeLootChest(ctx, ox + 2, y + 1, oz + 2);
 }
 
 /** Grounded rocky butte (was a floating sky island). */
@@ -595,6 +613,7 @@ function placeSkyIslet(ctx: Ctx, ox: number, oz: number): void {
       setBlock(ctx, ox + dx, topY + 4, oz + dz, Block.LEAVES, true);
     }
   }
+  placeLootChest(ctx, ox + 2, topY, oz);
 }
 
 function placeDungeonMouth(ctx: Ctx, ox: number, oz: number): void {
@@ -616,6 +635,7 @@ function placeDungeonMouth(ctx: Ctx, ox: number, oz: number): void {
   setBlock(ctx, ox - 1, y + 2, oz - 2, Block.COBBLE);
   setBlock(ctx, ox, y + 3, oz - 2, Block.COBBLE);
   setBlock(ctx, ox + 1, y + 2, oz - 2, Block.COBBLE);
+  setBlock(ctx, ox, y - 11, oz, Block.CHEST);
 }
 
 function placeBridgeRuin(ctx: Ctx, ox: number, oz: number): void {
@@ -647,6 +667,7 @@ function placeBridgeRuin(ctx: Ctx, ox: number, oz: number): void {
       }
     }
   }
+  setBlock(ctx, ox, y + 4, oz, Block.CHEST);
 }
 
 function placeIceSpire(ctx: Ctx, ox: number, oz: number): void {
@@ -672,6 +693,7 @@ function placeIceSpire(ctx: Ctx, ox: number, oz: number): void {
     ensureColumnGrounded(ctx, sx, sz, sy + 1, Block.ICE);
     pillar(ctx, sx, sy + 1, sz, 2 + (i % 3), Block.ICE);
   }
+  placeLootChest(ctx, ox + 3, y + 1, oz);
 }
 
 function placeArena(ctx: Ctx, ox: number, oz: number): void {
@@ -695,6 +717,7 @@ function placeArena(ctx: Ctx, ox: number, oz: number): void {
   }
   pillar(ctx, ox, y + 1, oz, 2, Block.COBBLE);
   setBlock(ctx, ox, y + 3, oz, Block.ICE);
+  placeLootChest(ctx, ox + 2, y + 1, oz);
 }
 
 const STRUCTURES: Array<{

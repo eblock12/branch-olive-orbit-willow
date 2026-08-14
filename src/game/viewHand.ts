@@ -30,9 +30,12 @@ export class ViewHand {
   private visible = true;
   private moveAmount = 0; // 0..1 smoothed locomotion
 
-  constructor(atlas: THREE.Texture) {
+  constructor(atlas: THREE.Texture, emissiveMap?: THREE.Texture) {
     this.material = new THREE.MeshLambertMaterial({
       map: atlas,
+      emissive: emissiveMap ? 0xffffff : 0x000000,
+      emissiveMap: emissiveMap ?? null,
+      emissiveIntensity: emissiveMap ? 1.35 : 0,
       transparent: true,
       alphaTest: 0.12,
       side: THREE.DoubleSide,

@@ -379,6 +379,11 @@ export class DayNightCycle {
     this.time = CYCLE_LENGTH_SEC * 0.75;
   }
 
+  /** Skip to just after dawn. */
+  skipToDawn(): void {
+    this.time = CYCLE_LENGTH_SEC * 0.04;
+  }
+
   /** True when currently day-ish (for debug toggle). */
   get isDaytime(): boolean {
     return this.sample.dayFactor > 0.45;

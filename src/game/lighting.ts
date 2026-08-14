@@ -206,6 +206,210 @@ export function computeChunkLighting(
   chunk.lightDirty = false;
 }
 
+const EDIT_DIRS: [number, number, number][] = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+export type LightEditWorld = {
+  getBlock(x: number, y: number, z: number): number;
+  getSky(x: number, y: number, z: number): number;
+  setSky(x: number, y: number, z: number, v: number): void;
+  getBlk(x: number, y: number, z: number): number;
+  setBlk(x: number, y: number, z: number, v: number): void;
+};
+
+/**
+ * Incremental sky + block light after a single block swap.
+ * Much cheaper than recomputing 9 whole chunks.
+ */
+export function applyBlockLightEdit(
+  wx: number,
+  wy: number,
+  wz: number,
+  prevId: number,
+  nextId: number,
+  w: LightEditWorld,
+): void {
+  const emitPrev = lightEmission(prevId);
+  const emitNext = lightEmission(nextId);
+  const blockPrev = blocksLight(prevId);
+  const blockNext = blocksLight(nextId);
+  if (emitPrev === emitNext && blockPrev === blockNext) return;
+  if (wy < 0 || wy >= CHUNK_HEIGHT) return;
+
+  if (blockPrev !== blockNext) {
+    updateSkyAround(wx, wy, wz, w);
+  }
+
+  const oldBlk = w.getBlk(wx, wy, wz);
+  if (blockNext && !blockPrev) {
+    subtractLight(w.getBlk, w.setBlk, w.getBlock, wx, wy, wz, oldBlk, true);
+    refillBlock(wx, wy, wz, w);
+  } else if (emitNext < oldBlk) {
+    subtractLight(w.getBlk, w.setBlk, w.getBlock, wx, wy, wz, oldBlk, true);
+    if (emitNext > 0) {
+      w.setBlk(wx, wy, wz, emitNext);
+      spreadLight(w.getBlk, w.setBlk, w.getBlock, wx, wy, wz, true);
+    } else {
+      refillBlock(wx, wy, wz, w);
+    }
+  } else if (emitNext > oldBlk) {
+    w.setBlk(wx, wy, wz, emitNext);
+    spreadLight(w.getBlk, w.setBlk, w.getBlock, wx, wy, wz, true);
+  }
+}
+
+function updateSkyAround(
+  wx: number,
+  wy: number,
+  wz: number,
+  w: LightEditWorld,
+): void {
+  const oldCol = new Uint8Array(CHUNK_HEIGHT);
+  const neu = new Uint8Array(CHUNK_HEIGHT);
+  for (let y = 0; y < CHUNK_HEIGHT; y++) oldCol[y] = w.getSky(wx, y, wz);
+
+  let s = 15;
+  for (let y = CHUNK_HEIGHT - 1; y >= 0; y--) {
+    const id = w.getBlock(wx, y, wz);
+    if (blocksLight(id)) {
+      neu[y] = 0;
+      s = 0;
+    } else {
+      neu[y] = s;
+      if (s > 0) s = Math.max(0, s - lightLoss(id));
+    }
+  }
+
+  for (let y = 0; y < CHUNK_HEIGHT; y++) {
+    if (oldCol[y]! > neu[y]!) {
+      subtractLight(w.getSky, w.setSky, w.getBlock, wx, y, wz, oldCol[y]!, false);
+    }
+  }
+  for (let y = 0; y < CHUNK_HEIGHT; y++) {
+    if (w.getSky(wx, y, wz) !== neu[y]!) w.setSky(wx, y, wz, neu[y]!);
+  }
+  for (let y = 0; y < CHUNK_HEIGHT; y++) {
+    if (neu[y]! > oldCol[y]! && neu[y]! > 1) {
+      spreadLight(w.getSky, w.setSky, w.getBlock, wx, y, wz, false);
+    }
+  }
+  void wy;
+}
+
+function refillBlock(wx: number, wy: number, wz: number, w: LightEditWorld): void {
+  const emit = lightEmission(w.getBlock(wx, wy, wz));
+  if (emit > w.getBlk(wx, wy, wz)) w.setBlk(wx, wy, wz, emit);
+  for (const [dx, dy, dz] of EDIT_DIRS) {
+    const nx = wx + dx;
+    const ny = wy + dy;
+    const nz = wz + dz;
+    if (ny < 0 || ny >= CHUNK_HEIGHT) continue;
+    if (w.getBlk(nx, ny, nz) > 1) {
+      spreadLight(w.getBlk, w.setBlk, w.getBlock, nx, ny, nz, true);
+    }
+  }
+  if (w.getBlk(wx, wy, wz) > 1) {
+    spreadLight(w.getBlk, w.setBlk, w.getBlock, wx, wy, wz, true);
+  }
+}
+
+function subtractLight(
+  get: (x: number, y: number, z: number) => number,
+  set: (x: number, y: number, z: number, v: number) => void,
+  getBlock: (x: number, y: number, z: number) => number,
+  x: number,
+  y: number,
+  z: number,
+  oldVal: number,
+  isBlock: boolean,
+): void {
+  if (oldVal <= 0) return;
+  const qx: number[] = [x];
+  const qy: number[] = [y];
+  const qz: number[] = [z];
+  const qv: number[] = [oldVal];
+  set(x, y, z, 0);
+  const seeds: number[] = [];
+  let qh = 0;
+  while (qh < qx.length && qh < 12000) {
+    const cx = qx[qh]!;
+    const cy = qy[qh]!;
+    const cz = qz[qh]!;
+    const cv = qv[qh]!;
+    qh++;
+    for (const [dx, dy, dz] of EDIT_DIRS) {
+      const nx = cx + dx;
+      const ny = cy + dy;
+      const nz = cz + dz;
+      if (ny < 0 || ny >= CHUNK_HEIGHT) continue;
+      const nl = get(nx, ny, nz);
+      if (nl <= 0) continue;
+      if (nl < cv) {
+        qx.push(nx);
+        qy.push(ny);
+        qz.push(nz);
+        qv.push(nl);
+        set(nx, ny, nz, 0);
+      } else {
+        seeds.push(nx, ny, nz);
+      }
+    }
+  }
+  for (let i = 0; i < seeds.length; i += 3) {
+    spreadLight(get, set, getBlock, seeds[i]!, seeds[i + 1]!, seeds[i + 2]!, isBlock);
+  }
+}
+
+function spreadLight(
+  get: (x: number, y: number, z: number) => number,
+  set: (x: number, y: number, z: number, v: number) => void,
+  getBlock: (x: number, y: number, z: number) => number,
+  x: number,
+  y: number,
+  z: number,
+  isBlock: boolean,
+): void {
+  const qx = [x];
+  const qy = [y];
+  const qz = [z];
+  let qh = 0;
+  while (qh < qx.length && qh < 12000) {
+    const cx = qx[qh]!;
+    const cy = qy[qh]!;
+    const cz = qz[qh]!;
+    qh++;
+    const cur = get(cx, cy, cz);
+    if (cur <= 1) continue;
+    for (const [dx, dy, dz] of EDIT_DIRS) {
+      const nx = cx + dx;
+      const ny = cy + dy;
+      const nz = cz + dz;
+      if (ny < 0 || ny >= CHUNK_HEIGHT) continue;
+      const nid = getBlock(nx, ny, nz);
+      if (isBlock) {
+        if (blocksLight(nid) && lightEmission(nid) <= 0) continue;
+      } else if (blocksLight(nid)) {
+        continue;
+      }
+      const next = cur - 1 - lightLoss(nid);
+      if (next > get(nx, ny, nz)) {
+        set(nx, ny, nz, next);
+        if (next > 1) {
+          qx.push(nx);
+          qy.push(ny);
+          qz.push(nz);
+        }
+      }
+    }
+  }
+}
+
 export function defaultSkyAt(wy: number): number {
   if (wy < 0) return 0;
   return 15;

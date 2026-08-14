@@ -12,6 +12,21 @@ import {
   unstickEntity,
   type EntityBox,
 } from "./entityCollision";
+import {
+  applyEntitySwim,
+  columnHasWaterSurface,
+  findShore,
+  sampleEntityWater,
+} from "./entityWater";
+import type { MobPunch } from "./loot";
+import {
+  createHurtOverlay,
+  tickHurtOverlay,
+  disposeHurtOverlay,
+  knockbackImpulse,
+  integrateKnockback,
+  HURT_FLASH,
+} from "./entityHitFx";
 
 /**
  * Night hostiles — the main danger loop.
@@ -227,6 +242,13 @@ class Hostile {
   climbDz = 0;
   hopCooldown = 0;
   age = 0;
+  private shoreX = 0;
+  private shoreZ = 0;
+  private shoreT = 0;
+  private inWater = false;
+  private kbX = 0;
+  private kbZ = 0;
+  private hurtOverlay: THREE.Mesh;
   /** Slender: occasional lunge / reappear */
   abilityCd = 3 + Math.random() * 4;
   private walkPhase = Math.random() * 10;
@@ -241,12 +263,24 @@ class Hostile {
     this.mesh = buildHostileMesh(kind, mats);
     this.mesh.position.set(x, y, z);
     this.shadow = createEntityShadow();
+    this.hurtOverlay = createHurtOverlay(
+      this.def.halfW * 2,
+      this.def.height,
+      this.def.halfW * 2,
+      this.def.height * 0.5,
+    );
+    this.mesh.add(this.hurtOverlay);
   }
 
-  hit(damage: number): "hurt" | "dead" | "miss" {
+  hit(fromX: number, fromZ: number, damage: number): "hurt" | "dead" | "miss" {
     if (!this.alive) return "miss";
     this.hp -= damage;
-    this.hurtFlash = 0.2;
+    this.hurtFlash = HURT_FLASH;
+    const kb = knockbackImpulse(this.x, this.z, fromX, fromZ, 11.5);
+    this.kbX = kb.kbX;
+    this.kbZ = kb.kbZ;
+    this.vy = Math.max(this.vy, kb.vy);
+    this.onGround = false;
     if (this.hp <= 0) {
       this.alive = false;
       return "dead";
@@ -356,6 +390,54 @@ class Hostile {
       speed = this.def.speed * 0.45;
     }
 
+    const wetBox: EntityBox = {
+      x: this.x,
+      y: this.y,
+      z: this.z,
+      halfW: this.def.halfW,
+      height: this.def.height,
+    };
+    this.inWater = sampleEntityWater(world, wetBox).any;
+    if (this.hurtFlash > 0.18) {
+      speed *= 0.12;
+    }
+    if (this.inWater) {
+      this.shoreT -= dt;
+      if (this.shoreT <= 0) {
+        this.shoreT = 0.4 + Math.random() * 0.3;
+        const shore = findShore(world, this.x, this.z, this.y, 14);
+        if (shore) {
+          this.shoreX = shore.x;
+          this.shoreZ = shore.z;
+        }
+      }
+      if (this.shoreX || this.shoreZ) {
+        tx = this.shoreX;
+        tz = this.shoreZ;
+      }
+      const wx = tx - this.x;
+      const wz = tz - this.z;
+      if (Math.hypot(wx, wz) > 0.08) {
+        const desired = Math.atan2(wx, wz);
+        let dyaw = desired - this.yaw;
+        while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+        while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+        this.yaw += dyaw * Math.min(1, 5 * dt);
+      }
+      const r = applyEntitySwim(world, wetBox, this.vy, dt, wx, wz, 1.7);
+      this.vy = r.vy;
+      this.onGround = r.onGround;
+      this.x = wetBox.x;
+      this.y = wetBox.y;
+      this.z = wetBox.z;
+      if (r.hopped) {
+        this.hopCooldown = 0.4;
+        this.climbHopT = 0.55;
+        this.climbDx = Math.sin(this.yaw);
+        this.climbDz = Math.cos(this.yaw);
+      }
+    } else {
+
     const tdx = tx - this.x;
     const tdz = tz - this.z;
     const tDist = Math.hypot(tdx, tdz);
@@ -400,6 +482,30 @@ class Hostile {
       this.x = box.x;
       this.y = box.y;
       this.z = box.z;
+    }
+    }
+
+    {
+      const box: EntityBox = {
+        x: this.x,
+        y: this.y,
+        z: this.z,
+        halfW: this.def.halfW,
+        height: this.def.height,
+      };
+      const kb = integrateKnockback(
+        world,
+        box,
+        this.kbX,
+        this.kbZ,
+        dt,
+        this.onGround,
+      );
+      this.x = box.x;
+      this.y = box.y;
+      this.z = box.z;
+      this.kbX = kb.kbX;
+      this.kbZ = kb.kbZ;
     }
 
     // Melee
@@ -467,8 +573,9 @@ class Hostile {
       : 0;
     this.mesh.position.y = this.y + bob;
     // Hurt flash
-    const s = this.hurtFlash > 0 ? 1.06 : 1;
+    const s = this.hurtFlash > 0 ? 1 + this.hurtFlash * 0.22 : 1;
     this.mesh.scale.setScalar(s);
+    tickHurtOverlay(this.hurtOverlay, this.hurtFlash);
     updateEntityShadow(
       this.shadow,
       this.x,
@@ -483,6 +590,7 @@ class Hostile {
   }
 
   dispose(): void {
+    disposeHurtOverlay(this.hurtOverlay);
     disposeEntityShadow(this.shadow);
   }
 }
@@ -513,6 +621,17 @@ export class HostileSystem {
       killed: this.killed,
       slender: this.slenderCount,
     };
+  }
+
+  anyNear(x: number, z: number, r: number): boolean {
+    const r2 = r * r;
+    for (const h of this.list) {
+      if (!h.alive) continue;
+      const dx = h.x - x;
+      const dz = h.z - z;
+      if (dx * dx + dz * dz <= r2) return true;
+    }
+    return false;
   }
 
   update(
@@ -584,7 +703,7 @@ export class HostileSystem {
     const z = player.z + Math.sin(ang) * dist;
     const y = world.getSurfaceY(Math.floor(x), Math.floor(z));
     if (y <= 2) return;
-    // Don't spawn in water columns roughly
+    if (columnHasWaterSurface(world, x, z)) return;
     // Keep away from other hostiles
     for (const h of this.list) {
       if (Math.hypot(h.x - x, h.z - z) < 5) return;
@@ -633,7 +752,7 @@ export class HostileSystem {
     dz: number,
     maxDist: number,
     damage = 1,
-  ): "hurt" | "dead" | null {
+  ): MobPunch | null {
     let bestT = maxDist;
     let best: Hostile | null = null;
     for (const h of this.list) {
@@ -644,16 +763,10 @@ export class HostileSystem {
       }
     }
     if (!best) return null;
-    const r = best.hit(damage);
+    const r = best.hit(ox, oz, damage);
+    if (r === "miss") return null;
     if (r === "dead") this.killed++;
-    // Knockback
-    if (r !== "miss") {
-      const len = Math.hypot(best.x - ox, best.z - oz) || 1;
-      best.x += ((best.x - ox) / len) * 0.35;
-      best.z += ((best.z - oz) / len) * 0.35;
-      best.vy = Math.max(best.vy, 3.5);
-    }
-    return r === "miss" ? null : r;
+    return { outcome: r, kind: best.kind, x: best.x, y: best.y, z: best.z };
   }
 
   dispose(): void {

@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isPlant, type BlockId } from "./blocks";
+import { Block, BLOCKS, isPlant, isTorch, type BlockId } from "./blocks";
 import {
   CRAFTABLE_RECIPES,
   ITEM_DEFS,
@@ -16,6 +16,7 @@ import {
 export const MAX_HEALTH = 20;
 export const MAX_HUNGER = 20;
 export const HOTBAR_SIZE = 9;
+export const INV_SIZE = 27;
 export const MAX_STACK = 64;
 
 export type HotbarSlot = ItemStack | null;
@@ -27,7 +28,7 @@ export function mineTime(id: number, toolId?: ItemId | null): number {
 
 /** Item dropped when block is broken (null = nothing) */
 export function blockDrop(id: number): ItemId | null {
-  if (isPlant(id) && id !== Block.TORCH) return id as BlockId;
+  if (isPlant(id) && !isTorch(id)) return id as BlockId;
   switch (id) {
     case Block.GRASS:
     case Block.SNOW_GRASS:
@@ -41,7 +42,15 @@ export function blockDrop(id: number): ItemId | null {
     case Block.FURNACE:
     case Block.FURNACE_LIT:
       return Block.FURNACE;
+    case Block.CHEST:
+      return Block.CHEST;
+    case Block.BED:
+      return Block.BED;
     case Block.TORCH:
+    case Block.TORCH_NX:
+    case Block.TORCH_PX:
+    case Block.TORCH_NZ:
+    case Block.TORCH_PZ:
       return Block.TORCH;
     case Block.DIRT:
     case Block.SAND:
@@ -72,7 +81,7 @@ export class SurvivalState {
   fallStartY: number | null = null;
   wasOnGround = true;
 
-  slots: HotbarSlot[] = Array.from({ length: HOTBAR_SIZE }, () => null);
+  slots: HotbarSlot[] = Array.from({ length: INV_SIZE }, () => null);
   selected = 0;
   /** Stack held on the inventory cursor (furnace / craft). */
   cursor: ItemStack | null = null;
@@ -87,6 +96,7 @@ export class SurvivalState {
   smeltedIron = false;
   /** Debug: craft without consuming / requiring inputs */
   freeCraft = false;
+  bedSpawn: { x: number; y: number; z: number } | null = null;
 
   constructor() {
     // Soft start: dirt + wood so early crafting is possible
@@ -118,7 +128,7 @@ export class SurvivalState {
     const isTool = maxStack === 1;
 
     if (!isTool) {
-      for (let i = 0; i < HOTBAR_SIZE && left > 0; i++) {
+      for (let i = 0; i < INV_SIZE && left > 0; i++) {
         const s = this.slots[i];
         if (s && s.id === id && s.count < maxStack) {
           const room = maxStack - s.count;
@@ -129,7 +139,7 @@ export class SurvivalState {
       }
     }
 
-    for (let i = 0; i < HOTBAR_SIZE && left > 0; i++) {
+    for (let i = 0; i < INV_SIZE && left > 0; i++) {
       if (!this.slots[i]) {
         if (isTool) {
           const maxD = ITEM_DEFS[id]?.maxDurability;
@@ -152,7 +162,7 @@ export class SurvivalState {
   /** Remove up to `count` of item across inventory. Returns removed amount. */
   removeItem(id: ItemId, count: number): number {
     let need = count;
-    for (let i = 0; i < HOTBAR_SIZE && need > 0; i++) {
+    for (let i = 0; i < INV_SIZE && need > 0; i++) {
       const s = this.slots[i];
       if (!s || s.id !== id) continue;
       const n = Math.min(s.count, need);
@@ -213,13 +223,18 @@ export class SurvivalState {
     return id;
   }
 
-  /** Left-click a hotbar slot: pick up, place, merge, or swap. */
-  clickHotbar(i: number): void {
-    if (i < 0 || i >= HOTBAR_SIZE) return;
+  /** Left-click any inventory slot: pick up, place, merge, or swap. */
+  clickSlot(i: number): void {
+    if (i < 0 || i >= INV_SIZE) return;
     const r = clickStacks(this.slots[i], this.cursor);
     this.slots[i] = r.slot;
     this.cursor = r.cursor;
-    this.select(i);
+    if (i < HOTBAR_SIZE) this.select(i);
+  }
+
+  /** @deprecated use clickSlot */
+  clickHotbar(i: number): void {
+    this.clickSlot(i);
   }
 
   /** Put as much of `stack` as will fit into the hotbar. Returns leftover. */
@@ -236,6 +251,39 @@ export class SurvivalState {
     this.cursor = this.insertStack(this.cursor);
   }
 
+  /**
+   * Move as much as possible from slots[i] into dest (another bag).
+   * Returns true if anything moved.
+   */
+  shiftInto(i: number, dest: HotbarSlot[]): boolean {
+    const src = this.slots[i];
+    if (!src) return false;
+    const left = mergeIntoSlots(dest, src);
+    this.slots[i] = left;
+    return !left || left.count < src.count;
+  }
+
+  shiftFrom(srcSlots: HotbarSlot[], i: number): boolean {
+    const src = srcSlots[i];
+    if (!src) return false;
+    const left = mergeIntoSlots(this.slots, src);
+    srcSlots[i] = left;
+    return !left || left.count < src.count;
+  }
+
+  /** Shift-click: hotbar ↔ backpack. */
+  shiftHotbarBackpack(i: number): boolean {
+    const src = this.slots[i];
+    if (!src) return false;
+    const destStart = i < HOTBAR_SIZE ? HOTBAR_SIZE : 0;
+    const destEnd = i < HOTBAR_SIZE ? INV_SIZE : HOTBAR_SIZE;
+    const dest: HotbarSlot[] = this.slots.slice(destStart, destEnd);
+    const left = mergeIntoSlots(dest, src);
+    for (let k = 0; k < dest.length; k++) this.slots[destStart + k] = dest[k]!;
+    this.slots[i] = left;
+    return true;
+  }
+
   consumeSelected(): ItemId | null {
     const s = this.slots[this.selected];
     if (!s || s.count <= 0) return null;
@@ -244,6 +292,20 @@ export class SurvivalState {
     s.count--;
     if (s.count <= 0) this.slots[this.selected] = null;
     return id;
+  }
+
+  /** Eat held food. Heals now; hunger fill is stored for later. */
+  eatSelected(): boolean {
+    const s = this.slots[this.selected];
+    if (!s) return false;
+    const food = ITEM_DEFS[s.id]?.food;
+    if (!food) return false;
+    if (this.health >= MAX_HEALTH && this.hunger >= MAX_HUNGER) return false;
+    this.heal(food.heal);
+    this.hunger = Math.min(MAX_HUNGER, this.hunger + food.hunger);
+    s.count--;
+    if (s.count <= 0) this.slots[this.selected] = null;
+    return true;
   }
 
   hasSelectedPlaceable(): boolean {
@@ -425,6 +487,38 @@ export function clickStacks(
     }
   }
   return { slot: { ...cursor }, cursor: { ...slot } };
+}
+
+/** Merge `from` into `dest` slots. Returns leftover or null. */
+export function mergeIntoSlots(
+  dest: HotbarSlot[],
+  from: ItemStack,
+): ItemStack | null {
+  const max = itemMaxStack(from.id);
+  let left = from.count;
+  if (max > 1) {
+    for (let i = 0; i < dest.length && left > 0; i++) {
+      const s = dest[i];
+      if (s && s.id === from.id && s.count < max) {
+        const n = Math.min(max - s.count, left);
+        s.count += n;
+        left -= n;
+      }
+    }
+  }
+  for (let i = 0; i < dest.length && left > 0; i++) {
+    if (!dest[i]) {
+      const n = Math.min(max, left);
+      dest[i] = {
+        id: from.id,
+        count: n,
+        durability: from.durability,
+      };
+      left -= n;
+    }
+  }
+  if (left <= 0) return null;
+  return { ...from, count: left };
 }
 
 export { CRAFTABLE_RECIPES, getTool, placeableBlock, canHarvest };

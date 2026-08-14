@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, waterLevel, lightEmission } from "./blocks";
+import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, waterLevel, lightEmission } from "./blocks";
 import { tileUVs } from "./textures";
 
 export { CHUNK_SIZE, CHUNK_HEIGHT, SEA_LEVEL } from "./chunkConstants";
@@ -96,7 +96,6 @@ export class Chunk {
     if (x < 0 || y < 0 || z < 0 || x >= CHUNK_SIZE || z >= CHUNK_SIZE || y >= CHUNK_HEIGHT) return;
     this.blocks[this.index(x, y, z)] = id;
     this.dirty = true;
-    this.lightDirty = true;
   }
 
   generate(seed: number): void {
@@ -302,7 +301,7 @@ export type ChunkLoadedFn = (wx: number, wz: number) => boolean;
 
 
 function windFactorFor(id: number): number {
-  if (id === Block.TORCH) return 0.18;
+  if (isTorch(id)) return 0.18;
   if (id === Block.LEAVES) return 1;
   if (isPlant(id)) return 0.85;
   return 0;
@@ -430,6 +429,75 @@ function emitCrossPlant(
     ],
     uvPairs,
     [0.707, 0, 0.707],
+    1,
+    plantWinds,
+    true,
+    light,
+  );
+}
+
+/** Wall torch: X-cross leaned out from the attachment wall. */
+function emitWallTorch(
+  m: MeshBuild,
+  wx: number,
+  wy: number,
+  wz: number,
+  id: number,
+  wind: number,
+  light: LightSample,
+): void {
+  const def = BLOCKS[id];
+  if (!def) return;
+  const { u0, v0, u1, v1 } = tileUVs(def.tiles[2]!);
+  const uvPairs: [number, number][] = [
+    [u0, v0],
+    [u1, v0],
+    [u1, v1],
+    [u0, v1],
+  ];
+  let ax = 0;
+  let az = 0;
+  if (id === Block.TORCH_NX) ax = -1;
+  else if (id === Block.TORCH_PX) ax = 1;
+  else if (id === Block.TORCH_NZ) az = -1;
+  else az = 1;
+
+  const theta = 0.4;
+  const s = Math.sin(theta);
+  const c = Math.cos(theta);
+  const outX = -ax;
+  const outZ = -az;
+  const inset = 0.1;
+  const baseY = 0.2;
+  const half = 0.36;
+  const cx = wx + 0.5 + ax * (0.5 - inset);
+  const cz = wz + 0.5 + az * (0.5 - inset);
+  const cy = wy + baseY;
+
+  const xf = (lx: number, ly: number, lz: number): [number, number, number] => [
+    cx + lx + ly * s * outX,
+    cy + ly * c,
+    cz + lz + ly * s * outZ,
+  ];
+
+  const tip = Math.min(0.6, wind * 0.9);
+  const plantWinds: [number, number, number, number] = [0, 0, tip, tip];
+
+  emitQuad(
+    m,
+    [xf(-half, 0, -half), xf(half, 0, half), xf(half, 0.92, half), xf(-half, 0.92, -half)],
+    uvPairs,
+    [0.707 * c + 0.2 * outX, s, -0.707 * c + 0.2 * outZ],
+    1,
+    plantWinds,
+    true,
+    light,
+  );
+  emitQuad(
+    m,
+    [xf(-half, 0, half), xf(half, 0, -half), xf(half, 0.92, -half), xf(-half, 0.92, half)],
+    uvPairs,
+    [0.707 * c + 0.2 * outX, s, 0.707 * c + 0.2 * outZ],
     1,
     plantWinds,
     true,
@@ -626,7 +694,7 @@ function buildLod0(
     for (let lz = 0; lz < CHUNK_SIZE; lz++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) {
         const id = chunk.get(lx, y, lz);
-        if (id === Block.AIR || isWater(id)) continue;
+        if (id === Block.AIR || isWater(id) || id === Block.CHEST) continue;
         const def = BLOCKS[id];
         if (!def) continue;
 
@@ -644,10 +712,15 @@ function buildLod0(
         if (def.shape === "cross" || isPlant(id)) {
           const self = lightAt(getLight, wx, wy, wz);
           const emit = lightEmission(id);
-          emitCrossPlant(m, wx, wy, wz, id, w, {
+          const lit = {
             block: Math.max(self.block, emit),
             sky: self.sky,
-          });
+          };
+          if (isTorch(id) && id !== Block.TORCH) {
+            emitWallTorch(m, wx, wy, wz, id, w, lit);
+          } else {
+            emitCrossPlant(m, wx, wy, wz, id, w, lit);
+          }
           continue;
         }
 
@@ -670,7 +743,9 @@ function buildLod0(
           } else {
             neighbor = getBlock(wx + dx, wy + dy, wz + dz);
           }
-          if (isSolid(neighbor) && !isTransparent(neighbor)) continue;
+          if (neighbor === Block.CHEST) {
+            // Custom chest model — don't occlude neighbor faces
+          } else if (isSolid(neighbor) && !isTransparent(neighbor)) continue;
           if (id === Block.ICE && neighbor === Block.ICE) continue;
 
           const ao = faceCornerAO(

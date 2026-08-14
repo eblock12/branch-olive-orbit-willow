@@ -604,6 +604,30 @@ export function createBlockAtlas(): {
     paintFurnaceFront(x, y, set, true);
   });
 
+  // 44 — chest top / lid
+  drawTile(d, 44, atlasPx, (x, y, set) => {
+    paintChestFace(x, y, set, "top");
+  });
+
+  // 45 — chest front (lock)
+  drawTile(d, 45, atlasPx, (x, y, set) => {
+    paintChestFace(x, y, set, "front");
+  });
+
+  // 46 — chest side / bottom
+  drawTile(d, 46, atlasPx, (x, y, set) => {
+    paintChestFace(x, y, set, "side");
+  });
+
+  // 47 — bed top: pillow + quilt
+  drawTile(d, 47, atlasPx, (x, y, set) => {
+    paintBedFace(x, y, set, true);
+  });
+  // 48 — bed side
+  drawTile(d, 48, atlasPx, (x, y, set) => {
+    paintBedFace(x, y, set, false);
+  });
+
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
 
@@ -657,6 +681,96 @@ function paintFurnaceFront(
   }
   const v = 112 + n * 12;
   set(clamp(v), clamp(v - 6), clamp(v - 10));
+}
+
+function paintChestFace(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  face: "top" | "front" | "side",
+): void {
+  const n = hSigned(x, y, face === "top" ? 440 : face === "front" ? 450 : 460);
+  const grain =
+    face === "top"
+      ? hSigned(x, y >> 1, 441) * 10
+      : hSigned(x >> 1, y, 451) * 10;
+  const plank =
+    face === "top" ? (x >> 2) & 1 : (y >> 2) & 1;
+  let r = 172 + n * 14 + grain + (plank ? -12 : 8);
+  let g = 108 + n * 10 + grain * 0.6 + (plank ? -10 : 5);
+  let b = 48 + n * 6 + (plank ? -6 : 3);
+
+  const rim =
+    x < 1 || y < 1 || x > 14 || y > 14 ||
+    (face !== "top" && (y === 4 || y === 5));
+  if (rim) {
+    r -= 36;
+    g -= 28;
+    b -= 14;
+  }
+
+  const band =
+    face === "top"
+      ? y === 7 || y === 8
+      : y === 9 || y === 10 || (face === "side" && (y === 1 || y === 2));
+  if (band) {
+    const m = 108 + n * 12;
+    set(clamp(m), clamp(m + 2), clamp(m + 8));
+    if ((x + y) % 5 === 0) set(clamp(m + 28), clamp(m + 28), clamp(m + 22));
+    return;
+  }
+
+  if (face === "front") {
+    // Gold latch spanning lid seam
+    const lock = x >= 6 && x <= 9 && y >= 3 && y <= 8;
+    if (lock) {
+      const gold = 1 - Math.abs(x - 7.5) * 0.15;
+      set(
+        clamp(210 + gold * 30 + n * 8),
+        clamp(168 + gold * 20 + n * 6),
+        clamp(48 + n * 8),
+      );
+      if (x >= 7 && x <= 8 && y >= 5 && y <= 7) {
+        set(48, 32, 16);
+      }
+      return;
+    }
+  }
+
+  set(clamp(r), clamp(g), clamp(b));
+}
+
+function paintBedFace(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  top: boolean,
+): void {
+  const n = hSigned(x, y, top ? 470 : 480);
+  if (top) {
+    const pillow = y <= 4;
+    if (pillow) {
+      set(clamp(232 + n * 10), clamp(226 + n * 8), clamp(210 + n * 8));
+      if (y === 4) set(200, 190, 176);
+      return;
+    }
+    const check = ((x >> 2) ^ (y >> 2)) & 1;
+    const r = (check ? 176 : 148) + n * 12;
+    set(clamp(r), clamp(42 + n * 8), clamp(48 + n * 8));
+    if (x < 1 || x > 14 || y > 14) set(92, 28, 32);
+    return;
+  }
+  // Side: wood frame + quilt lip
+  if (y <= 3) {
+    set(clamp(210 + n * 8), clamp(204 + n * 6), clamp(190 + n * 6));
+    return;
+  }
+  if (y <= 8) {
+    set(clamp(168 + n * 10), clamp(46 + n * 6), clamp(52 + n * 6));
+    return;
+  }
+  const v = 118 + n * 12;
+  set(clamp(v), clamp(78 + n * 8), clamp(42 + n * 6));
 }
 
 function paintPlant(
@@ -867,24 +981,24 @@ function paintPlant(
           px(236, 120, 170);
       }
     } else if (kind === "torch") {
-      // stick
-      if ((x === 7 || x === 8) && y >= 6 && y <= 14) {
+      // stick — shorter so the flame has room to rise
+      if ((x === 7 || x === 8) && y >= 9 && y <= 15) {
         const n = hSigned(x, y, 240);
         px(clamp(118 + n * 8), clamp(78 + n * 6), clamp(42 + n * 4));
       }
-      if (x === 6 && y >= 7 && y <= 13) px(88, 56, 28);
+      if (x === 6 && y >= 10 && y <= 14) px(88, 56, 28);
       // wrap / coal head
-      if (x >= 6 && x <= 9 && y >= 5 && y <= 7) px(52, 40, 32);
-      // flame
+      if (x >= 6 && x <= 9 && y >= 8 && y <= 10) px(52, 40, 32);
+      // flame (static icon; live fire overwrites this tile)
       const fx = x - 7.5;
-      const fy = y - 3.2;
-      const fr = fx * fx + fy * fy * 0.7;
-      if (y >= 1 && y <= 6 && Math.abs(fx) < 2.6 - (6 - y) * 0.15) {
-        if (fr < 8) px(255, 210, 70);
-        if (fr < 4.2) px(255, 140, 32);
-        if (fr < 1.6) px(255, 248, 210);
+      const fy = y - 4.4;
+      const fr = fx * fx + fy * fy * 0.55;
+      if (y >= 0 && y <= 9 && Math.abs(fx) < 2.4 - (9 - y) * 0.12) {
+        if (fr < 14) px(255, 210, 70);
+        if (fr < 7) px(255, 140, 32);
+        if (fr < 2.4) px(255, 248, 210);
       }
-      if ((x === 7 || x === 8) && y === 1) px(255, 230, 120);
+      if ((x === 7 || x === 8) && y <= 1) px(255, 230, 120);
     }
   });
 }
@@ -936,12 +1050,12 @@ function buildIsometricBlockIcons(atlas: HTMLCanvasElement): BlockIconMap {
     if (def.shape === "cross") {
       const tile = def.tiles[2]!;
       const spr = sampleTile(tile);
-      octx.fillStyle = "rgba(0,0,0,0.18)";
+      octx.fillStyle = "rgba(0,0,0,0.16)";
       octx.beginPath();
-      octx.ellipse(size * 0.5, size * 0.78, size * 0.22, size * 0.08, 0, 0, Math.PI * 2);
+      octx.ellipse(size * 0.5, size * 0.86, size * 0.24, size * 0.07, 0, 0, Math.PI * 2);
       octx.fill();
-      const pw = size * 0.72;
-      octx.drawImage(spr, (size - pw) / 2, size * 0.12, pw, pw);
+      const pw = size * 0.9;
+      octx.drawImage(spr, (size - pw) / 2, (size - pw) / 2, pw, pw);
     } else {
       paintIsoCube(
         octx,
@@ -965,12 +1079,15 @@ function paintIsoCube(
   rightTile: number,
   size: number,
 ): void {
+  const pad = size * 0.06;
+  const usable = size - pad * 2;
+  // True isometric: all three axes share the same screen length
+  const edge = usable / 2;
+  const hw = edge * Math.cos(Math.PI / 6);
+  const hh = edge * Math.sin(Math.PI / 6);
+  const depth = edge;
   const cx = size * 0.5;
-  const cy = size * 0.52;
-  const hw = size * 0.32;
-  const hh = size * 0.16;
-  const depth = size * 0.32;
-  const topY = cy - depth * 0.05;
+  const topY = (size - (hh * 2 + depth)) / 2 + hh;
   const T = {
     n: { x: cx, y: topY - hh },
     e: { x: cx + hw, y: topY },

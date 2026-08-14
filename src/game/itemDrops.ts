@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCKS, isPlant, type BlockId } from "./blocks";
+import { BLOCKS, Block, isPlant, isWater, waterLevel, type BlockId } from "./blocks";
 import { isBlockItem, itemColor, type ItemId } from "./items";
 import { tileUVs } from "./textures";
 import type { World } from "./world";
@@ -8,6 +8,11 @@ import type { Player } from "./player";
 const DROP_SIZE = 0.28;
 const PLANT_DROP = 0.36;
 const GRAVITY = 18;
+const WATER_SINK = 3.2;
+const WATER_SINK_MAX = 1.05;
+const WATER_DRAG = 8;
+const WATER_ENTER_MAX = 3.6;
+const FLOW_PUSH = 2.4;
 const BOUNCE = 0.42;
 const FRICTION = 0.82;
 const PICKUP_DELAY = 0.45;
@@ -113,9 +118,12 @@ export class ItemDropSystem {
   private itemMatCache = new Map<number, THREE.MeshLambertMaterial>();
   private nuggetGeo = new THREE.BoxGeometry(0.2, 0.14, 0.2);
 
-  constructor(atlas: THREE.Texture) {
+  constructor(atlas: THREE.Texture, emissiveMap?: THREE.Texture) {
     this.material = new THREE.MeshLambertMaterial({
       map: atlas,
+      emissive: emissiveMap ? 0xffffff : 0x000000,
+      emissiveMap: emissiveMap ?? null,
+      emissiveIntensity: emissiveMap ? 1.35 : 0,
       transparent: true,
       alphaTest: 0.15,
       side: THREE.FrontSide,
@@ -260,6 +268,8 @@ export class ItemDropSystem {
         continue;
       }
 
+      const inWater = this.waterAt(world, d.x, d.y, d.z);
+
       // Magnet toward player after pickup delay
       if (d.age >= PICKUP_DELAY) {
         const dx = px - d.x;
@@ -273,15 +283,30 @@ export class ItemDropSystem {
             continue;
           }
         } else if (dist < MAGNET_RADIUS && dist > 1e-4) {
-          const pull = 10 * dt;
+          const pull = (inWater ? 4.5 : 10) * dt;
           d.vx += (dx / dist) * pull;
-          d.vy += (dy / dist) * pull * 0.6;
+          d.vy += (dy / dist) * pull * (inWater ? 0.35 : 0.6);
           d.vz += (dz / dist) * pull;
         }
       }
 
-      // Integrate velocity
-      d.vy -= GRAVITY * dt;
+      // Water: heavy drag, slow sink, follow currents — do not float
+      if (inWater) {
+        if (d.vy < -WATER_ENTER_MAX) d.vy = -WATER_ENTER_MAX;
+        const drag = Math.exp(-WATER_DRAG * dt);
+        d.vx *= drag;
+        d.vy *= drag;
+        d.vz *= drag;
+        d.vy -= WATER_SINK * dt;
+        if (d.vy < -WATER_SINK_MAX) d.vy = -WATER_SINK_MAX;
+        const [fx, fz, fall] = this.flowAt(world, d.x, d.y, d.z);
+        d.vx += fx * FLOW_PUSH * dt;
+        d.vz += fz * FLOW_PUSH * dt;
+        if (fall) d.vy = Math.min(d.vy, -WATER_SINK_MAX * 0.85);
+      } else {
+        d.vy -= GRAVITY * dt;
+      }
+
       let nx = d.x + d.vx * dt;
       let ny = d.y + d.vy * dt;
       let nz = d.z + d.vz * dt;
@@ -292,10 +317,10 @@ export class ItemDropSystem {
       // Vertical
       if (this.solidAt(world, nx, ny - half, nz) && d.vy < 0) {
         ny = Math.floor(ny - half) + 1 + half + 1e-3;
-        d.vy = -d.vy * BOUNCE;
+        d.vy = inWater ? 0 : -d.vy * BOUNCE;
         if (Math.abs(d.vy) < 0.6) d.vy = 0;
-        d.vx *= FRICTION;
-        d.vz *= FRICTION;
+        d.vx *= inWater ? 0.55 : FRICTION;
+        d.vz *= inWater ? 0.55 : FRICTION;
       } else if (this.solidAt(world, nx, ny + half, nz) && d.vy > 0) {
         ny = Math.floor(ny + half) - half - 1e-3;
         d.vy = 0;
@@ -336,6 +361,53 @@ export class ItemDropSystem {
 
   private solidAt(world: World, x: number, y: number, z: number): boolean {
     return world.isSolidAt(x, y, z);
+  }
+
+  private waterAt(world: World, x: number, y: number, z: number): boolean {
+    return isWater(world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)));
+  }
+
+  /** Flow toward lower water / a drop-off. */
+  private flowAt(
+    world: World,
+    x: number,
+    y: number,
+    z: number,
+  ): [number, number, boolean] {
+    const bx = Math.floor(x);
+    const by = Math.floor(y);
+    const bz = Math.floor(z);
+    const here = world.getBlock(bx, by, bz);
+    const lvl = waterLevel(here);
+    if (lvl <= 0) return [0, 0, false];
+    const below = world.getBlock(bx, by - 1, bz);
+    const fall = isWater(below) || below === Block.AIR;
+    let fx = 0;
+    let fz = 0;
+    const dirs: [number, number][] = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    for (const [dx, dz] of dirs) {
+      const n = world.getBlock(bx + dx, by, bz + dz);
+      const nl = waterLevel(n);
+      const nBelow = world.getBlock(bx + dx, by - 1, bz + dz);
+      if (nl > 0 && nl < lvl) {
+        fx += dx;
+        fz += dz;
+      } else if (n === Block.AIR && (isWater(nBelow) || nBelow === Block.AIR)) {
+        fx += dx * 1.4;
+        fz += dz * 1.4;
+      }
+    }
+    const len = Math.hypot(fx, fz);
+    if (len > 1e-4) {
+      fx /= len;
+      fz /= len;
+    }
+    return [fx, fz, fall && lvl < 8];
   }
 
   get count(): number {

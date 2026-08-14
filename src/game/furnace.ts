@@ -23,6 +23,11 @@ export const COOK_TIME = 8;
 const SMELT: Record<number, { out: ItemId; count: number }> = {
   [Block.IRON_ORE]: { out: Item.IRON_INGOT, count: 1 },
   [Block.COBBLE]: { out: Block.STONE, count: 1 },
+  [Item.RAW_PORK]: { out: Item.COOKED_PORK, count: 1 },
+  [Item.RAW_BEEF]: { out: Item.COOKED_BEEF, count: 1 },
+  [Item.RAW_MUTTON]: { out: Item.COOKED_MUTTON, count: 1 },
+  [Item.RAW_CHICKEN]: { out: Item.COOKED_CHICKEN, count: 1 },
+  [Item.RAW_RABBIT]: { out: Item.COOKED_RABBIT, count: 1 },
 };
 
 const FUEL_SECONDS: Record<number, number> = {

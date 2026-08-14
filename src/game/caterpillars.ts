@@ -14,6 +14,20 @@ import {
   unstickEntity,
   type EntityBox,
 } from "./entityCollision";
+import {
+  applyEntitySwim,
+  findShore,
+  sampleEntityWater,
+} from "./entityWater";
+import type { MobPunch } from "./loot";
+import {
+  createHurtOverlay,
+  tickHurtOverlay,
+  disposeHurtOverlay,
+  knockbackImpulse,
+  integrateKnockback,
+  HURT_FLASH,
+} from "./entityHitFx";
 
 export type CaterpillarMood = "wander" | "eat" | "flee" | "tease" | "steal";
 
@@ -157,10 +171,18 @@ export class NaughtyCaterpillar {
   private climbHopT = 0;
   private climbDx = 0;
   private climbDz = 0;
+  private shoreX = 0;
+  private shoreZ = 0;
+  private shoreT = 0;
+  private kbX = 0;
+  private kbZ = 0;
+  private hurtOverlay: THREE.Mesh;
 
   constructor(x: number, y: number, z: number, mats: CaterpillarMaterials) {
     this.mesh = buildCaterpillarMesh(mats);
     this.shadow = createEntityShadow(SHADOW_RADIUS);
+    this.hurtOverlay = createHurtOverlay(0.7, 0.42, 0.95, 0.2);
+    this.mesh.add(this.hurtOverlay);
     this.x = x;
     this.y = y;
     this.z = z;
@@ -179,9 +201,14 @@ export class NaughtyCaterpillar {
   hit(fromX: number, fromZ: number, damage = 1): "hurt" | "dead" | "miss" {
     if (!this.alive) return "miss";
     this.hp -= damage;
-    this.hurtFlash = 0.35;
+    this.hurtFlash = HURT_FLASH;
     this.mood = "flee";
     this.stateT = 1.8 + Math.random();
+    const kb = knockbackImpulse(this.x, this.z, fromX, fromZ, 10);
+    this.kbX = kb.kbX;
+    this.kbZ = kb.kbZ;
+    this.vy = Math.max(this.vy, kb.vy);
+    this.onGround = false;
     const dx = this.x - fromX;
     const dz = this.z - fromZ;
     const len = Math.hypot(dx, dz) || 1;
@@ -250,6 +277,50 @@ export class NaughtyCaterpillar {
     else if (this.mood === "tease") speed = SPEED_TEASE;
     else if (this.mood === "eat") speed = SPEED_WANDER * 0.45;
     else if (this.mood === "steal") speed = SPEED_TEASE * 0.85;
+    if (this.hurtFlash > 0.18) speed *= 0.1;
+
+    const wetBox: EntityBox = {
+      x: this.x,
+      y: this.y,
+      z: this.z,
+      halfW: 0.32,
+      height: 0.42,
+    };
+    const wet = sampleEntityWater(world, wetBox);
+    if (wet.any) {
+      this.shoreT -= dt;
+      if (this.shoreT <= 0) {
+        this.shoreT = 0.4 + Math.random() * 0.25;
+        const shore = findShore(world, this.x, this.z, this.y, 12);
+        if (shore) {
+          this.shoreX = shore.x;
+          this.shoreZ = shore.z;
+          this.targetX = shore.x;
+          this.targetZ = shore.z;
+        }
+      }
+      const wx = this.targetX - this.x;
+      const wz = this.targetZ - this.z;
+      if (Math.hypot(wx, wz) > 0.08) {
+        const desired = Math.atan2(wx, wz);
+        let dyaw = desired - this.yaw;
+        while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+        while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+        this.yaw += dyaw * Math.min(1, 6 * dt);
+      }
+      const r = applyEntitySwim(world, wetBox, this.vy, dt, wx, wz, 1.55);
+      this.vy = r.vy;
+      this.onGround = r.onGround;
+      this.x = wetBox.x;
+      this.y = wetBox.y;
+      this.z = wetBox.z;
+      if (r.hopped) {
+        this.hopCooldown = 0.35;
+        this.climbHopT = 0.5;
+        this.climbDx = Math.sin(this.yaw);
+        this.climbDz = Math.cos(this.yaw);
+      }
+    } else {
 
     const tdx = this.targetX - this.x;
     const tdz = this.targetZ - this.z;
@@ -293,6 +364,30 @@ export class NaughtyCaterpillar {
       this.x = box.x;
       this.y = box.y;
       this.z = box.z;
+    }
+    }
+
+    {
+      const box: EntityBox = {
+        x: this.x,
+        y: this.y,
+        z: this.z,
+        halfW: 0.32,
+        height: 0.42,
+      };
+      const kb = integrateKnockback(
+        world,
+        box,
+        this.kbX,
+        this.kbZ,
+        dt,
+        this.onGround,
+      );
+      this.x = box.x;
+      this.y = box.y;
+      this.z = box.z;
+      this.kbX = kb.kbX;
+      this.kbZ = kb.kbZ;
     }
 
     if (this.mood === "eat" && this.eatCooldown <= 0) {
@@ -517,8 +612,9 @@ export class NaughtyCaterpillar {
       body.rotation.y = Math.sin(this.wiggle) * 0.1;
       body.position.x = Math.sin(this.wiggle * 1.3) * 0.02;
     }
-    const s = this.hurtFlash > 0 ? 1 + Math.sin(this.hurtFlash * 40) * 0.1 : 1;
+    const s = this.hurtFlash > 0 ? 1 + this.hurtFlash * 0.28 : 1;
     this.mesh.scale.setScalar(s);
+    tickHurtOverlay(this.hurtOverlay, this.hurtFlash);
 
     // Blob centered on entity (body mid), slight oval along facing — not shifted to head
     updateEntityShadow(
@@ -535,6 +631,7 @@ export class NaughtyCaterpillar {
   }
 
   dispose(): void {
+    disposeHurtOverlay(this.hurtOverlay);
     disposeEntityShadow(this.shadow);
   }
 }
@@ -630,7 +727,7 @@ export class CaterpillarSystem {
     dz: number,
     maxDist: number,
     damage = 1,
-  ): "hurt" | "dead" | null {
+  ): MobPunch | null {
     let bestT = maxDist;
     let best: NaughtyCaterpillar | null = null;
     for (const c of this.list) {
@@ -642,8 +739,9 @@ export class CaterpillarSystem {
     }
     if (!best) return null;
     const result = best.hit(ox, oz, damage);
+    if (result === "miss") return null;
     if (result === "dead") this.killed++;
-    return result === "miss" ? null : result;
+    return { outcome: result, kind: "caterpillar", x: best.x, y: best.y, z: best.z };
   }
 
   dispose(): void {

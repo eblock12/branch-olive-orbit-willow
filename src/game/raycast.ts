@@ -1,4 +1,4 @@
-import { isMineable, isPlant, PLANT_HITBOX } from "./blocks";
+import { isMineable, isPlant, plantHitbox } from "./blocks";
 
 export type VoxelHit = {
   x: number;
@@ -115,6 +115,7 @@ export function raycastVoxel(
 
     const id = getBlock(x, y, z);
     if (isPlant(id)) {
+      const box = plantHitbox(id);
       const hit = rayAabb(
         ox,
         oy,
@@ -122,12 +123,12 @@ export function raycastVoxel(
         dx,
         dy,
         dz,
-        x + PLANT_HITBOX.minX,
-        y + PLANT_HITBOX.minY,
-        z + PLANT_HITBOX.minZ,
-        x + PLANT_HITBOX.maxX,
-        y + PLANT_HITBOX.maxY,
-        z + PLANT_HITBOX.maxZ,
+        x + box.minX,
+        y + box.minY,
+        z + box.minZ,
+        x + box.maxX,
+        y + box.maxY,
+        z + box.maxZ,
       );
       if (hit && hit.t <= maxDist && hit.t >= 0) {
         return {

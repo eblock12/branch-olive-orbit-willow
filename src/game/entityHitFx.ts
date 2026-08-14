@@ -1,0 +1,84 @@
+import * as THREE from "three";
+import { moveEntityXZ, type EntityBox } from "./entityCollision";
+import type { World } from "./world";
+
+export const HURT_FLASH = 0.5;
+
+const overlayGeo = new THREE.BoxGeometry(1, 1, 1);
+
+/** Bright additive-looking box so hits read even on shared materials. */
+export function createHurtOverlay(
+  w: number,
+  h: number,
+  d: number,
+  y: number,
+): THREE.Mesh {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    fog: false,
+  });
+  const m = new THREE.Mesh(overlayGeo, mat);
+  m.name = "hurtOverlay";
+  m.scale.set(w * 1.18, h * 1.1, d * 1.18);
+  m.position.y = y;
+  m.visible = false;
+  m.renderOrder = 4;
+  return m;
+}
+
+export function tickHurtOverlay(mesh: THREE.Mesh, hurtT: number): void {
+  const mat = mesh.material as THREE.MeshBasicMaterial;
+  if (hurtT <= 0) {
+    mesh.visible = false;
+    return;
+  }
+  mesh.visible = true;
+  const u = hurtT / HURT_FLASH;
+  if (u > 0.52) {
+    mat.color.setHex(0xffffff);
+    mat.opacity = 0.88;
+  } else {
+    mat.color.setRGB(1, 0.2 + u * 0.45, 0.14);
+    mat.opacity = 0.12 + u * 0.78;
+  }
+}
+
+export function disposeHurtOverlay(mesh: THREE.Mesh): void {
+  (mesh.material as THREE.Material).dispose();
+}
+
+export function knockbackImpulse(
+  ex: number,
+  ez: number,
+  fromX: number,
+  fromZ: number,
+  power = 11,
+): { kbX: number; kbZ: number; vy: number } {
+  const dx = ex - fromX;
+  const dz = ez - fromZ;
+  const len = Math.hypot(dx, dz) || 1;
+  return {
+    kbX: (dx / len) * power,
+    kbZ: (dz / len) * power,
+    vy: 6.6,
+  };
+}
+
+export function integrateKnockback(
+  world: World,
+  box: EntityBox,
+  kbX: number,
+  kbZ: number,
+  dt: number,
+  onGround: boolean,
+): { kbX: number; kbZ: number } {
+  const spd = Math.hypot(kbX, kbZ);
+  if (spd < 0.18) return { kbX: 0, kbZ: 0 };
+  moveEntityXZ(world, box, kbX * dt, kbZ * dt, 0.35);
+  const damp = onGround ? 7.5 : 2.2;
+  const k = Math.exp(-damp * dt);
+  return { kbX: kbX * k, kbZ: kbZ * k };
+}
