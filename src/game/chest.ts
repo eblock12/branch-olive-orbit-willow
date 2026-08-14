@@ -72,6 +72,33 @@ export class ChestSystem {
     return mergeIntoSlots(s.slots, stack);
   }
 
+  exportAll(): { x: number; y: number; z: number; slots: HotbarSlot[] }[] {
+    const out: { x: number; y: number; z: number; slots: HotbarSlot[] }[] = [];
+    for (const s of this.map.values()) {
+      out.push({
+        x: s.x,
+        y: s.y,
+        z: s.z,
+        slots: s.slots.map((x) => (x ? { ...x } : null)),
+      });
+    }
+    return out;
+  }
+
+  importAll(
+    rows: { x: number; y: number; z: number; slots: (ItemStack | null)[] }[],
+  ): void {
+    this.map.clear();
+    for (const r of rows) {
+      const slots: HotbarSlot[] = Array.from({ length: CHEST_SIZE }, () => null);
+      for (let i = 0; i < CHEST_SIZE; i++) {
+        const s = r.slots[i];
+        slots[i] = s && s.count > 0 ? { ...s } : null;
+      }
+      this.map.set(keyOf(r.x, r.y, r.z), { x: r.x, y: r.y, z: r.z, slots });
+    }
+  }
+
   private seedLoot(s: ChestState, seed: number): void {
     const deep = s.y < 50;
     const n = 3 + Math.floor(hash3(s.x, s.y, s.z, seed) * (deep ? 5 : 3));

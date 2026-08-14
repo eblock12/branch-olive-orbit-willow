@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, canSupportTorch, plantHitbox, torchIdFromHitFace, torchAttachDir, type BlockId } from "./blocks";
+import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, isDoor, isDoorCell, isLadder, canSupportTorch, canSupportLadder, plantHitbox, torchIdFromHitFace, torchAttachDir, doorId, doorFacingFromLook, doorIsUpper, doorToggle, doorIsOpen, ladderIdFromHitFace, ladderAttachDir, type BlockId } from "./blocks";
 
 import { Player, MOUSE_SENS } from "./player";
 import { World } from "./world";
@@ -34,7 +34,7 @@ import {
   type ItemId,
   type ItemStack,
 } from "./survival";
-import { itemName, isTool, isFood, Item, itemMaxStack } from "./items";
+import { itemName, isTool, isFood, isBow, isBoneMeal, armorInfo, Item, itemMaxStack } from "./items";
 import { ItemDropSystem } from "./itemDrops";
 import { WaterFX } from "./water";
 import { ViewHand } from "./viewHand";
@@ -43,6 +43,15 @@ import { ChestSystem } from "./chest";
 import { ChestVisuals } from "./chestVisuals";
 import { mobLoot } from "./loot";
 import { TorchFlame } from "./torchFlame";
+import { ProjectileSystem } from "./projectiles";
+import {
+  loadWorldSave,
+  writeWorldSave,
+  stackToSaved,
+  savedToStack,
+  clearWorldSave,
+  type WorldSave,
+} from "./save";
 
 export type HudSnapshot = {
   playing: boolean;
@@ -72,10 +81,17 @@ export type HudSnapshot = {
   dayPhase: number;
   isDay: boolean;
   biome: string;
+  seed: number;
   health: number;
   maxHealth: number;
   hunger: number;
   maxHunger: number;
+  armor: number;
+  air: number;
+  maxAir: number;
+  submerged: boolean;
+  eatJuice: number;
+  swingJuice: number;
   inventory: HotbarSlot[];
   selectedSlot: number;
   mineProgress: number;
@@ -193,6 +209,14 @@ export class GameEngine {
   }[] = [];
 
   private _air = 5;
+  private lastAirPips = 10;
+  private eatJuice = 0;
+  private swingJuice = 0;
+  private audioSky = 1;
+  private audioOpen = 0.7;
+  private audioSpaceAcc = 0;
+  private camKickX = 0;
+  private camKickZ = 0;
   private _caterHurt = 0;
   private craftingOpen = false;
   private furnaces = new FurnaceSystem();
@@ -202,8 +226,21 @@ export class GameEngine {
   private chestVisuals!: ChestVisuals;
   private lastAttack = 0;
   private lastEat = 0;
+  private lastShot = 0;
+  private arrows = new ProjectileSystem();
   private notice = "";
   private noticeT = 0;
+  private lastSafeX = 0;
+  private lastSafeY = 8;
+  private lastSafeZ = 0;
+  private wasDead = false;
+  private corpse: THREE.Group | null = null;
+  private saveAcc = 0;
+  private saveDirty = false;
+  private skipSave = false;
+  private onPageHide = (): void => {
+    this.flushSave();
+  };
   /** Subtle grounded walk bob (phase + smoothed strength) */
   private viewBobPhase = 0;
   private viewBobAmt = 0;
@@ -275,8 +312,32 @@ export class GameEngine {
 
     this.waterFX = new WaterFX();
 
-    const seed = (Math.random() * 0x7fffffff) | 0;
+    const loaded = loadWorldSave();
+    const seed = loaded?.seed ?? ((Math.random() * 0x7fffffff) | 0);
     this.world = new World(seed, this.material, this.waterFX.material, 16, 7);
+    if (loaded?.edits) this.world.importEdits(loaded.edits);
+    if (loaded?.chests) this.chests.importAll(loaded.chests.map((c) => ({
+      x: c.x,
+      y: c.y,
+      z: c.z,
+      slots: c.slots.map(savedToStack),
+    })));
+    if (loaded?.furnaces) {
+      this.furnaces.importAll(
+        loaded.furnaces.map((f) => ({
+          x: f.x,
+          y: f.y,
+          z: f.z,
+          input: savedToStack(f.input),
+          fuel: savedToStack(f.fuel),
+          output: savedToStack(f.output),
+          burnLeft: f.burnLeft,
+          burnMax: f.burnMax,
+          cook: f.cook,
+        })),
+      );
+    }
+    if (loaded?.player) this.applySavedPlayer(loaded.player);
 
 
 
@@ -297,9 +358,15 @@ export class GameEngine {
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
 
 
-    this.world.ensureChunksAround(0, 0);
+    const startX = loaded?.player?.x ?? 0;
+    const startZ = loaded?.player?.z ?? 0;
+    this.world.ensureChunksAround(startX, startZ);
     this.world.flushMeshes();
-    this.spawnPlayer();
+    if (loaded?.player && this.tryRestorePose(loaded.player)) {
+      // restored
+    } else {
+      this.spawnPlayer();
+    }
     this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 3);
     this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
 
@@ -312,9 +379,13 @@ export class GameEngine {
     this.scene.add(this.ambiance.group);
     this.scene.add(this.itemDrops.group);
     this.scene.add(this.chestVisuals.group);
+    this.scene.add(this.arrows.group);
 
     this.dayNight = new DayNightCycle(this.scene, this.sun);
     this.sun = this.dayNight.light;
+    if (loaded && Number.isFinite(loaded.dayTime)) {
+      this.dayNight.setTime(loaded.dayTime);
+    }
 
     this.weather = new WeatherSystem(
       this.scene,
@@ -384,7 +455,108 @@ export class GameEngine {
 
     this.onResize();
     this.installControlsTest();
+    this.flushSave();
     this.emitHud();
+  }
+
+  private applySavedPlayer(p: WorldSave["player"]): void {
+    this.survival.health = Math.max(1, Math.min(MAX_HEALTH, p.health | 0));
+    this.survival.hunger = Math.max(0, Math.min(MAX_HUNGER, p.hunger | 0));
+    this.survival.dead = false;
+    this.survival.selected = ((p.selected | 0) % HOTBAR_SIZE + HOTBAR_SIZE) % HOTBAR_SIZE;
+    this.survival.slots = Array.from({ length: INV_SIZE }, (_, i) =>
+      savedToStack(p.slots[i] ?? null),
+    );
+    this.survival.armor = [0, 1, 2, 3].map((i) => savedToStack(p.armor[i] ?? null));
+    this.survival.cursor = null;
+    this.survival.bedSpawn = p.bedSpawn ? { ...p.bedSpawn } : null;
+    this.survival.craftedFirst = !!p.craftedFirst;
+    this.survival.madePick = !!p.madePick;
+    this.survival.madeFurnace = !!p.madeFurnace;
+    this.survival.smeltedIron = !!p.smeltedIron;
+    this.survival.madeBow = !!p.madeBow;
+    this.survival.madeArmor = !!p.madeArmor;
+  }
+
+  private tryRestorePose(p: WorldSave["player"]): boolean {
+    const x = p.x;
+    const y = p.y;
+    const z = p.z;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+    this.world.ensureChunkAt(Math.floor(x), Math.floor(z));
+    this.world.ensureChunkAt(Math.floor(x) + 16, Math.floor(z));
+    this.world.ensureChunkAt(Math.floor(x) - 16, Math.floor(z));
+    this.world.ensureChunkAt(Math.floor(x), Math.floor(z) + 16);
+    this.world.ensureChunkAt(Math.floor(x), Math.floor(z) - 16);
+    this.player.x = x;
+    this.player.y = y;
+    this.player.z = z;
+    this.player.yaw = p.yaw || 0;
+    this.player.pitch = p.pitch || 0;
+    this.player.vx = 0;
+    this.player.vy = 0;
+    this.player.vz = 0;
+    if (this.player.collides(this.world, this.player.x, this.player.y, this.player.z)) {
+      return false;
+    }
+    this.player.onGround = true;
+    return true;
+  }
+
+  private markSave(): void {
+    this.saveDirty = true;
+  }
+
+  private flushSave(): void {
+    if (this.disposed || this.skipSave) return;
+    this.survival.parkCursor();
+    const data: WorldSave = {
+      v: 1,
+      seed: this.world.seed,
+      savedAt: Date.now(),
+      dayTime: this.dayNight ? this.dayNight.getTime() : 0,
+      player: {
+        x: this.player.x,
+        y: this.player.y,
+        z: this.player.z,
+        yaw: this.player.yaw,
+        pitch: this.player.pitch,
+        health: this.survival.health,
+        hunger: this.survival.hunger,
+        selected: this.survival.selected,
+        slots: this.survival.slots.map(stackToSaved),
+        armor: this.survival.armor.map(stackToSaved),
+        bedSpawn: this.survival.bedSpawn ? { ...this.survival.bedSpawn } : null,
+        craftedFirst: this.survival.craftedFirst,
+        madePick: this.survival.madePick,
+        madeFurnace: this.survival.madeFurnace,
+        smeltedIron: this.survival.smeltedIron,
+        madeBow: this.survival.madeBow,
+        madeArmor: this.survival.madeArmor,
+      },
+      edits: this.world.exportEdits(),
+      chests: this.chests.exportAll().map((c) => ({
+        x: c.x,
+        y: c.y,
+        z: c.z,
+        slots: c.slots.map(stackToSaved),
+      })),
+      furnaces: this.furnaces.exportAll().map((f) => ({
+        x: f.x,
+        y: f.y,
+        z: f.z,
+        input: stackToSaved(f.input),
+        fuel: stackToSaved(f.fuel),
+        output: stackToSaved(f.output),
+        burnLeft: f.burnLeft,
+        burnMax: f.burnMax,
+        cook: f.cook,
+      })),
+    };
+    writeWorldSave(data);
+    this.world.editsDirty = false;
+    this.saveDirty = false;
+    this.saveAcc = 0;
   }
 
   private spawnPlayer(): void {
@@ -565,17 +737,31 @@ export class GameEngine {
       else if (tid === Block.TORCH_PZ) pl.position.set(e.x + 0.5, e.y + 0.78, e.z + 0.72);
       pl.intensity = 1.35 * flicker * nightBoost;
       pl.distance = 12;
+      if (isTorch(tid)) {
+        const rate = 1.6 + this.torchFlame.intensity * 1.4;
+        if (Math.random() < dt * rate) {
+          this.ambiance.emitTorchSpark(
+            pl.position.x,
+            pl.position.y + 0.1,
+            pl.position.z,
+            this.torchFlame.intensity,
+          );
+        }
+      }
     }
   }
 
   dispose(): void {
     if (this.disposed) return;
+    if (!this.skipSave) this.flushSave();
     this.disposed = true;
     this.stop();
     this.unbindEvents();
     document.exitPointerLock?.();
     for (const p of this.particles) this.scene.remove(p.mesh);
     this.particles = [];
+    this.clearCorpse();
+    this.arrows.dispose();
     this.particleGeo.dispose();
     this.particleMat.dispose();
     this.leafParticleMat.dispose();
@@ -607,6 +793,12 @@ export class GameEngine {
     for (const t of this.crackStages) t.dispose();
     this.renderer.dispose();
 
+  }
+
+  /** Wipe the save so the next boot rolls a new seed. */
+  abandonSave(): void {
+    this.skipSave = true;
+    clearWorldSave();
   }
 
   requestPlay(): void {
@@ -656,6 +848,9 @@ export class GameEngine {
   respawn(): void {
     if (!this.survival.dead) return;
     this.survival.respawn();
+    this.wasDead = false;
+    this._air = 5;
+    this.lastAirPips = 10;
     this.spawnPlayer();
     this.emitHud();
     if (this.isTouch) {
@@ -664,6 +859,83 @@ export class GameEngine {
     } else {
       this.canvas.requestPointerLock();
     }
+    this.flushSave();
+  }
+
+  private dropCorpseLoot(): void {
+    this.survival.parkCursor();
+    this.craftingOpen = false;
+    this.openFurnacePos = null;
+    this.openChestPos = null;
+    this.mouseDown.left = false;
+    this.mouseDown.right = false;
+
+    const stacks = this.survival.dumpInventory();
+    this.viewHand.setHeldItem(null);
+
+    let x = this.player.x;
+    let y = this.player.y;
+    let z = this.player.z;
+    if (y < 1) {
+      x = this.lastSafeX;
+      y = this.lastSafeY;
+      z = this.lastSafeZ;
+    }
+    const sy = this.world.getSurfaceY(Math.floor(x), Math.floor(z));
+    if (y < 1 || y > sy + 4) y = Math.max(1, sy);
+
+    this.placeCorpse(x, y, z);
+
+    const n = stacks.length;
+    for (let i = 0; i < n; i++) {
+      const stack = stacks[i]!;
+      const a = (i / Math.max(1, n)) * Math.PI * 2 + Math.random() * 0.35;
+      const spd = 2.4 + Math.random() * 2.2;
+      this.itemDrops.spawnStack(
+        stack,
+        x + Math.cos(a) * 0.25,
+        y + 0.7,
+        z + Math.sin(a) * 0.25,
+        Math.cos(a) * spd,
+        4.2 + Math.random() * 1.8,
+        Math.sin(a) * spd,
+      );
+    }
+    this.flushSave();
+    this.emitHud();
+  }
+
+  private placeCorpse(x: number, y: number, z: number): void {
+    this.clearCorpse();
+    const g = new THREE.Group();
+    const stone = new THREE.MeshLambertMaterial({ color: 0x6a6a72 });
+    const wood = new THREE.MeshLambertMaterial({ color: 0x6b4a28 });
+    const slab = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.12, 0.48), stone);
+    slab.position.y = 0.06;
+    g.add(slab);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.55, 0.1), stone);
+    head.position.set(0, 0.38, -0.12);
+    g.add(head);
+    const mark = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.22, 0.04), wood);
+    mark.position.set(0, 0.42, -0.06);
+    g.add(mark);
+    g.position.set(x, y, z);
+    g.rotation.y = this.player.yaw + Math.PI;
+    this.scene.add(g);
+    this.corpse = g;
+  }
+
+  private clearCorpse(): void {
+    if (!this.corpse) return;
+    this.scene.remove(this.corpse);
+    this.corpse.traverse((o) => {
+      if (o instanceof THREE.Mesh) {
+        o.geometry.dispose();
+        if (Array.isArray(o.material)) o.material.forEach((m) => m.dispose());
+        else o.material.dispose();
+      }
+    });
+    this.corpse = null;
   }
 
   private bindEvents(): void {
@@ -684,6 +956,8 @@ export class GameEngine {
     });
     this.canvas.addEventListener("touchend", this.onTouchEnd);
     this.canvas.addEventListener("touchcancel", this.onTouchEnd);
+    window.addEventListener("pagehide", this.onPageHide);
+    document.addEventListener("visibilitychange", this.onPageHide);
   }
 
   private unbindEvents(): void {
@@ -700,6 +974,8 @@ export class GameEngine {
     this.canvas.removeEventListener("touchmove", this.onTouchMove);
     this.canvas.removeEventListener("touchend", this.onTouchEnd);
     this.canvas.removeEventListener("touchcancel", this.onTouchEnd);
+    window.removeEventListener("pagehide", this.onPageHide);
+    document.removeEventListener("visibilitychange", this.onPageHide);
   }
 
   private onResize = () => {
@@ -904,6 +1180,13 @@ export class GameEngine {
     if (y <= 0) return;
     const ok = this.world.setBlock(x, y, z, Block.AIR);
     if (!ok) return;
+    if (isDoorCell(id)) {
+      const mateY = doorIsUpper(id) ? y - 1 : y + 1;
+      if (isDoorCell(this.world.getBlock(x, mateY, z))) {
+        this.world.setBlock(x, mateY, z, Block.AIR);
+      }
+    }
+    this.markSave();
     this.viewHand.punch();
     this.audio.breakBlock(surfaceFromBlock(id), x + 0.5, y + 0.5, z + 0.5);
     this.survival.damageHeldTool(1);
@@ -1002,9 +1285,35 @@ export class GameEngine {
       this.lastPlace = now;
       return;
     }
+    if (isDoorCell(lookId)) {
+      this.toggleDoorAt(this.target.x, this.target.y, this.target.z, lookId);
+      this.lastPlace = now;
+      return;
+    }
     if (held && isFood(held)) {
       this.tryEat();
       this.lastPlace = now;
+      return;
+    }
+    if (held && armorInfo(held)) {
+      if (this.survival.equipSelectedArmor()) {
+        this.audio.ui();
+        this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+        this.flashNotice("Equipped " + itemName(held));
+        this.lastPlace = now;
+        this.emitHud();
+      }
+      return;
+    }
+    if (held && isBoneMeal(held) && this.target) {
+      if (this.world.applyBoneMeal(this.target.x, this.target.y, this.target.z)) {
+        this.survival.removeItem(Item.BONE_MEAL, 1);
+        this.viewHand.punch();
+        this.audio.placeBlock("grass", this.target.x + 0.5, this.target.y + 1, this.target.z + 0.5);
+        this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+        this.lastPlace = now;
+        this.emitHud();
+      }
       return;
     }
     if (!this.survival.hasSelectedPlaceable()) return;
@@ -1019,6 +1328,56 @@ export class GameEngine {
     const itemId = this.survival.selectedSlot!.id;
     const blockId = placeableBlock(itemId);
     if (blockId === null) return;
+
+    if (blockId === Block.DOOR) {
+      if (isWater(dest)) return;
+      const above = this.world.getBlock(px, py + 1, pz);
+      if (above !== Block.AIR && !isWater(above)) return;
+      if (this.player.overlapsBlock(px, py + 1, pz)) return;
+      const below = this.world.getBlock(px, py - 1, pz);
+      if (!isSolid(below) || isPlant(below) || isDoor(below) || isLadder(below)) return;
+      const [lx, , lz] = this.player.lookDir();
+      const facing = doorFacingFromLook(lx, lz);
+      const lo = doorId(facing, false, false);
+      const hi = doorId(facing, true, false);
+      if (!this.world.setBlock(px, py, pz, lo)) return;
+      if (!this.world.setBlock(px, py + 1, pz, hi)) {
+        this.world.setBlock(px, py, pz, Block.AIR);
+        return;
+      }
+      this.viewHand.punch();
+      this.audio.placeBlock("wood", px + 0.5, py + 0.5, pz + 0.5);
+      this.survival.consumeSelected();
+      this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+      this.lastPlace = now;
+      this.survival.addExhaustion(0.15);
+      this.markSave();
+      this.emitHud();
+      return;
+    }
+    if (blockId === Block.LADDER) {
+      if (isWater(dest)) return;
+      const placed = ladderIdFromHitFace(
+        this.target.nx,
+        this.target.ny,
+        this.target.nz,
+      );
+      if (placed === null) return;
+      const [ax, ay, az] = ladderAttachDir(placed);
+      if (!canSupportLadder(this.world.getBlock(px + ax, py + ay, pz + az))) return;
+      const ok = this.world.setBlock(px, py, pz, placed);
+      if (ok) {
+        this.viewHand.punch();
+        this.audio.placeBlock("wood", px + 0.5, py + 0.5, pz + 0.5);
+        this.survival.consumeSelected();
+        this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+        this.lastPlace = now;
+        this.survival.addExhaustion(0.15);
+        this.markSave();
+        this.emitHud();
+      }
+      return;
+    }
 
     if (isPlant(blockId)) {
       if (isWater(dest)) return;
@@ -1072,6 +1431,7 @@ export class GameEngine {
       this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
       this.lastPlace = now;
       this.survival.addExhaustion(0.15);
+      this.markSave();
       this.emitHud();
     }
   }
@@ -1079,12 +1439,43 @@ export class GameEngine {
   /** LMB attack hostiles first, then caterpillars, then animals */
   private tryAttack(): void {
     const now = performance.now();
+    if (this.survival.dead || this.craftingOpen || this.openFurnacePos || this.openChestPos) return;
+    const held = this.survival.heldToolId();
+    if (isBow(held)) {
+      if (now - this.lastShot < 480) return;
+      if (this.survival.countOf(Item.ARROW) <= 0) {
+        this.flashNotice("No arrows");
+        this.lastShot = now;
+        return;
+      }
+      this.survival.removeItem(Item.ARROW, 1);
+      this.survival.damageHeldTool(1);
+      const [lx, ly, lz] = this.player.lookDir();
+      this.arrows.shoot(
+        this.player.x,
+        this.player.eyeY,
+        this.player.z,
+        lx,
+        ly,
+        lz,
+        5,
+      );
+      this.viewHand.punch(1.1);
+      this.audio.swing();
+      this.lastShot = now;
+      this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+      this.emitHud();
+      return;
+    }
     if (now - this.lastAttack < 320) return;
     if (this.survival.dead || this.craftingOpen || this.openFurnacePos || this.openChestPos) return;
     const [lx, ly, lz] = this.player.lookDir();
     const tool = getTool(this.survival.heldToolId());
     const dmg = tool.attack;
     const range = tool.kind === "sword" ? 4.2 : 3.2;
+    this.lastAttack = now;
+    this.viewHand.punch(1);
+    this.audio.swing();
     let result =
       this.hostiles.tryPunch(
         this.player.x,
@@ -1117,9 +1508,9 @@ export class GameEngine {
         dmg,
       );
     if (result) {
-      this.lastAttack = now;
-      this.viewHand.punch();
-      this.audio.swing();
+      this.swingJuice = 1;
+      this.camKickX = -0.038;
+      this.camKickZ = (Math.random() - 0.5) * 0.022;
       if (result.outcome === "dead") {
         for (const stack of mobLoot(result.kind)) {
           for (let i = 0; i < stack.count; i++) {
@@ -1264,6 +1655,14 @@ export class GameEngine {
   /** Click inventory / hotbar. Shift-click routes to furnace, chest, or backpack. */
   inventoryClickHotbar(i: number, shift = false): void {
     if (i < 0 || i >= INV_SIZE) return;
+    const bagOpen =
+      this.craftingOpen || !!this.openFurnacePos || !!this.openChestPos;
+    // Playing: a tap/click only selects the held slot. Pick-up/move
+    // requires an open bag or an item already on the cursor.
+    if (!bagOpen && !this.survival.cursor && !shift) {
+      this.setSelectedIndex(i);
+      return;
+    }
     if (shift && this.openFurnacePos) {
       this.shiftHotbarToFurnace(i);
     } else if (shift && this.openChestPos) {
@@ -1334,10 +1733,24 @@ export class GameEngine {
     if (this.survival.eatSelected()) {
       this.lastEat = now;
       this.audio.eat();
-      this.viewHand.punch();
+      this.viewHand.eat();
+      this.eatJuice = 1;
+      this.camKickX = 0.055;
       this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
       this.emitHud();
     }
+  }
+
+  private toggleDoorAt(x: number, y: number, z: number, id: number): void {
+    const lowerY = doorIsUpper(id) ? y - 1 : y;
+    const lower = this.world.getBlock(x, lowerY, z);
+    const upper = this.world.getBlock(x, lowerY + 1, z);
+    if (!isDoorCell(lower) || !isDoorCell(upper)) return;
+    const opening = !doorIsOpen(lower);
+    this.world.setBlock(x, lowerY, z, doorToggle(lower));
+    this.world.setBlock(x, lowerY + 1, z, doorToggle(upper));
+    this.audio.door(opening, x + 0.5, lowerY + 1, z + 0.5);
+    this.markSave();
   }
 
   private trySleep(x: number, y: number, z: number): void {
@@ -1566,12 +1979,43 @@ export class GameEngine {
       }
     }
 
+    this.flushMobDeaths();
+
+    {
+      const shots = this.arrows.update(
+        dt,
+        this.world,
+        this.hostiles,
+        this.caterpillars,
+        this.animals,
+      );
+      if (shots.length > 0) {
+        for (const result of shots) {
+          if (result.outcome === "dead") {
+            for (const stack of mobLoot(result.kind)) {
+              this.itemDrops.spawnStack(
+                stack,
+                result.x,
+                result.y,
+                result.z,
+                (Math.random() - 0.5) * 2,
+                3,
+                (Math.random() - 0.5) * 2,
+              );
+            }
+          }
+        }
+        this.audio.hurt();
+        this.emitHud();
+      }
+    }
+
     if (this.playing || this.itemDrops.count > 0) {
       const collected = this.itemDrops.update(
         dt,
         this.world,
         this.player,
-        (id) => this.survival.addItem(id, 1) > 0,
+        (id, count, dur) => this.survival.addItem(id, count, dur),
       );
       if (collected.length > 0) {
         this.audio.pickup();
@@ -1677,6 +2121,11 @@ export class GameEngine {
       const sprinting =
         (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) &&
         this.player.onGround;
+      this.audioSpaceAcc += dt;
+      if (this.audioSpaceAcc > 0.18) {
+        this.audioSpaceAcc = 0;
+        this.probeAudioSpace();
+      }
       this.audio.update(dt, {
         playing: this.playing && !this.survival.dead,
         moving,
@@ -1689,6 +2138,8 @@ export class GameEngine {
         rain: w.rain,
         windSpeed: w.windSpeed,
         surface: this.footSurface(),
+        skyOpen: this.audioSky,
+        spaceOpen: this.audioOpen,
         listenerX: this.player.x,
         listenerY: this.player.eyeY,
         listenerZ: this.player.z,
@@ -1732,12 +2183,22 @@ export class GameEngine {
       this.renderer.setClearColor(0x062a3c, 1);
     }
 
-    if (this.hudAccum >= 0.25) {
+    const juiceHud =
+      this.player.submerged ||
+      this._air < 4.95 ||
+      this.eatJuice > 0.02 ||
+      this.swingJuice > 0.02;
+    if (this.hudAccum >= (juiceHud ? 0.05 : 0.25)) {
       this.fps = Math.round(this.frames / this.hudAccum);
       this.frames = 0;
       this.hudAccum = 0;
       this.emitHud();
     }
+
+    this.saveAcc += dt;
+    if (this.world.editsDirty) this.saveDirty = true;
+    if (this.saveDirty && this.saveAcc > 1.6) this.flushSave();
+    else if (this.playing && this.saveAcc > 12) this.flushSave();
 
     if (this.scene.background instanceof THREE.Color) {
       this.renderer.setClearColor(this.scene.background, 1);
@@ -1838,8 +2299,12 @@ export class GameEngine {
       );
     }
     this.camera.rotation.y = this.player.yaw;
-    this.camera.rotation.x = this.player.pitch;
-    this.camera.rotation.z = 0;
+    this.camera.rotation.x = this.player.pitch + this.camKickX;
+    this.camera.rotation.z = this.camKickZ;
+    this.camKickX *= Math.exp(-14 * dt);
+    this.camKickZ *= Math.exp(-12 * dt);
+    if (this.eatJuice > 0) this.eatJuice = Math.max(0, this.eatJuice - dt * 2.4);
+    if (this.swingJuice > 0) this.swingJuice = Math.max(0, this.swingJuice - dt * 4.2);
 
     // First-person hand / held block (camera-local)
     this.viewHand.setVisible(this.playing && !this.survival.dead);
@@ -1897,7 +2362,64 @@ export class GameEngine {
 
     if (this.player.y < -8) {
       this.survival.damage(20);
+    } else if (!this.survival.dead && this.player.y > 1) {
+      this.lastSafeX = this.player.x;
+      this.lastSafeY = this.player.y;
+      this.lastSafeZ = this.player.z;
     }
+  }
+
+  /** Sky exposure + how far walls are — drives outdoor vs cave reverb. */
+  private probeAudioSpace(): void {
+    const x = Math.floor(this.player.x);
+    const y = Math.floor(this.player.eyeY);
+    const z = Math.floor(this.player.z);
+    const sky = Math.max(
+      this.world.getSkyLight(x, y, z),
+      this.world.getSkyLight(x, y + 1, z),
+      this.world.getSkyLight(x, y + 2, z),
+    );
+    this.audioSky = sky / 15;
+
+    const dirs: [number, number, number][] = [
+      [1, 0, 0],
+      [-1, 0, 0],
+      [0, 0, 1],
+      [0, 0, -1],
+      [1, 0, 1],
+      [1, 0, -1],
+      [-1, 0, 1],
+      [-1, 0, -1],
+      [0, 1, 0],
+      [0, -1, 0],
+      [0.7, 0.4, 0.7],
+      [-0.7, 0.4, 0.7],
+      [0.7, 0.4, -0.7],
+      [-0.7, 0.4, -0.7],
+    ];
+    const maxR = 16;
+    let travel = 0;
+    for (const [dx, dy, dz] of dirs) {
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const ux = dx / len;
+      const uy = dy / len;
+      const uz = dz / len;
+      let d = 1;
+      for (; d < maxR; d++) {
+        const id = this.world.getBlock(
+          Math.floor(x + ux * d),
+          Math.floor(y + uy * d),
+          Math.floor(z + uz * d),
+        );
+        if (isDoorCell(id)) {
+          if (!doorIsOpen(id)) break;
+          continue;
+        }
+        if (isSolid(id) && !isPlant(id) && !isLadder(id)) break;
+      }
+      travel += d;
+    }
+    this.audioOpen = travel / (dirs.length * maxR);
   }
 
   private footSurface(): ReturnType<typeof surfaceFromBlock> {
@@ -1905,6 +2427,17 @@ export class GameEngine {
     const z = Math.floor(this.player.z);
     const y = Math.floor(this.player.y - 0.1);
     return surfaceFromBlock(this.world.getBlock(x, y, z));
+  }
+
+  private flushMobDeaths(): void {
+    const pops = [
+      ...this.hostiles.consumeDeaths(),
+      ...this.animals.consumeDeaths(),
+      ...this.caterpillars.consumeDeaths(),
+    ];
+    for (const p of pops) {
+      this.ambiance.burstSmoke(p.x, p.y, p.z, 1.05);
+    }
   }
 
   private updateSurvival(dt: number): void {
@@ -1937,6 +2470,11 @@ export class GameEngine {
     } else {
       this._air = Math.min(5, this._air + dt * 2);
     }
+    const airPips = Math.ceil(this._air * 2);
+    if (this.player.submerged && airPips < this.lastAirPips) {
+      this.audio.bubblePop();
+    }
+    this.lastAirPips = airPips;
 
     // Cactus
     const bx = Math.floor(this.player.x);
@@ -1951,6 +2489,11 @@ export class GameEngine {
     }
 
     this.hurtFromCaterpillars(dt);
+
+    if (this.survival.dead && !this.wasDead) {
+      this.dropCorpseLoot();
+    }
+    this.wasDead = this.survival.dead;
 
     // Hold LMB mine
     const mining = this.mouseDown.left;
@@ -2112,7 +2655,9 @@ export class GameEngine {
           ? "Mine cobble → craft a furnace (8 cobble)"
           : !this.survival.smeltedIron
             ? "Caves hide coal and iron · stone pick for iron · smelt in the furnace"
-            : night && hs.alive > 0
+            : !this.survival.madeBow && !this.survival.madeArmor
+              ? "Hunt cows for leather · chickens for feathers · nights drop bones · string from crawlers"
+              : night && hs.alive > 0
               ? hs.slender > 0
                 ? "Something tall is watching — craft a sword, find shelter"
                 : "Hostiles nearby — fight or hide until dawn"
@@ -2145,10 +2690,17 @@ export class GameEngine {
       dayPhase: this.dayNight.state.phase,
       isDay: this.dayNight.state.dayFactor > 0.45,
       biome: this.world.getBiomeLabel(this.player.x, this.player.z),
+      seed: this.world.seed,
       health: this.survival.health,
       maxHealth: MAX_HEALTH,
       hunger: this.survival.hunger,
       maxHunger: MAX_HUNGER,
+      armor: this.survival.armorPoints(),
+      air: this._air,
+      maxAir: 5,
+      submerged: this.player.submerged,
+      eatJuice: this.eatJuice,
+      swingJuice: this.swingJuice,
       inventory: this.survival.slots.map((s) =>
         s
           ? { id: s.id, count: s.count, durability: s.durability }

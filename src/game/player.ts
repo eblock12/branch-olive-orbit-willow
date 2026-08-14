@@ -1,5 +1,5 @@
 import { World } from "./world";
-import { isSolid, isWater } from "./blocks";
+import { isSolid, isWater, isLadder } from "./blocks";
 
 export const PLAYER_HEIGHT = 1.8;
 export const PLAYER_WIDTH = 0.6;
@@ -48,6 +48,7 @@ export class Player {
   onGround = false;
   inWater = false;
   submerged = false;
+  onLadder = false;
   speed = 0;
 
   private readonly halfW = PLAYER_WIDTH / 2;
@@ -137,15 +138,73 @@ export class Player {
     this.wasInWater = this.inWater;
 
     if (this.inWater) {
+      this.onLadder = false;
       this.tickSwim(dt, world, moveF, moveR, jump, sprint);
+    } else if (this.touchingLadder(world)) {
+      this.onLadder = true;
+      this.tickLadder(dt, world, moveF, moveR, jump, sprint);
     } else {
+      this.onLadder = false;
       this.tickLand(dt, world, moveF, moveR, jump, sprint);
     }
 
     this.speed = Math.hypot(this.vx, this.vz);
   }
 
-  // ─── Land movement ────────────────────────────────────────────
+  private touchingLadder(world: World): boolean {
+    const samples: [number, number, number][] = [
+      [this.x, this.y + 0.2, this.z],
+      [this.x, this.y + this.height * 0.55, this.z],
+      [this.x, this.y + this.height * 0.9, this.z],
+    ];
+    for (const [x, y, z] of samples) {
+      if (isLadder(world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private tickLadder(
+    dt: number,
+    world: World,
+    moveF: number,
+    moveR: number,
+    jump: boolean,
+    sprint: boolean,
+  ): void {
+    const [fx, fz] = this.forwardXZ();
+    const [rx, rz] = this.rightXZ();
+    let wishX = fx * moveF + rx * moveR;
+    let wishZ = fz * moveF + rz * moveR;
+    const wishLen = Math.hypot(wishX, wishZ);
+    if (wishLen > 1e-6) {
+      wishX /= wishLen;
+      wishZ /= wishLen;
+    } else {
+      wishX = 0;
+      wishZ = 0;
+    }
+    const climb = sprint ? 3.8 : 3.15;
+    const targetSpeed = wishLen > 1e-6 ? (sprint ? 2.4 : 1.85) : 0;
+    this.moveGround(dt, wishX, wishZ, targetSpeed);
+
+    if (jump) {
+      this.vy = climb;
+    } else if (moveF > 0.15) {
+      const lookY = this.lookDir()[1];
+      this.vy = lookY >= -0.18 ? climb : -climb;
+    } else if (moveF < -0.15) {
+      this.vy = -2.85;
+    } else {
+      this.vy = 0;
+    }
+
+    this.integrate(dt, world);
+    this.onGround =
+      this.vy <= 0.05 &&
+      this.collides(world, this.x, this.y - GROUND_PROBE, this.z);
+  }
 
   private tickLand(
     dt: number,

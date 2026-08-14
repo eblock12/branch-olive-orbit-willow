@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isPlant, type BlockId } from "./blocks";
+import { Block, BLOCKS, isPlant, isDoor, isLadder, type BlockId } from "./blocks";
 
 /** Item IDs: 0–99 reserved for blocks; 100+ materials & tools */
 export const Item = {
@@ -34,12 +34,20 @@ export const Item = {
   STRING: 129,
   BONE: 130,
   BREAD: 131,
+  BOW: 132,
+  ARROW: 133,
+  LEATHER_HELM: 134,
+  LEATHER_CHEST: 135,
+  LEATHER_LEGS: 136,
+  LEATHER_BOOTS: 137,
+  BONE_MEAL: 138,
 } as const;
 
 export type ItemId = number;
 
-export type ToolKind = "pickaxe" | "axe" | "shovel" | "sword" | "none";
+export type ToolKind = "pickaxe" | "axe" | "shovel" | "sword" | "bow" | "none";
 export type ToolTier = "none" | "wood" | "stone" | "iron";
+export type ArmorSlot = "head" | "chest" | "legs" | "feet";
 
 export type ItemDef = {
   id: ItemId;
@@ -54,6 +62,7 @@ export type ItemDef = {
   attack?: number;
   /** Restores health now; hunger value stored for when drain is on */
   food?: { heal: number; hunger: number };
+  armor?: { slot: ArmorSlot; points: number };
   /** Hotbar / UI color when no sprite */
   color: string;
 };
@@ -204,6 +213,59 @@ const TOOLS: ItemDef[] = [
     attack: 7,
     color: "#c8ccd4",
   },
+  {
+    id: Item.BOW,
+    name: "Bow",
+    maxStack: 1,
+    tool: "bow",
+    maxDurability: 80,
+    attack: 1,
+    color: "#8a6238",
+  },
+  {
+    id: Item.ARROW,
+    name: "Arrow",
+    maxStack: 64,
+    color: "#c8b898",
+  },
+  {
+    id: Item.LEATHER_HELM,
+    name: "Leather Cap",
+    maxStack: 1,
+    maxDurability: 55,
+    armor: { slot: "head", points: 1 },
+    color: "#8a5a32",
+  },
+  {
+    id: Item.LEATHER_CHEST,
+    name: "Leather Tunic",
+    maxStack: 1,
+    maxDurability: 80,
+    armor: { slot: "chest", points: 3 },
+    color: "#8a5a32",
+  },
+  {
+    id: Item.LEATHER_LEGS,
+    name: "Leather Pants",
+    maxStack: 1,
+    maxDurability: 75,
+    armor: { slot: "legs", points: 2 },
+    color: "#8a5a32",
+  },
+  {
+    id: Item.LEATHER_BOOTS,
+    name: "Leather Boots",
+    maxStack: 1,
+    maxDurability: 65,
+    armor: { slot: "feet", points: 1 },
+    color: "#8a5a32",
+  },
+  {
+    id: Item.BONE_MEAL,
+    name: "Bone Meal",
+    maxStack: 64,
+    color: "#f4f0e4",
+  },
 ];
 
 const FOODS: ItemDef[] = [
@@ -241,6 +303,28 @@ export function isTool(id: ItemId): boolean {
 
 export function isFood(id: ItemId): boolean {
   return !!ITEM_DEFS[id]?.food;
+}
+
+export function isBow(id: ItemId | null | undefined): boolean {
+  return !!id && ITEM_DEFS[id]?.tool === "bow";
+}
+
+export function isArrow(id: ItemId | null | undefined): boolean {
+  return id === Item.ARROW;
+}
+
+export function isBoneMeal(id: ItemId | null | undefined): boolean {
+  return id === Item.BONE_MEAL;
+}
+
+export function armorInfo(
+  id: ItemId | null | undefined,
+): { slot: ArmorSlot; points: number; slotIndex: number } | null {
+  if (!id) return null;
+  const a = ITEM_DEFS[id]?.armor;
+  if (!a) return null;
+  const slotIndex = a.slot === "head" ? 0 : a.slot === "chest" ? 1 : a.slot === "legs" ? 2 : 3;
+  return { slot: a.slot, points: a.points, slotIndex };
 }
 
 export function itemName(id: ItemId): string {
@@ -281,6 +365,7 @@ export function getTool(id: ItemId | null | undefined): {
 /** Base fist mine times (seconds) */
 export function baseMineTime(blockId: number): number {
   if (isPlant(blockId)) return 0.05;
+  if (isDoor(blockId) || isLadder(blockId)) return 0.4;
   switch (blockId) {
     case Block.BEDROCK:
       return Infinity;
@@ -334,7 +419,9 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.PLANKS ||
     blockId === Block.LEAVES ||
     blockId === Block.CHEST ||
-    blockId === Block.BED
+    blockId === Block.BED ||
+    isDoor(blockId) ||
+    isLadder(blockId)
   ) {
     return "axe";
   }
@@ -562,6 +649,20 @@ export const RECIPES: Recipe[] = [
     hint: "27 slots — stash your extras",
   },
   {
+    id: "door",
+    name: "Door",
+    inputs: [{ id: Block.PLANKS, count: 6 }],
+    output: { id: Block.DOOR, count: 3 },
+    hint: "Right-click to open — two blocks tall",
+  },
+  {
+    id: "ladder",
+    name: "Ladder",
+    inputs: [{ id: Item.STICK, count: 7 }],
+    output: { id: Block.LADDER, count: 3 },
+    hint: "Hang on a wall and climb caves",
+  },
+  {
     id: "bed",
     name: "Bed",
     inputs: [
@@ -608,6 +709,60 @@ export const RECIPES: Recipe[] = [
     ],
     output: { id: Item.IRON_SWORD, count: 1 },
     hint: "Serious reach and damage",
+  },
+  {
+    id: "bow",
+    name: "Bow",
+    inputs: [
+      { id: Item.STICK, count: 3 },
+      { id: Item.STRING, count: 3 },
+    ],
+    output: { id: Item.BOW, count: 1 },
+    hint: "String + sticks · needs arrows",
+  },
+  {
+    id: "arrows",
+    name: "Arrows",
+    inputs: [
+      { id: Item.STICK, count: 1 },
+      { id: Item.FEATHER, count: 1 },
+      { id: Item.BONE, count: 1 },
+    ],
+    output: { id: Item.ARROW, count: 4 },
+    hint: "Bone tip · feather fletching",
+  },
+  {
+    id: "bone_meal",
+    name: "Bone Meal",
+    inputs: [{ id: Item.BONE, count: 1 }],
+    output: { id: Item.BONE_MEAL, count: 3 },
+    hint: "Right-click grass or dirt to grow",
+  },
+  {
+    id: "leather_helm",
+    name: "Leather Cap",
+    inputs: [{ id: Item.LEATHER, count: 5 }],
+    output: { id: Item.LEATHER_HELM, count: 1 },
+    hint: "Hunt cows · soak hits",
+  },
+  {
+    id: "leather_chest",
+    name: "Leather Tunic",
+    inputs: [{ id: Item.LEATHER, count: 8 }],
+    output: { id: Item.LEATHER_CHEST, count: 1 },
+    hint: "Best leather piece",
+  },
+  {
+    id: "leather_legs",
+    name: "Leather Pants",
+    inputs: [{ id: Item.LEATHER, count: 7 }],
+    output: { id: Item.LEATHER_LEGS, count: 1 },
+  },
+  {
+    id: "leather_boots",
+    name: "Leather Boots",
+    inputs: [{ id: Item.LEATHER, count: 4 }],
+    output: { id: Item.LEATHER_BOOTS, count: 1 },
   },
   {
     id: "crafting_cobble",
@@ -775,6 +930,91 @@ function paintItemIcon(id: ItemId): string {
     ctx.fillStyle = "#a86828";
     ctx.fillRect(8, 18, 2, 2);
     ctx.fillRect(22, 17, 2, 2);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.BOW) {
+    ctx.strokeStyle = "#8a6238";
+    ctx.lineWidth = 3;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(18, 16, 11, -2.2, 2.2);
+    ctx.stroke();
+    ctx.strokeStyle = "#d8d0c4";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(14, 6);
+    ctx.lineTo(14, 26);
+    ctx.stroke();
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.ARROW) {
+    ctx.fillStyle = "#6b4a28";
+    ctx.fillRect(8, 14, 16, 3);
+    ctx.fillStyle = "#c8c0b0";
+    ctx.beginPath();
+    ctx.moveTo(22, 11);
+    ctx.lineTo(30, 15.5);
+    ctx.lineTo(22, 20);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#f4f0e4";
+    ctx.beginPath();
+    ctx.moveTo(8, 12);
+    ctx.lineTo(4, 10);
+    ctx.lineTo(8, 16);
+    ctx.lineTo(4, 21);
+    ctx.lineTo(8, 19);
+    ctx.closePath();
+    ctx.fill();
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.BONE_MEAL) {
+    ctx.fillStyle = "#f4f0e4";
+    ctx.beginPath();
+    ctx.arc(12, 18, 5, 0, Math.PI * 2);
+    ctx.arc(18, 14, 6, 0, Math.PI * 2);
+    ctx.arc(21, 20, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#e0d8c8";
+    ctx.fillRect(14, 16, 3, 3);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.LEATHER_HELM) {
+    ctx.fillStyle = "#8a5a32";
+    ctx.fillRect(8, 10, 16, 12);
+    ctx.fillStyle = "#6a4020";
+    ctx.fillRect(8, 10, 16, 3);
+    ctx.fillStyle = "#c49a6c";
+    ctx.fillRect(12, 16, 8, 6);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.LEATHER_CHEST) {
+    ctx.fillStyle = "#8a5a32";
+    ctx.fillRect(8, 8, 16, 18);
+    ctx.fillStyle = "#6a4020";
+    ctx.fillRect(8, 8, 5, 7);
+    ctx.fillRect(19, 8, 5, 7);
+    ctx.fillStyle = "#a07040";
+    ctx.fillRect(12, 14, 8, 8);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.LEATHER_LEGS) {
+    ctx.fillStyle = "#8a5a32";
+    ctx.fillRect(9, 6, 14, 8);
+    ctx.fillRect(9, 13, 6, 14);
+    ctx.fillRect(17, 13, 6, 14);
+    ctx.fillStyle = "#6a4020";
+    ctx.fillRect(9, 24, 6, 3);
+    ctx.fillRect(17, 24, 6, 3);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.LEATHER_BOOTS) {
+    ctx.fillStyle = "#6a4020";
+    ctx.fillRect(6, 18, 8, 8);
+    ctx.fillRect(18, 18, 8, 8);
+    ctx.fillStyle = "#8a5a32";
+    ctx.fillRect(6, 14, 8, 6);
+    ctx.fillRect(18, 14, 8, 6);
     return c.toDataURL("image/png");
   }
 

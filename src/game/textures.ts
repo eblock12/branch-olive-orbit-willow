@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { ATLAS_TILES, TILE_SIZE, BLOCKS } from "./blocks";
+import { ATLAS_TILES, TILE_SIZE, BLOCKS, Block, isDoor, isLadder } from "./blocks";
 
 /** Procedural pixel-art block atlas — nearest-filtered for Minecraft look */
 
@@ -628,6 +628,19 @@ export function createBlockAtlas(): {
     paintBedFace(x, y, set, false);
   });
 
+  // 49 — door lower (planks + handle)
+  drawTile(d, 49, atlasPx, (x, y, set) => {
+    paintDoorFace(x, y, set, false);
+  });
+  // 51 — door upper (window)
+  drawTile(d, 51, atlasPx, (x, y, set) => {
+    paintDoorFace(x, y, set, true);
+  });
+  // 50 — ladder
+  drawTile(d, 50, atlasPx, (x, y, set) => {
+    paintLadderFace(x, y, set);
+  });
+
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
 
@@ -771,6 +784,57 @@ function paintBedFace(
   }
   const v = 118 + n * 12;
   set(clamp(v), clamp(78 + n * 8), clamp(42 + n * 6));
+}
+
+function paintDoorFace(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  upper: boolean,
+): void {
+  const n = hSigned(x, y, upper ? 510 : 500);
+  const frame = x < 1 || x > 14 || y < 1 || y > 14;
+  if (frame) {
+    set(clamp(72 + n * 8), clamp(46 + n * 6), clamp(26 + n * 4));
+    return;
+  }
+  if (upper && x >= 4 && x <= 11 && y >= 3 && y <= 10) {
+    const pane = ((x + y) & 1) === 0;
+    set(
+      clamp((pane ? 148 : 118) + n * 10),
+      clamp((pane ? 186 : 154) + n * 8),
+      clamp((pane ? 198 : 168) + n * 8),
+    );
+    if (x === 4 || x === 11 || y === 3 || y === 10) {
+      set(clamp(64 + n * 6), clamp(42 + n * 4), clamp(24));
+    }
+    return;
+  }
+  const plank = (x / 4) | 0;
+  const base = 148 + plank * 6 + n * 14;
+  set(clamp(base), clamp(96 + n * 8), clamp(52 + n * 6));
+  if (x === 4 || x === 8 || x === 12) {
+    set(clamp(108 + n * 6), clamp(70 + n * 4), clamp(38));
+  }
+  if (!upper && x >= 12 && x <= 13 && y >= 7 && y <= 9) {
+    set(clamp(196 + n * 8), clamp(158 + n * 6), clamp(48));
+  }
+}
+
+function paintLadderFace(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const n = hSigned(x, y, 520);
+  const rail = x <= 2 || x >= 13;
+  const rung = y === 2 || y === 6 || y === 10 || y === 14;
+  if (rail || rung) {
+    const v = (rail ? 128 : 142) + n * 16;
+    set(clamp(v), clamp(v * 0.68), clamp(v * 0.38));
+    return;
+  }
+  set(0, 0, 0, 0);
 }
 
 function paintPlant(
@@ -1047,7 +1111,7 @@ function buildIsometricBlockIcons(atlas: HTMLCanvasElement): BlockIconMap {
     octx.imageSmoothingEnabled = false;
     octx.clearRect(0, 0, size, size);
 
-    if (def.shape === "cross") {
+    if (def.shape === "cross" || isDoor(id) || isLadder(id) || id === Block.DOOR) {
       const tile = def.tiles[2]!;
       const spr = sampleTile(tile);
       octx.fillStyle = "rgba(0,0,0,0.16)";

@@ -3,7 +3,7 @@
  * Layered convolution reverb, scale UI pitches, granular rain, punchy LPF thunder.
  */
 
-import { Block } from "./blocks";
+import { Block, isDoor, isLadder } from "./blocks";
 
 export type AudioSurface =
   | "grass"
@@ -135,6 +135,10 @@ export class GameAudio {
       rain: number;
       windSpeed: number;
       surface: AudioSurface;
+      /** 0 = buried, 1 = open sky */
+      skyOpen?: number;
+      /** 0 = tight walls, 1 = long sightlines */
+      spaceOpen?: number;
       /** Player / camera for spatial audio */
       listenerX?: number;
       listenerY?: number;
@@ -194,10 +198,34 @@ export class GameAudio {
     );
 
     if (opts.playing && this.verbCanyonGain && this.sfxDry) {
+      const sky = Math.max(0, Math.min(1, opts.skyOpen ?? 1));
+      const open = Math.max(0, Math.min(1, opts.spaceOpen ?? 0.5));
+      const enclosed = 1 - sky;
+      // Huge cave: buried + lots of air around you
+      const cave =
+        enclosed *
+        enclosed *
+        Math.max(0, Math.min(1, (open - 0.38) / 0.42));
+      // Tight room / tunnel
+      const room = enclosed * (1 - open) * (1 - cave);
       const storm = Math.min(1, opts.rain * 0.7 + opts.windSpeed * 0.15);
-      this.verbCanyonGain.gain.setTargetAtTime(0.03 + storm * 0.05, now, 0.5);
-      this.verbHallGain?.gain.setTargetAtTime(0.05 + opts.rain * 0.03, now, 0.5);
-      this.verbEarlyGain?.gain.setTargetAtTime(0.04 + storm * 0.02, now, 0.5);
+
+      this.verbEarlyGain?.gain.setTargetAtTime(
+        0.016 + sky * 0.01 + room * 0.055 + cave * 0.04 + storm * 0.01,
+        now,
+        0.45,
+      );
+      this.verbHallGain?.gain.setTargetAtTime(
+        0.006 + room * 0.035 + cave * 0.09 + opts.rain * 0.012,
+        now,
+        0.45,
+      );
+      this.verbCanyonGain.gain.setTargetAtTime(
+        cave * cave * 0.14 + (cave > 0.55 ? 0.04 : 0),
+        now,
+        0.5,
+      );
+      this.sfxDry.gain.setTargetAtTime(0.96 - cave * 0.08 - room * 0.04, now, 0.45);
     }
 
     if (!opts.playing) return;
@@ -255,7 +283,9 @@ export class GameAudio {
   }
 
   swing(): void {
-    this.whoosh(0.15);
+    this.whoosh(0.38);
+    this.noiseBurst(0.07, "lowpass", 220, 0.1, 0.6);
+    this.tone(90 + Math.random() * 20, 0.05, 0.05, "sine");
   }
 
   hurt(): void {
@@ -273,14 +303,32 @@ export class GameAudio {
     this.click();
   }
 
+  door(opening: boolean, wx?: number, wy?: number, wz?: number): void {
+    const base = opening ? 140 : 110;
+    this.tone(base + Math.random() * 18, 0.09, opening ? 0.11 : 0.14, "triangle");
+    this.noiseBurst(0.08, "lowpass", opening ? 420 : 280, 0.12, 0.55);
+    this.tone(base * 0.55, 0.12, 0.06, "sine", 0, undefined, 0.04);
+    void wx;
+    void wy;
+    void wz;
+  }
+
   pickup(): void {
     this.pop(0.25);
   }
 
   eat(): void {
-    this.noiseBurst(0.07, "bandpass", 900, 0.08, 0.8);
-    this.tone(220 + Math.random() * 40, 0.06, 0.05, "triangle");
-    this.tone(140, 0.08, 0.04, "sine");
+    this.noiseBurst(0.07, "bandpass", 780, 0.16, 0.85);
+    this.tone(210 + Math.random() * 30, 0.055, 0.06, "triangle");
+    this.noiseBurst(0.06, "bandpass", 620, 0.13, 0.9, undefined, 0.09);
+    this.tone(170, 0.05, 0.045, "triangle", 0, undefined, 0.09);
+    this.tone(130, 0.08, 0.04, "sine", 0, undefined, 0.18);
+    this.noiseBurst(0.05, "lowpass", 240, 0.07, 0.5, undefined, 0.18);
+  }
+
+  bubblePop(): void {
+    this.noiseBurst(0.04, "bandpass", 1400, 0.07, 1.2);
+    this.tone(880 + Math.random() * 220, 0.04, 0.035, "sine");
   }
 
   sleep(): void {
@@ -382,36 +430,36 @@ export class GameAudio {
   ): void {
     const early = ctx.createConvolver();
     early.buffer = this.makeImpulseResponse(ctx, {
-      seconds: 0.28,
-      decay: 3.2,
-      stereoSpread: 0.012,
-      lowpass: 9000,
+      seconds: 0.16,
+      decay: 4.4,
+      stereoSpread: 0.008,
+      lowpass: 7000,
       density: 1,
     });
     const hall = ctx.createConvolver();
     hall.buffer = this.makeImpulseResponse(ctx, {
-      seconds: 1.6,
-      decay: 2.4,
-      stereoSpread: 0.028,
-      lowpass: 4500,
-      density: 0.85,
+      seconds: 0.72,
+      decay: 3.1,
+      stereoSpread: 0.02,
+      lowpass: 3800,
+      density: 0.8,
     });
     const canyon = ctx.createConvolver();
     canyon.buffer = this.makeImpulseResponse(ctx, {
-      seconds: 4.2,
-      decay: 1.55,
-      stereoSpread: 0.045,
-      lowpass: 1800,
-      density: 0.55,
-      lateBoost: 1.35,
+      seconds: 2.1,
+      decay: 2.1,
+      stereoSpread: 0.035,
+      lowpass: 1600,
+      density: 0.5,
+      lateBoost: 1.2,
     });
 
     const gEarly = ctx.createGain();
-    gEarly.gain.value = 0.045;
+    gEarly.gain.value = 0.02;
     const gHall = ctx.createGain();
-    gHall.gain.value = 0.055;
+    gHall.gain.value = 0.008;
     const gCanyon = ctx.createGain();
-    gCanyon.gain.value = 0.03;
+    gCanyon.gain.value = 0;
 
     sfxIn.connect(early);
     early.connect(gEarly);
@@ -964,10 +1012,11 @@ export class GameAudio {
     peak: number,
     q = 0.8,
     world?: { x: number; y: number; z: number },
+    delay = 0,
   ): void {
     if (!this.ctx || !this.sfx || !this.noiseBuf) return;
     const ctx = this.ctx;
-    const t0 = ctx.currentTime;
+    const t0 = ctx.currentTime + delay;
     const src = ctx.createBufferSource();
     src.buffer = this.noiseBuf;
     const f = ctx.createBiquadFilter();
@@ -991,10 +1040,11 @@ export class GameAudio {
     type: OscillatorType = "square",
     detune = 0,
     world?: { x: number; y: number; z: number },
+    delay = 0,
   ): void {
     if (!this.ctx || !this.sfx) return;
     const ctx = this.ctx;
-    const t0 = ctx.currentTime;
+    const t0 = ctx.currentTime + delay;
     const o = ctx.createOscillator();
     o.type = type;
     o.frequency.value = freq;
@@ -1128,15 +1178,15 @@ export class GameAudio {
       wet.setValueAtTime(wet.value, t0);
       dry.linearRampToValueAtTime(0.68 + close * 0.1, t0 + 0.04);
       wet.linearRampToValueAtTime(0.12 + far * 0.18, t0 + 0.12);
-      dry.linearRampToValueAtTime(0.92, t0 + bodyDur + 2.5);
-      wet.linearRampToValueAtTime(0.03, t0 + bodyDur + 3);
+      dry.linearRampToValueAtTime(0.95, t0 + bodyDur + 2.5);
+      wet.linearRampToValueAtTime(0.0, t0 + bodyDur + 3);
     }
     if (this.verbHallGain) {
       const h = this.verbHallGain.gain;
       h.cancelScheduledValues(t0);
       h.setValueAtTime(h.value, t0);
-      h.linearRampToValueAtTime(0.1 + far * 0.1, t0 + 0.1);
-      h.linearRampToValueAtTime(0.055, t0 + bodyDur + 2.5);
+      h.linearRampToValueAtTime(0.06 + far * 0.06, t0 + 0.1);
+      h.linearRampToValueAtTime(0.01, t0 + bodyDur + 2.5);
     }
 
     // —— Close crack / slap (skipped for pure distant canyon) ——
@@ -1578,11 +1628,14 @@ export function surfaceFromBlock(id: number): AudioSurface {
       return "sand";
     case Block.WOOD:
     case Block.PLANKS:
+    case Block.DOOR:
+    case Block.LADDER:
       return "wood";
     case Block.WATER:
     case Block.ICE:
       return "water";
     default:
+      if (isDoor(id) || isLadder(id)) return "wood";
       return "default";
   }
 }

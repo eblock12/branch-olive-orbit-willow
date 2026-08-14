@@ -97,6 +97,32 @@ export class FurnaceSystem {
     return s;
   }
 
+  exportAll(): FurnaceState[] {
+    return [...this.map.values()].map((s) => ({
+      ...s,
+      input: s.input ? { ...s.input } : null,
+      fuel: s.fuel ? { ...s.fuel } : null,
+      output: s.output ? { ...s.output } : null,
+    }));
+  }
+
+  importAll(rows: FurnaceState[]): void {
+    this.map.clear();
+    for (const r of rows) {
+      this.map.set(keyOf(r.x, r.y, r.z), {
+        x: r.x,
+        y: r.y,
+        z: r.z,
+        input: r.input ? { ...r.input } : null,
+        fuel: r.fuel ? { ...r.fuel } : null,
+        output: r.output ? { ...r.output } : null,
+        burnLeft: r.burnLeft,
+        burnMax: r.burnMax,
+        cook: r.cook,
+      });
+    }
+  }
+
   contents(s: FurnaceState): ItemStack[] {
     const out: ItemStack[] = [];
     if (s.input) out.push({ ...s.input });

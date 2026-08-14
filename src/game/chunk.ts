@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, waterLevel, lightEmission } from "./blocks";
+import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, doorPlane, waterLevel, lightEmission } from "./blocks";
 import { tileUVs } from "./textures";
 
 export { CHUNK_SIZE, CHUNK_HEIGHT, SEA_LEVEL } from "./chunkConstants";
@@ -505,6 +505,96 @@ function emitWallTorch(
   );
 }
 
+function emitDoorPanel(
+  m: MeshBuild,
+  wx: number,
+  wy: number,
+  wz: number,
+  id: number,
+  light: LightSample,
+): void {
+  const plane = doorPlane(id);
+  const t = 0.12;
+  let ox = wx;
+  let oz = wz;
+  let sx = 1;
+  let sz = 1;
+  if (plane === 0) {
+    sx = t;
+  } else if (plane === 1) {
+    ox = wx + 1 - t;
+    sx = t;
+  } else if (plane === 2) {
+    sz = t;
+  } else {
+    oz = wz + 1 - t;
+    sz = t;
+  }
+  for (let f = 0; f < 6; f++) {
+    emitFace(m, ox, wy, oz, sx, 1, sz, f, id, 0, undefined, light);
+  }
+}
+
+function emitLadder(
+  m: MeshBuild,
+  wx: number,
+  wy: number,
+  wz: number,
+  id: number,
+  light: LightSample,
+): void {
+  const def = BLOCKS[id];
+  if (!def) return;
+  const { u0, v0, u1, v1 } = tileUVs(def.tiles[2]!);
+  const uvPairs: [number, number][] = [
+    [u0, v0],
+    [u1, v0],
+    [u1, v1],
+    [u0, v1],
+  ];
+  const inset = 0.08;
+  let pts: number[][];
+  let nrm: [number, number, number];
+  if (id === Block.LADDER_NX) {
+    const x = wx + inset;
+    pts = [
+      [x, wy, wz + 1],
+      [x, wy, wz],
+      [x, wy + 1, wz],
+      [x, wy + 1, wz + 1],
+    ];
+    nrm = [1, 0, 0];
+  } else if (id === Block.LADDER_PX) {
+    const x = wx + 1 - inset;
+    pts = [
+      [x, wy, wz],
+      [x, wy, wz + 1],
+      [x, wy + 1, wz + 1],
+      [x, wy + 1, wz],
+    ];
+    nrm = [-1, 0, 0];
+  } else if (id === Block.LADDER_NZ) {
+    const z = wz + inset;
+    pts = [
+      [wx, wy, z],
+      [wx + 1, wy, z],
+      [wx + 1, wy + 1, z],
+      [wx, wy + 1, z],
+    ];
+    nrm = [0, 0, 1];
+  } else {
+    const z = wz + 1 - inset;
+    pts = [
+      [wx + 1, wy, z],
+      [wx, wy, z],
+      [wx, wy + 1, z],
+      [wx + 1, wy + 1, z],
+    ];
+    nrm = [0, 0, -1];
+  }
+  emitQuad(m, pts, uvPairs, nrm, 1, [0, 0, 0, 0], true, light);
+}
+
 type MeshBuild = {
   positions: number[];
   normals: number[];
@@ -640,7 +730,7 @@ function dominantCell(
       const id = chunk.get(x, y, z);
       if (id === Block.AIR || isWater(id)) continue;
       // Plants never contribute to LOD mesh (too thin at range)
-      if (isPlant(id)) continue;
+      if (isPlant(id) || isDoor(id) || isLadder(id)) continue;
       if (
         !includeFoliage &&
         (id === Block.LEAVES || id === Block.CACTUS)
@@ -707,6 +797,15 @@ function buildLod0(
             ? 0.15 + (y / CHUNK_HEIGHT) * 0.35
             : 0;
         const w = Math.min(1, wind + heightBoost * wind);
+
+        if (isDoorCell(id)) {
+          emitDoorPanel(m, wx, wy, wz, id, lightAt(getLight, wx, wy, wz));
+          continue;
+        }
+        if (isLadderCell(id)) {
+          emitLadder(m, wx, wy, wz, id, lightAt(getLight, wx, wy, wz));
+          continue;
+        }
 
         // Cross-shaped plants (flowers, grass, ferns…)
         if (def.shape === "cross" || isPlant(id)) {

@@ -24,6 +24,8 @@ export class ViewHand {
   private heldKind: HeldKind = "empty";
   private swing = 0; // 0..1 punch progress
   private swingDir = 0;
+  private swingAmp = 1;
+  private eatT = 0;
   private idleT = 0;
   private walkPhase = 0;
   private equipT = 1; // 0 just switched, 1 settled
@@ -113,10 +115,15 @@ export class ViewHand {
   }
 
   /** Trigger punch / swing (mine break or place) */
-  punch(): void {
-    if (this.swing > 0.15) return; // don't restart mid-swing hard
+  punch(amp = 1): void {
     this.swing = 0.001;
     this.swingDir = 1;
+    this.swingAmp = amp;
+  }
+
+  /** Raise food to the mouth — separate from the attack arc. */
+  eat(): void {
+    this.eatT = 0.001;
   }
 
   /** Continuous dig bob while holding mine */
@@ -160,7 +167,7 @@ export class ViewHand {
 
     // Swing cycle 0→1
     if (this.swing > 0) {
-      this.swing += dt * 5.5 * this.swingDir;
+      this.swing += dt * 7.2 * this.swingDir;
       if (this.swing >= 1) {
         this.swing = 1;
         this.swingDir = -1;
@@ -168,6 +175,10 @@ export class ViewHand {
         this.swing = 0;
         this.swingDir = 0;
       }
+    }
+    if (this.eatT > 0) {
+      this.eatT += dt * 3.4;
+      if (this.eatT >= 1) this.eatT = 0;
     }
 
     const m = this.moveAmount;
@@ -194,13 +205,25 @@ export class ViewHand {
     // Punch arc — Minecraft-ish diagonal swing
     if (this.swing > 0) {
       const s = this.swing;
-      const e = Math.sin(s * Math.PI);
-      rotX += -0.9 * e;
-      rotY += -0.55 * e;
-      rotZ += 0.35 * e;
-      posY += 0.08 * e;
-      posX += 0.06 * e;
-      posZ += -0.12 * e;
+      const e = Math.sin(s * Math.PI) * this.swingAmp;
+      rotX += -1.15 * e;
+      rotY += -0.72 * e;
+      rotZ += 0.48 * e;
+      posY += 0.1 * e;
+      posX += 0.1 * e;
+      posZ += -0.18 * e;
+    }
+
+    // Eat — lift toward the camera / mouth
+    if (this.eatT > 0) {
+      const e = Math.sin(this.eatT * Math.PI);
+      const snap = this.eatT > 0.45 && this.eatT < 0.7 ? 0.06 : 0;
+      rotX += -1.35 * e;
+      rotY += 0.35 * e;
+      rotZ += -0.2 * e;
+      posY += 0.28 * e;
+      posX += -0.2 * e;
+      posZ += 0.12 * e + snap;
     }
 
     this.armPivot.position.set(posX, posY, posZ);

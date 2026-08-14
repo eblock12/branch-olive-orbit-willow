@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isPlant, isTorch, type BlockId } from "./blocks";
+import { Block, BLOCKS, isPlant, isTorch, isDoor, isLadder, type BlockId } from "./blocks";
 import {
   CRAFTABLE_RECIPES,
   ITEM_DEFS,
@@ -11,6 +11,7 @@ import {
   itemMaxStack,
   mineTimeWithTool,
   placeableBlock,
+  armorInfo,
 } from "./items";
 
 export const MAX_HEALTH = 20;
@@ -29,6 +30,8 @@ export function mineTime(id: number, toolId?: ItemId | null): number {
 /** Item dropped when block is broken (null = nothing) */
 export function blockDrop(id: number): ItemId | null {
   if (isPlant(id) && !isTorch(id)) return id as BlockId;
+  if (isDoor(id)) return Block.DOOR;
+  if (isLadder(id)) return Block.LADDER;
   switch (id) {
     case Block.GRASS:
     case Block.SNOW_GRASS:
@@ -52,6 +55,12 @@ export function blockDrop(id: number): ItemId | null {
     case Block.TORCH_NZ:
     case Block.TORCH_PZ:
       return Block.TORCH;
+    case Block.LADDER:
+    case Block.LADDER_NX:
+    case Block.LADDER_PX:
+    case Block.LADDER_NZ:
+    case Block.LADDER_PZ:
+      return Block.LADDER;
     case Block.DIRT:
     case Block.SAND:
     case Block.WOOD:
@@ -82,6 +91,8 @@ export class SurvivalState {
   wasOnGround = true;
 
   slots: HotbarSlot[] = Array.from({ length: INV_SIZE }, () => null);
+  /** head, chest, legs, feet */
+  armor: HotbarSlot[] = [null, null, null, null];
   selected = 0;
   /** Stack held on the inventory cursor (furnace / craft). */
   cursor: ItemStack | null = null;
@@ -94,6 +105,8 @@ export class SurvivalState {
   madePick = false;
   madeFurnace = false;
   smeltedIron = false;
+  madeBow = false;
+  madeArmor = false;
   /** Debug: craft without consuming / requiring inputs */
   freeCraft = false;
   bedSpawn: { x: number; y: number; z: number } | null = null;
@@ -206,6 +219,8 @@ export class SurvivalState {
     this.craftedFirst = true;
     if (out.id === Block.FURNACE) this.madeFurnace = true;
     if (ITEM_DEFS[out.id]?.tool === "pickaxe") this.madePick = true;
+    if (out.id === Item.BOW) this.madeBow = true;
+    if (ITEM_DEFS[out.id]?.armor) this.madeArmor = true;
     return true;
   }
 
@@ -343,13 +358,60 @@ export class SurvivalState {
 
   damage(amount: number): boolean {
     if (this.dead || this.invuln > 0 || amount <= 0) return false;
-    this.health = Math.max(0, this.health - amount);
+    let dmg = amount;
+    if (amount < 18) {
+      const pts = this.armorPoints();
+      if (pts > 0) {
+        dmg = Math.max(1, Math.round(amount * (1 - Math.min(0.55, pts * 0.07))));
+        this.wearArmor(1);
+      }
+    }
+    this.health = Math.max(0, this.health - dmg);
     this.invuln = 0.6;
     if (this.health <= 0) {
       this.dead = true;
       this.health = 0;
     }
     return true;
+  }
+
+  armorPoints(): number {
+    let n = 0;
+    for (const s of this.armor) {
+      if (!s) continue;
+      n += armorInfo(s.id)?.points ?? 0;
+    }
+    return n;
+  }
+
+  equipSelectedArmor(): boolean {
+    const s = this.slots[this.selected];
+    if (!s) return false;
+    const info = armorInfo(s.id);
+    if (!info) return false;
+    const worn = this.armor[info.slotIndex] ?? null;
+    const piece: ItemStack = {
+      id: s.id,
+      count: 1,
+      durability: s.durability ?? ITEM_DEFS[s.id]?.maxDurability,
+    };
+    s.count--;
+    if (s.count <= 0) this.slots[this.selected] = null;
+    this.armor[info.slotIndex] = piece;
+    if (worn) this.addItem(worn.id, worn.count, worn.durability);
+    this.madeArmor = true;
+    return true;
+  }
+
+  private wearArmor(amount: number): void {
+    const worn: number[] = [];
+    for (let i = 0; i < 4; i++) if (this.armor[i]) worn.push(i);
+    if (worn.length === 0) return;
+    const i = worn[(Math.random() * worn.length) | 0]!;
+    const s = this.armor[i]!;
+    const maxD = ITEM_DEFS[s.id]?.maxDurability ?? 40;
+    s.durability = (s.durability ?? maxD) - amount;
+    if (s.durability <= 0) this.armor[i] = null;
   }
 
   heal(amount: number): void {
@@ -451,6 +513,24 @@ export class SurvivalState {
       return true;
     }
     return false;
+  }
+
+  /** Empty inventory + cursor. Returns every stack that was held. */
+  dumpInventory(): ItemStack[] {
+    const out: ItemStack[] = [];
+    for (let i = 0; i < INV_SIZE; i++) {
+      const s = this.slots[i];
+      if (s && s.count > 0) out.push({ ...s });
+      this.slots[i] = null;
+    }
+    if (this.cursor && this.cursor.count > 0) out.push({ ...this.cursor });
+    this.cursor = null;
+    for (let i = 0; i < 4; i++) {
+      const s = this.armor[i];
+      if (s && s.count > 0) out.push({ ...s });
+      this.armor[i] = null;
+    }
+    return out;
   }
 
   respawn(): void {

@@ -40,10 +40,17 @@ const DEFAULT_HUD: HudSnapshot = {
   dayPhase: 0.2,
   isDay: true,
   biome: "Plains",
+  seed: 0,
   health: 20,
   maxHealth: 20,
   hunger: 20,
   maxHunger: 20,
+  armor: 0,
+  air: 5,
+  maxAir: 5,
+  submerged: false,
+  eatJuice: 0,
+  swingJuice: 0,
   inventory: Array.from({ length: 9 }, () => null),
   selectedSlot: 0,
   mineProgress: 0,
@@ -153,7 +160,12 @@ function FurnaceSlot({
         e.preventDefault();
         onClick(e.shiftKey);
       }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+      }}
       className="flex flex-col items-center gap-1"
+      style={{ touchAction: "manipulation" }}
     >
       <span className="text-[10px] uppercase tracking-wide text-subtle">
         {label}
@@ -204,11 +216,16 @@ function SlotCell({
         e.preventDefault();
         onClick(e.shiftKey);
       }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+      }}
       className={`relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors ${
         active
           ? "border-accent bg-elevated ring-1 ring-accent/40"
           : "border-border bg-bg/60 hover:bg-elevated"
       }`}
+      style={{ touchAction: "manipulation" }}
       title={name}
       aria-label={name}
     >
@@ -297,6 +314,8 @@ function GameShell() {
   const engineRef = useRef<GameEngine | null>(null);
   const [hud, setHud] = useState<HudSnapshot>(DEFAULT_HUD);
   const [ready, setReady] = useState(false);
+  const [worldKey, setWorldKey] = useState(0);
+  const [confirmNew, setConfirmNew] = useState(false);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   /** Short landscape + touch only — phones held sideways; not tablets/desktop. */
   const [phoneLandscape, setPhoneLandscape] = useState(false);
@@ -323,7 +342,11 @@ function GameShell() {
     if (!hud.furnaceOpen && !hud.craftingOpen && !hud.chestOpen && !hud.cursor) return;
     const move = (e: PointerEvent) => setPointer({ x: e.clientX, y: e.clientY });
     window.addEventListener("pointermove", move);
-    return () => window.removeEventListener("pointermove", move);
+    window.addEventListener("pointerdown", move);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerdown", move);
+    };
   }, [hud.furnaceOpen, hud.craftingOpen, hud.chestOpen, hud.cursor]);
 
   const selectedItemId = hud.inventory[hud.selectedSlot]?.id ?? 0;
@@ -366,9 +389,10 @@ function GameShell() {
       engine?.dispose();
       engineRef.current = null;
     };
-  }, []);
+  }, [worldKey]);
 
   const onPlay = useCallback(() => {
+    setConfirmNew(false);
     engineRef.current?.requestPlay();
   }, []);
 
@@ -407,6 +431,18 @@ function GameShell() {
   const onToggleFreeCraft = useCallback(() => {
     engineRef.current?.toggleFreeCraft();
   }, []);
+
+  const onNewWorld = useCallback(() => {
+    if (!confirmNew) {
+      setConfirmNew(true);
+      return;
+    }
+    engineRef.current?.abandonSave();
+    setConfirmNew(false);
+    setReady(false);
+    setHud(DEFAULT_HUD);
+    setWorldKey((k) => k + 1);
+  }, [confirmNew]);
 
 
   const onStickDown = (e: React.PointerEvent) => {
@@ -461,6 +497,23 @@ function GameShell() {
         style={{ touchAction: "none" }}
       />
 
+      {ready && hud.playing && hud.eatJuice > 0.02 && (
+        <div
+          className="pointer-events-none absolute inset-0 z-[8]"
+          style={{
+            background: `radial-gradient(circle at 50% 62%, rgba(255,196,120,${0.22 * hud.eatJuice}) 0%, transparent 55%)`,
+          }}
+        />
+      )}
+      {ready && hud.playing && hud.swingJuice > 0.04 && (
+        <div
+          className="pointer-events-none absolute inset-0 z-[8]"
+          style={{
+            background: `linear-gradient(${118 + hud.swingJuice * 20}deg, transparent 42%, rgba(255,255,255,${0.14 * hud.swingJuice}) 50%, transparent 58%)`,
+          }}
+        />
+      )}
+
       {hud.playing && (
         <div
           className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2"
@@ -508,7 +561,7 @@ function GameShell() {
             >
               {hud.fps > 0 ? `${hud.fps} fps` : "—"} ·{" "}
               {Math.floor(hud.pos.x)}, {Math.floor(hud.pos.y)},{" "}
-              {Math.floor(hud.pos.z)}
+              {Math.floor(hud.pos.z)} · seed {hud.seed}
             </p>
             <p
               className={`mt-0.5 font-mono tabular-nums text-subtle ${
@@ -609,17 +662,38 @@ function GameShell() {
                   Craft {hud.freeCraft ? "ON" : "OFF"} F4
                 </button>
               )}
+              {!lsTouch && (
+                <button
+                  type="button"
+                  onClick={onNewWorld}
+                  className={`pointer-events-auto mt-1 w-full rounded-md border px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                    confirmNew
+                      ? "border-red-400/70 bg-red-500/20 text-fg"
+                      : "border-border bg-bg/70 text-muted hover:bg-bg hover:text-fg"
+                  }`}
+                  title="Erase the save and generate a new seed"
+                >
+                  {confirmNew ? "Erase world?" : "New World"}
+                </button>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {ready && (
+      {ready &&
+        (hud.playing || hud.craftingOpen || hud.furnaceOpen || hud.chestOpen) &&
+        !(
+          hud.isTouch &&
+          (hud.craftingOpen || hud.furnaceOpen || hud.chestOpen)
+        ) && (
         <div
-          className={`absolute bottom-0 left-0 right-0 z-50 flex flex-col items-center ${
+          className={`pointer-events-none absolute bottom-0 left-0 right-0 z-40 flex flex-col items-center ${
             lsTouch
-              ? "gap-1 px-2 py-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pl-[max(6.75rem,env(safe-area-inset-left))] pr-[max(6.75rem,env(safe-area-inset-right))]"
-              : "gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+              ? "gap-1 px-2 py-1 pb-[max(0.35rem,env(safe-area-inset-bottom))]"
+              : hud.isTouch
+                ? "gap-1 px-2 pt-1 pb-[max(0.4rem,env(safe-area-inset-bottom))]"
+                : "gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
           }`}
         >
           {/* Health + hunger */}
@@ -658,6 +732,35 @@ function GameShell() {
                 })}
               </div>
             </div>
+            {hud.armor > 0 && (
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span
+                  className={`shrink-0 font-medium uppercase tracking-wide text-subtle ${
+                    lsTouch ? "w-8 text-[9px]" : "w-12 text-[10px]"
+                  }`}
+                >
+                  {lsTouch ? "Ar" : "Armor"}
+                </span>
+                <div className="flex flex-1 gap-0.5">
+                  {Array.from({ length: 7 }, (_, i) => {
+                    const fill = Math.max(0, Math.min(1, hud.armor - i));
+                    return (
+                      <div
+                        key={`a${i}`}
+                        className={`flex-1 overflow-hidden rounded-sm bg-bg/80 ring-1 ring-border ${
+                          lsTouch ? "h-2" : "h-2.5"
+                        }`}
+                      >
+                        <div
+                          className="h-full bg-stone-400 transition-[width] duration-150"
+                          style={{ width: `${fill * 100}%` }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className="flex min-w-0 flex-1 items-center gap-1.5">
               <span
                 className={`shrink-0 font-medium uppercase tracking-wide text-subtle ${
@@ -686,6 +789,43 @@ function GameShell() {
                 })}
               </div>
             </div>
+            {(hud.submerged || hud.air < hud.maxAir - 0.04) && (
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span
+                  className={`shrink-0 font-medium uppercase tracking-wide text-subtle ${
+                    lsTouch ? "w-8 text-[9px]" : "w-12 text-[10px]"
+                  }`}
+                >
+                  {lsTouch ? "O2" : "Air"}
+                </span>
+                <div className="flex flex-1 items-center gap-0.5">
+                  {Array.from({ length: 10 }, (_, i) => {
+                    const fill = Math.max(0, Math.min(1, hud.air * 2 - i));
+                    const low = hud.air < 2;
+                    return (
+                      <div
+                        key={`o${i}`}
+                        className={`flex-1 aspect-square max-h-3 overflow-hidden rounded-full bg-bg/70 ring-1 ring-sky-300/30 ${
+                          lsTouch ? "h-2" : "h-2.5"
+                        } ${low && fill > 0 ? "animate-pulse" : ""}`}
+                      >
+                        <div
+                          className="h-full rounded-full bg-sky-300"
+                          style={{
+                            width: `${fill * 100}%`,
+                            opacity: 0.35 + fill * 0.65,
+                            boxShadow:
+                              fill > 0
+                                ? "inset -2px -2px 0 rgba(255,255,255,0.45)"
+                                : undefined,
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {hud.mineProgress > 0 && !lsTouch && (
               <div className="h-1 overflow-hidden rounded-full bg-bg/80 ring-1 ring-border">
                 <div
@@ -705,10 +845,10 @@ function GameShell() {
           )}
 
           <div
-            className={`relative flex flex-wrap items-center justify-center backdrop-blur-sm ${
-              lsTouch
-                ? "gap-1 rounded-xl border border-border bg-surface/90 p-1"
-                : "gap-1.5 rounded-2xl border border-border bg-surface/90 p-2"
+            className={`relative flex w-full max-w-[22.5rem] flex-nowrap items-center justify-center backdrop-blur-sm ${
+              hud.isTouch
+                ? "gap-0.5 rounded-xl border border-border bg-surface/90 p-1"
+                : "max-w-md gap-1.5 rounded-2xl border border-border bg-surface/90 p-2"
             }`}
           >
             {selectFlash && (
@@ -744,13 +884,19 @@ function GameShell() {
                     setPointer({ x: e.clientX, y: e.clientY });
                     onSelect(i, e.shiftKey);
                   }}
-                  className={`relative flex items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors duration-150 ${
-                    lsTouch ? "h-9 w-9" : "h-11 w-11"
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.stopPropagation();
+                    setPointer({ x: e.clientX, y: e.clientY });
+                  }}
+                  className={`pointer-events-auto relative flex aspect-square min-w-0 items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors duration-150 ${
+                    hud.isTouch ? "h-8 flex-1 max-w-9" : "h-11 w-11"
                   } ${
                     active
                       ? "border-accent bg-elevated ring-1 ring-accent/40"
                       : "border-border bg-bg/60 hover:bg-elevated"
                   }`}
+                  style={{ touchAction: "manipulation" }}
                   aria-label={name ?? `Empty ${i + 1}`}
                   title={name ? `${i + 1}: ${name}` : `${i + 1}: empty`}
                 >
@@ -764,7 +910,7 @@ function GameShell() {
                   ) : (
                     <span className="block h-full w-full rounded-sm bg-bg/40" />
                   )}
-                  {!lsTouch && (
+                  {!hud.isTouch && (
                     <span className="absolute bottom-0.5 left-1 font-mono text-[9px] text-subtle">
                       {i + 1}
                     </span>
@@ -772,8 +918,8 @@ function GameShell() {
                   {slot && slot.count > 1 ? (
                     <span
                       className={`absolute font-mono font-semibold text-fg ${
-                        lsTouch
-                          ? "bottom-0 right-0.5 text-[9px]"
+                        hud.isTouch
+                          ? "bottom-0 right-0.5 text-[8px]"
                           : "bottom-0.5 right-0.5 text-[10px]"
                       }`}
                     >
@@ -809,13 +955,17 @@ function GameShell() {
 
       {/* Inventory + crafting */}
       {ready && hud.craftingOpen && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
+        <div className={`pointer-events-none absolute inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 ${
+          hud.isTouch ? "pb-[max(1rem,env(safe-area-inset-bottom))]" : "pb-36"
+        }`}>
           <div className="pointer-events-auto flex max-h-[min(82vh,720px)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-xl backdrop-blur-sm">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold text-fg">Inventory</h2>
                 <p className="text-xs text-muted">
-                  {hud.freeCraft
+                  {hud.isTouch
+                    ? "Tap a slot to pick up or place"
+                    : hud.freeCraft
                     ? "Free craft ON — recipes ignore ingredients"
                     : "Click to move · Shift-click hotbar ↔ pack"}
                 </p>
@@ -902,7 +1052,9 @@ function GameShell() {
       )}
 
       {ready && hud.furnaceOpen && hud.furnace && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
+        <div className={`pointer-events-none absolute inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 ${
+          hud.isTouch ? "pb-[max(1rem,env(safe-area-inset-bottom))]" : "pb-36"
+        }`}>
           <div className="pointer-events-auto w-full max-w-md overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
@@ -982,7 +1134,9 @@ function GameShell() {
       )}
 
       {ready && hud.chestOpen && hud.chest && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
+        <div className={`pointer-events-none absolute inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 ${
+          hud.isTouch ? "pb-[max(1rem,env(safe-area-inset-bottom))]" : "pb-36"
+        }`}>
           <div className="pointer-events-auto w-full max-w-xl overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-xl backdrop-blur-sm">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
@@ -1026,7 +1180,7 @@ function GameShell() {
 
       {ready && hud.cursor && (
         <div
-          className="pointer-events-none fixed z-[60]"
+          className="pointer-events-none fixed z-[90]"
           style={{ left: pointer.x + 12, top: pointer.y + 12 }}
         >
           <div className="relative flex h-10 w-10 items-center justify-center rounded-md border border-border bg-surface/95 shadow-lg">
@@ -1045,14 +1199,14 @@ function GameShell() {
         </div>
       )}
 
-      {ready && hud.isTouch && hud.playing && (
+      {ready && hud.isTouch && hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && (
         <>
           <div
             ref={stickRef}
             className={
               lsTouch
-                ? "absolute bottom-[max(0.4rem,env(safe-area-inset-bottom))] left-[max(0.4rem,env(safe-area-inset-left))] z-30 h-[5.5rem] w-[5.5rem] rounded-full border border-border bg-surface/45 backdrop-blur-sm"
-                : "absolute bottom-28 left-6 z-30 h-28 w-28 rounded-full border border-border bg-surface/50 backdrop-blur-sm"
+                ? "absolute bottom-[max(0.45rem,env(safe-area-inset-bottom))] left-[max(0.4rem,env(safe-area-inset-left))] z-[55] h-[5.5rem] w-[5.5rem] rounded-full border border-border bg-surface/45 backdrop-blur-sm"
+                : "absolute bottom-[10rem] left-3 z-[55] h-24 w-24 rounded-full border border-border bg-surface/50 backdrop-blur-sm"
             }
             onPointerDown={onStickDown}
             onPointerMove={onStickMove}
@@ -1071,20 +1225,26 @@ function GameShell() {
           <div
             className={
               lsTouch
-                ? "absolute bottom-[max(0.4rem,env(safe-area-inset-bottom))] right-[max(0.4rem,env(safe-area-inset-right))] z-30 flex flex-row items-end gap-1.5"
-                : "absolute bottom-28 right-4 z-30 flex flex-col gap-2"
+                ? "absolute bottom-[max(0.45rem,env(safe-area-inset-bottom))] right-[max(0.4rem,env(safe-area-inset-right))] z-[55] flex flex-row items-end gap-1.5"
+                : "absolute bottom-[10rem] right-3 z-[55] flex flex-col gap-2"
             }
           >
-            {lsTouch && (
+            {hud.isTouch && (
               <button
                 type="button"
-                className="h-11 w-11 rounded-full border border-border bg-surface/80 text-[10px] font-medium text-fg backdrop-blur-sm active:scale-95"
+                className={
+                  lsTouch
+                    ? "h-11 w-11 rounded-full border border-border bg-surface/80 text-[10px] font-medium text-fg backdrop-blur-sm active:scale-95"
+                    : "h-14 w-14 rounded-full border border-border bg-surface/80 text-xs font-medium text-fg backdrop-blur-sm active:scale-95"
+                }
+                style={{ touchAction: "manipulation" }}
                 onPointerDown={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   engineRef.current?.setCraftingOpen(true);
                 }}
               >
-                Craft
+                Inv
               </button>
             )}
             <button
@@ -1135,14 +1295,14 @@ function GameShell() {
 
       
       {ready && hud.dead && (
-        <div className="absolute inset-0 z-45 flex items-center justify-center bg-bg/70 p-6 backdrop-blur-sm">
+        <div className="absolute inset-0 z-[80] flex items-center justify-center bg-bg/70 p-6 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-3xl border border-border bg-surface p-8 text-center shadow-2xl">
             <p className="text-xs font-medium uppercase tracking-[0.2em] text-rose-400">
               You died
             </p>
             <h2 className="mt-2 text-2xl font-semibold text-fg">Game over</h2>
             <p className="mt-3 text-sm text-muted">
-              You keep your items. Hunger resets to half.
+              Your items are at your corpse. Hunger resets to half.
             </p>
             <button
               type="button"
@@ -1156,8 +1316,8 @@ function GameShell() {
       )}
 
       {ready && !hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && !hud.dead && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-bg/55 p-6 backdrop-blur-[2px]">
-          <div className="w-full max-w-md rounded-3xl border border-border bg-surface p-8 shadow-2xl shadow-black/40">
+        <div className="absolute inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-bg/55 p-4 backdrop-blur-[2px] sm:p-6">
+          <div className="my-auto w-full max-w-md rounded-3xl border border-border bg-surface p-6 shadow-2xl shadow-black/40 sm:p-8">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-subtle">
               Survival mode
             </p>
@@ -1191,6 +1351,17 @@ function GameShell() {
               className="mt-7 w-full rounded-xl bg-accent px-4 py-3.5 text-sm font-semibold text-accent-fg transition-transform duration-150 hover:brightness-105 active:scale-[0.98]"
             >
               {hud.isTouch ? "Tap to play" : "Click to play"}
+            </button>
+            <button
+              type="button"
+              onClick={onNewWorld}
+              className={`mt-2 w-full rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors ${
+                confirmNew
+                  ? "border-red-400/60 bg-red-500/15 text-fg hover:bg-red-500/25"
+                  : "border-border bg-bg/40 text-muted hover:bg-bg/70 hover:text-fg"
+              }`}
+            >
+              {confirmNew ? "Really erase this world?" : "New World"}
             </button>
           </div>
         </div>

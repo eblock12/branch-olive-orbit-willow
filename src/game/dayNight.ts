@@ -384,6 +384,15 @@ export class DayNightCycle {
     this.time = CYCLE_LENGTH_SEC * 0.04;
   }
 
+  getTime(): number {
+    return this.time;
+  }
+
+  setTime(t: number): void {
+    const len = CYCLE_LENGTH_SEC;
+    this.time = ((t % len) + len) % len;
+  }
+
   /** True when currently day-ish (for debug toggle). */
   get isDaytime(): boolean {
     return this.sample.dayFactor > 0.45;

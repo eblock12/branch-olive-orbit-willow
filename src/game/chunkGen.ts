@@ -1,6 +1,6 @@
 import { Block, isSolid } from "./blocks";
 import { fbm2, shouldPlaceTree, shouldPlaceCactus } from "./noise";
-import { sampleBiome, Biome, type BiomeId } from "./biomes";
+import { sampleBiome, terrainInfluence, Biome, type BiomeId } from "./biomes";
 import { shouldCarveCave, shouldFloodCave } from "./caves";
 import { placeStructuresInChunk } from "./structures";
 import { placePlantsInChunk } from "./plants";
@@ -213,45 +213,77 @@ export function generateChunkBlocks(
     const ridged = 1 - Math.abs(ridge * 2 - 1);
     const ridgedPeak = Math.pow(ridged, 1.35);
 
+    const heightHint =
+      SEA_LEVEL +
+      (biome.continental - 0.45) * 22 +
+      (macro - 0.5) * 28 +
+      (hills - 0.45) * 18;
+    const inf = terrainInfluence(
+      biome.temperature,
+      biome.moisture,
+      biome.continental,
+      heightHint,
+      SEA_LEVEL,
+    );
+
+    const relief =
+      1.12 +
+      inf.mountain * 0.78 +
+      inf.snow * 0.18 -
+      inf.ocean * 0.55 -
+      inf.beach * 0.5 -
+      inf.swamp * 0.65;
+    const bias =
+      inf.mountain * 14 +
+      inf.snow * 5 +
+      inf.desert * -2 +
+      inf.swamp * -3 +
+      inf.beach * -2 +
+      inf.ocean * -14;
+
     let height =
       SEA_LEVEL +
-      biome.heightBias +
-      (continental - 0.45) * 22 * biome.relief +
-      (macro - 0.5) * 28 * biome.relief +
-      (hills - 0.45) * 18 * biome.relief +
-      (detail - 0.5) * 5 * biome.relief +
-      (warped - 0.5) * 10 * biome.relief;
+      bias +
+      (continental - 0.45) * 22 * relief +
+      (macro - 0.5) * 28 * relief +
+      (hills - 0.45) * 18 * relief +
+      (detail - 0.5) * 5 * relief +
+      (warped - 0.5) * 10 * relief;
 
-    if (biome.id === Biome.MOUNTAINS) {
-      height += ridgedPeak * 48 + ridge * 18 + macro * 12;
-      // Occasional spires
-      height += Math.pow(ridged, 3.2) * 22;
-    } else if (biome.id === Biome.SNOW) {
-      height += ridgedPeak * 22 + hills * 8;
-    } else if (biome.id === Biome.DESERT) {
-      // Rolling dunes
-      height +=
-        Math.sin(wx * 0.09 + warpX * 6) * 3.5 +
+    // Peak extras fade with mountain weight — no more sliced ridgelines
+    height +=
+      inf.mountain *
+      (ridgedPeak * 48 + ridge * 18 + macro * 12 + Math.pow(ridged, 3.2) * 22);
+    height += inf.snow * (1 - inf.mountain * 0.55) * (ridgedPeak * 22 + hills * 8);
+    height +=
+      inf.desert *
+      (Math.sin(wx * 0.09 + warpX * 6) * 3.5 +
         Math.sin(wz * 0.07 + warpZ * 5) * 2.8 +
-        ridged * 4;
-    } else if (biome.id === Biome.SWAMP) {
-      height = SEA_LEVEL - 2 + hills * 3.5 + detail * 1.5 + (macro - 0.5) * 2;
-    } else if (biome.id === Biome.OCEAN) {
-      // Deep trenches + seamounts
-      height =
-        SEA_LEVEL -
-        14 -
-        macro * 22 -
-        hills * 12 -
-        ridgedPeak * 18 -
-        detail * 4;
-      height += Math.pow(1 - ridged, 2) * 6; // abyssal flats
-    } else if (biome.id === Biome.BEACH) {
-      height = SEA_LEVEL + (hills - 0.4) * 4 + detail * 1.5;
-    } else if (biome.id === Biome.FOREST || biome.id === Biome.PLAINS) {
-      // Rolling countryside with occasional high ground
-      height += ridgedPeak * 6 * biome.relief;
-    }
+        ridged * 4);
+    // Gentle countryside folds where mountains haven't taken over
+    height +=
+      (1 - inf.ocean) *
+      (1 - inf.beach) *
+      (1 - inf.swamp) *
+      (1 - inf.mountain) *
+      ridgedPeak *
+      6;
+
+    const swampH = SEA_LEVEL - 2 + hills * 3.5 + detail * 1.5 + (macro - 0.5) * 2;
+    height = height * (1 - inf.swamp) + swampH * inf.swamp;
+
+    const beachH = SEA_LEVEL + (hills - 0.4) * 4 + detail * 1.5;
+    height = height * (1 - inf.beach) + beachH * inf.beach;
+
+    const oceanH =
+      SEA_LEVEL -
+      14 -
+      macro * 22 -
+      hills * 12 -
+      ridgedPeak * 18 -
+      detail * 4 +
+      Math.pow(1 - ridged, 2) * 6;
+    height = height * (1 - inf.ocean) + oceanH * inf.ocean;
 
     height = Math.floor(height);
     // Leave headroom for trees / player

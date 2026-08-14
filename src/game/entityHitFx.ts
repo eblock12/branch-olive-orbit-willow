@@ -82,3 +82,44 @@ export function integrateKnockback(
   const k = Math.exp(-damp * dt);
   return { kbX: kbX * k, kbZ: kbZ * k };
 }
+
+export const DEATH_FLOP = 0.45;
+export const DEATH_HOLD = 2;
+export const DEATH_POP = 0.22;
+export const DEATH_DUR = DEATH_FLOP + DEATH_HOLD + DEATH_POP;
+
+export type DeathAnim = {
+  t: number;
+  sign: number;
+};
+
+export function beginDeath(fromX: number, fromZ: number, x: number, z: number): DeathAnim {
+  const side = (x - fromX) * 0.31 + (z - fromZ);
+  return { t: DEATH_DUR, sign: side >= 0 ? 1 : -1 };
+}
+
+/** Flop onto the side, lie still, then squash for the smoke pop. */
+export function applyDeathPose(
+  mesh: THREE.Group,
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  height: number,
+  death: DeathAnim,
+  baseScale = 1,
+): number {
+  const elapsed = DEATH_DUR - Math.max(0, death.t);
+  const flopU = Math.min(1, elapsed / DEATH_FLOP);
+  const ease = flopU * flopU * (3 - 2 * flopU);
+  const tilt = ease * (Math.PI * 0.52);
+  mesh.rotation.order = "YXZ";
+  mesh.rotation.y = yaw;
+  mesh.rotation.x = ease * 0.2;
+  mesh.rotation.z = death.sign * tilt;
+  const lift = Math.sin(tilt) * Math.min(height, 1.5) * 0.3;
+  mesh.position.set(x, y + lift, z);
+  const pop = death.t < DEATH_POP ? 1 - death.t / DEATH_POP : 0;
+  mesh.scale.setScalar(baseScale * (1 - pop * pop * 0.94));
+  return elapsed / DEATH_DUR;
+}

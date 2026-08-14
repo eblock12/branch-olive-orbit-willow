@@ -57,6 +57,14 @@ export const Block = {
   TORCH_PX: 51,
   TORCH_NZ: 52,
   TORCH_PZ: 53,
+  /** Inventory / recipe item — never stored in the world */
+  DOOR: 54,
+  /** Inventory item — world uses LADDER_NX…PZ */
+  LADDER: 71,
+  LADDER_NX: 72,
+  LADDER_PX: 73,
+  LADDER_NZ: 74,
+  LADDER_PZ: 75,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
@@ -353,6 +361,54 @@ export const BLOCKS: Record<number, BlockDef> = {
     tiles: [47, 47, 48],
     color: "#b04048",
   },
+  [Block.DOOR]: {
+    id: Block.DOOR,
+    name: "Door",
+    solid: false,
+    transparent: true,
+    tiles: [49, 49, 49],
+    color: "#8a6238",
+  },
+  [Block.LADDER]: {
+    id: Block.LADDER,
+    name: "Ladder",
+    solid: false,
+    transparent: true,
+    tiles: [50, 50, 50],
+    color: "#7a5430",
+  },
+  [Block.LADDER_NX]: {
+    id: Block.LADDER_NX,
+    name: "Ladder",
+    solid: false,
+    transparent: true,
+    tiles: [50, 50, 50],
+    color: "#7a5430",
+  },
+  [Block.LADDER_PX]: {
+    id: Block.LADDER_PX,
+    name: "Ladder",
+    solid: false,
+    transparent: true,
+    tiles: [50, 50, 50],
+    color: "#7a5430",
+  },
+  [Block.LADDER_NZ]: {
+    id: Block.LADDER_NZ,
+    name: "Ladder",
+    solid: false,
+    transparent: true,
+    tiles: [50, 50, 50],
+    color: "#7a5430",
+  },
+  [Block.LADDER_PZ]: {
+    id: Block.LADDER_PZ,
+    name: "Ladder",
+    solid: false,
+    transparent: true,
+    tiles: [50, 50, 50],
+    color: "#7a5430",
+  },
 };
 
 /** Hotbar / creative placeables (includes a selection of flora) */
@@ -390,7 +446,126 @@ export const PLACEABLE: BlockId[] = [
   Block.FURNACE,
   Block.CHEST,
   Block.BED,
+  Block.DOOR,
+  Block.LADDER,
 ];
+
+/** Packed door cells in the world: 55–70 (facing + upper + open). */
+export const DOOR_LO = 55;
+export const DOOR_HI = 70;
+
+/** facing: 0=-X 1=+X 2=-Z 3=+Z */
+export function doorId(facing: number, upper: boolean, open: boolean): number {
+  return DOOR_LO + (facing & 3) + (upper ? 4 : 0) + (open ? 8 : 0);
+}
+
+export function isDoor(id: number): boolean {
+  return (id >= DOOR_LO && id <= DOOR_HI) || id === Block.DOOR;
+}
+
+export function isDoorCell(id: number): boolean {
+  return id >= DOOR_LO && id <= DOOR_HI;
+}
+
+export function doorFacing(id: number): number {
+  return (id - DOOR_LO) & 3;
+}
+
+export function doorIsUpper(id: number): boolean {
+  return ((id - DOOR_LO) & 4) !== 0;
+}
+
+export function doorIsOpen(id: number): boolean {
+  return ((id - DOOR_LO) & 8) !== 0;
+}
+
+export function doorToggle(id: number): number {
+  return isDoorCell(id) ? id ^ 8 : id;
+}
+
+export function doorMateId(id: number): number {
+  return isDoorCell(id) ? id ^ 4 : id;
+}
+
+/** Closed door's slab face, or the swung face when open. */
+export function doorPlane(id: number): 0 | 1 | 2 | 3 {
+  const f = doorFacing(id);
+  if (!doorIsOpen(id)) return f as 0 | 1 | 2 | 3;
+  return ([2, 3, 1, 0] as const)[f]!;
+}
+
+export function doorFacingFromLook(lx: number, lz: number): number {
+  if (Math.abs(lx) >= Math.abs(lz)) return lx >= 0 ? 1 : 0;
+  return lz >= 0 ? 3 : 2;
+}
+
+export function isLadder(id: number): boolean {
+  return (
+    id === Block.LADDER ||
+    id === Block.LADDER_NX ||
+    id === Block.LADDER_PX ||
+    id === Block.LADDER_NZ ||
+    id === Block.LADDER_PZ
+  );
+}
+
+export function isLadderCell(id: number): boolean {
+  return (
+    id === Block.LADDER_NX ||
+    id === Block.LADDER_PX ||
+    id === Block.LADDER_NZ ||
+    id === Block.LADDER_PZ
+  );
+}
+
+export function ladderAttachDir(id: number): [number, number, number] {
+  switch (id) {
+    case Block.LADDER_NX:
+      return [-1, 0, 0];
+    case Block.LADDER_PX:
+      return [1, 0, 0];
+    case Block.LADDER_NZ:
+      return [0, 0, -1];
+    case Block.LADDER_PZ:
+      return [0, 0, 1];
+    default:
+      return [0, 0, 0];
+  }
+}
+
+export function ladderIdFromHitFace(
+  nx: number,
+  ny: number,
+  nz: number,
+): number | null {
+  if (ny !== 0) return null;
+  if (nx === 1) return Block.LADDER_NX;
+  if (nx === -1) return Block.LADDER_PX;
+  if (nz === 1) return Block.LADDER_NZ;
+  if (nz === -1) return Block.LADDER_PZ;
+  return null;
+}
+
+export function canSupportLadder(id: number): boolean {
+  if (isDoor(id) || isLadder(id) || isTorch(id)) return false;
+  if (!isSolid(id) || isPlant(id) || isWater(id)) return false;
+  if (id === Block.LEAVES || id === Block.ICE || id === Block.CACTUS) return false;
+  return true;
+}
+
+function registerDoorCells(): void {
+  for (let i = DOOR_LO; i <= DOOR_HI; i++) {
+    BLOCKS[i] = {
+      id: i as BlockId,
+      name: "Door",
+      solid: !doorIsOpen(i),
+      transparent: true,
+      tiles: [doorIsUpper(i) ? 51 : 49, 49, doorIsUpper(i) ? 51 : 49],
+      color: "#8a6238",
+    };
+  }
+}
+registerDoorCells();
 
 export function isSolid(id: number): boolean {
   const def = BLOCKS[id];
@@ -456,6 +631,7 @@ export function lightEmission(id: number): number {
 export function blocksLight(id: number): boolean {
   if (id === Block.AIR || isWater(id) || isPlant(id)) return false;
   if (id === Block.LEAVES || id === Block.ICE) return false;
+  if (isDoor(id) || isLadder(id)) return false;
   return isSolid(id);
 }
 
@@ -494,6 +670,7 @@ export function torchAttachDir(id: number): [number, number, number] {
 
 export function canSupportTorch(id: number): boolean {
   if (!isSolid(id) || isPlant(id) || isWater(id) || isTorch(id)) return false;
+  if (isDoor(id) || isLadder(id)) return false;
   if (id === Block.LEAVES || id === Block.ICE || id === Block.CACTUS) return false;
   return true;
 }
@@ -557,6 +734,6 @@ export function isMineable(id: number): boolean {
   if (id === 0) return false; // air
   if (isWater(id)) return false;
   if (id === Block.BEDROCK) return true; // targetable but unbreakable via mineTime
-  if (isPlant(id)) return true;
+  if (isPlant(id) || isDoor(id) || isLadder(id)) return true;
   return isSolid(id);
 }

@@ -25,6 +25,10 @@ import {
   knockbackImpulse,
   integrateKnockback,
   HURT_FLASH,
+  beginDeath,
+  applyDeathPose,
+  DEATH_DUR,
+  type DeathAnim,
 } from "./entityHitFx";
 
 export type PassiveKind = "pig" | "cow" | "sheep" | "chicken" | "rabbit";
@@ -381,6 +385,7 @@ class PassiveMob {
   yaw = Math.random() * Math.PI * 2;
   hp: number;
   alive = true;
+  dying: DeathAnim | null = null;
   private targetX = 0;
   private targetZ = 0;
   private state: "wander" | "idle" | "flee" | "look" = "wander";
@@ -442,7 +447,7 @@ class PassiveMob {
   }
 
   hit(fromX: number, fromZ: number, damage: number): "hurt" | "dead" | "miss" {
-    if (!this.alive) return "miss";
+    if (!this.alive || this.dying) return "miss";
     this.hp -= damage;
     this.hurtFlash = HURT_FLASH;
     this.state = "flee";
@@ -459,8 +464,7 @@ class PassiveMob {
     this.targetZ = this.z + (dz / len) * 12;
     if (this.hp <= 0) {
       this.alive = false;
-      this.mesh.visible = false;
-      this.shadow.visible = false;
+      this.dying = beginDeath(fromX, fromZ, this.x, this.z);
       return "dead";
     }
     return "hurt";
@@ -814,6 +818,44 @@ class PassiveMob {
     );
   }
 
+  tickCorpse(dt: number, world: World): boolean {
+    if (!this.dying) return true;
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt);
+    const box = this.bodyBox();
+    const g = applyEntityGravity(world, box, this.vy, dt, 28, 42);
+    this.vy = g.vy;
+    this.onGround = g.onGround;
+    const kb = integrateKnockback(world, box, this.kbX, this.kbZ, dt, this.onGround);
+    this.x = box.x;
+    this.y = box.y;
+    this.z = box.z;
+    this.kbX = kb.kbX;
+    this.kbZ = kb.kbZ;
+    const s = this.def.scale;
+    applyDeathPose(
+      this.mesh,
+      this.x,
+      this.y,
+      this.z,
+      this.yaw,
+      this.def.height * s,
+      this.dying,
+      s,
+    );
+    tickHurtOverlay(this.hurtOverlay, this.hurtFlash);
+    updateEntityShadow(
+      this.shadow,
+      this.x,
+      this.y,
+      this.z,
+      this.def.shadowR * (1.05 + (1 - this.dying.t / DEATH_DUR) * 0.4),
+      0,
+      this.yaw,
+    );
+    this.dying.t -= dt;
+    return this.dying.t <= 0;
+  }
+
   dispose(): void {
     disposeHurtOverlay(this.hurtOverlay);
     disposeEntityShadow(this.shadow);
@@ -827,6 +869,7 @@ export class PassiveMobSystem {
   private list: PassiveMob[] = [];
   private spawnTimer = 2;
   private killed = 0;
+  private deaths: { x: number; y: number; z: number }[] = [];
 
   get count(): number {
     return this.list.filter((m) => m.alive).length;
@@ -866,6 +909,14 @@ export class PassiveMobSystem {
     for (let i = this.list.length - 1; i >= 0; i--) {
       const m = this.list[i]!;
       if (!m.alive) {
+        if (m.dying && !m.tickCorpse(dt, world)) continue;
+        if (m.dying) {
+          this.deaths.push({
+            x: m.x,
+            y: m.y + m.def.height * m.def.scale * 0.4,
+            z: m.z,
+          });
+        }
         this.group.remove(m.mesh);
         this.group.remove(m.shadow);
         m.dispose();
@@ -921,6 +972,12 @@ export class PassiveMobSystem {
     if (result === "miss") return null;
     if (result === "dead") this.killed++;
     return { outcome: result, kind: best.kind, x: best.x, y: best.y, z: best.z };
+  }
+
+  consumeDeaths(): { x: number; y: number; z: number }[] {
+    const out = this.deaths;
+    this.deaths = [];
+    return out;
   }
 
   dispose(): void {

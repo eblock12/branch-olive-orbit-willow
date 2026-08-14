@@ -27,6 +27,10 @@ import {
   knockbackImpulse,
   integrateKnockback,
   HURT_FLASH,
+  beginDeath,
+  applyDeathPose,
+  DEATH_DUR,
+  type DeathAnim,
 } from "./entityHitFx";
 
 export type CaterpillarMood = "wander" | "eat" | "flee" | "tease" | "steal";
@@ -159,6 +163,7 @@ export class NaughtyCaterpillar {
   mood: CaterpillarMood = "wander";
   hp = 3;
   alive = true;
+  dying: DeathAnim | null = null;
   private bob = Math.random() * Math.PI * 2;
   private stateT = 0;
   private nextThink = 0;
@@ -199,7 +204,7 @@ export class NaughtyCaterpillar {
   }
 
   hit(fromX: number, fromZ: number, damage = 1): "hurt" | "dead" | "miss" {
-    if (!this.alive) return "miss";
+    if (!this.alive || this.dying) return "miss";
     this.hp -= damage;
     this.hurtFlash = HURT_FLASH;
     this.mood = "flee";
@@ -216,8 +221,7 @@ export class NaughtyCaterpillar {
     this.targetZ = this.z + (dz / len) * 10;
     if (this.hp <= 0) {
       this.alive = false;
-      this.mesh.visible = false;
-      this.shadow.visible = false;
+      this.dying = beginDeath(fromX, fromZ, this.x, this.z);
       return "dead";
     }
     return "hurt";
@@ -630,6 +634,42 @@ export class NaughtyCaterpillar {
     );
   }
 
+  tickCorpse(dt: number, world: World): boolean {
+    if (!this.dying) return true;
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt);
+    const box: EntityBox = {
+      x: this.x,
+      y: this.y,
+      z: this.z,
+      halfW: 0.32,
+      height: 0.42,
+    };
+    const g = applyEntityGravity(world, box, this.vy, dt, 28, 40);
+    this.vy = g.vy;
+    this.onGround = g.onGround;
+    const kb = integrateKnockback(world, box, this.kbX, this.kbZ, dt, this.onGround);
+    this.x = box.x;
+    this.y = box.y;
+    this.z = box.z;
+    this.kbX = kb.kbX;
+    this.kbZ = kb.kbZ;
+    applyDeathPose(this.mesh, this.x, this.y, this.z, this.yaw, 0.42, this.dying);
+    tickHurtOverlay(this.hurtOverlay, this.hurtFlash);
+    updateEntityShadow(
+      this.shadow,
+      this.x,
+      this.y,
+      this.z,
+      SHADOW_RADIUS * (1.1 + (1 - this.dying.t / DEATH_DUR) * 0.35),
+      0,
+      this.yaw,
+      1.15,
+      0.95,
+    );
+    this.dying.t -= dt;
+    return this.dying.t <= 0;
+  }
+
   dispose(): void {
     disposeHurtOverlay(this.hurtOverlay);
     disposeEntityShadow(this.shadow);
@@ -642,6 +682,7 @@ export class CaterpillarSystem {
   private list: NaughtyCaterpillar[] = [];
   private spawnTimer = 2;
   private killed = 0;
+  private deaths: { x: number; y: number; z: number }[] = [];
 
   constructor() {
     this.mats = createCaterpillarMaterials();
@@ -687,6 +728,10 @@ export class CaterpillarSystem {
     for (let i = this.list.length - 1; i >= 0; i--) {
       const c = this.list[i]!;
       if (!c.alive) {
+        if (c.dying && !c.tickCorpse(dt, world)) continue;
+        if (c.dying) {
+          this.deaths.push({ x: c.x, y: c.y + 0.2, z: c.z });
+        }
         this.group.remove(c.mesh);
         this.group.remove(c.shadow);
         c.dispose();
@@ -742,6 +787,12 @@ export class CaterpillarSystem {
     if (result === "miss") return null;
     if (result === "dead") this.killed++;
     return { outcome: result, kind: "caterpillar", x: best.x, y: best.y, z: best.z };
+  }
+
+  consumeDeaths(): { x: number; y: number; z: number }[] {
+    const out = this.deaths;
+    this.deaths = [];
+    return out;
   }
 
   dispose(): void {

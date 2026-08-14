@@ -5,7 +5,7 @@ import type { Player } from "./player";
 
 const MAX = 280;
 
-type Kind = "dust" | "firefly" | "leaf" | "bubble" | "star" | "ember";
+type Kind = "dust" | "firefly" | "leaf" | "bubble" | "star" | "ember" | "spark" | "smoke";
 
 type P = {
   active: boolean;
@@ -33,8 +33,11 @@ type P = {
 export class AmbianceFX {
   readonly group = new THREE.Group();
   private pts: THREE.Points;
+  private sparkPts: THREE.Points;
   private pos: Float32Array;
   private col: Float32Array;
+  private sparkPos: Float32Array;
+  private sparkCol: Float32Array;
   private list: P[] = [];
   private free: number[] = [];
   private spawnAcc = 0;
@@ -66,6 +69,27 @@ export class AmbianceFX {
     this.pts.frustumCulled = false;
     this.pts.renderOrder = 3;
     this.group.add(this.pts);
+
+    this.sparkPos = new Float32Array(MAX * 3);
+    this.sparkCol = new Float32Array(MAX * 3);
+    const sgeo = new THREE.BufferGeometry();
+    sgeo.setAttribute("position", new THREE.BufferAttribute(this.sparkPos, 3));
+    sgeo.setAttribute("color", new THREE.BufferAttribute(this.sparkCol, 3));
+    sgeo.setDrawRange(0, 0);
+    const smat = new THREE.PointsMaterial({
+      size: 0.055,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      sizeAttenuation: true,
+      fog: true,
+      blending: THREE.AdditiveBlending,
+      opacity: 0.95,
+    });
+    this.sparkPts = new THREE.Points(sgeo, smat);
+    this.sparkPts.frustumCulled = false;
+    this.sparkPts.renderOrder = 4;
+    this.group.add(this.sparkPts);
 
     for (let i = 0; i < MAX; i++) {
       this.list.push({
@@ -232,6 +256,7 @@ export class AmbianceFX {
     }
 
     let live = 0;
+    let sparkLive = 0;
     for (let i = 0; i < MAX; i++) {
       const p = this.list[i]!;
       if (!p.active) continue;
@@ -297,6 +322,27 @@ export class AmbianceFX {
         this.advect(p, 2.0, 0.1, 0.7, dt);
         p.vy -= 0.2 * dt;
         p.a = 0.25 * Math.min(1, p.life) * night;
+      } else if (p.kind === "spark") {
+        this.advect(p, 1.55, 0.32, 0.55, dt);
+        p.vy -= 0.48 * dt;
+        p.vy += Math.sin(p.phase * 2.4 + p.life * 3.1) * dt * 0.28;
+        p.vx += Math.sin(p.phase * 1.6 + p.y) * dt * 0.12;
+        p.vz += Math.cos(p.phase * 1.3 + p.x) * dt * 0.12;
+        p.vx *= 1 - 0.28 * dt;
+        p.vz *= 1 - 0.28 * dt;
+        const fade = Math.min(1, p.life * 1.6, (p.maxLife - p.life) * 2.4);
+        const cool = Math.min(1, p.life / Math.max(0.2, p.maxLife));
+        p.r = 1;
+        p.g = 0.22 + 0.5 * cool;
+        p.b = 0.02 + 0.06 * cool;
+        p.a = (0.95 + 0.2 * cool) * fade;
+      } else if (p.kind === "smoke") {
+        this.advect(p, 0.55, 0.22, 0.15, dt);
+        p.vy += 0.55 * dt;
+        p.vx *= 1 - 0.55 * dt;
+        p.vz *= 1 - 0.55 * dt;
+        const fade = Math.min(1, p.life * 2.4, (p.maxLife - p.life) * 3.5);
+        p.a = 0.55 * fade;
       }
 
       p.x += p.vx * dt;
@@ -312,15 +358,18 @@ export class AmbianceFX {
         continue;
       }
 
-      const o = live * 3;
-      this.pos[o] = p.x;
-      this.pos[o + 1] = p.y;
-      this.pos[o + 2] = p.z;
       const a = Math.max(0, Math.min(1, p.a));
-      this.col[o] = p.r * a;
-      this.col[o + 1] = p.g * a;
-      this.col[o + 2] = p.b * a;
-      live++;
+      const destPos = p.kind === "spark" ? this.sparkPos : this.pos;
+      const destCol = p.kind === "spark" ? this.sparkCol : this.col;
+      const di = (p.kind === "spark" ? sparkLive : live) * 3;
+      destPos[di] = p.x;
+      destPos[di + 1] = p.y;
+      destPos[di + 2] = p.z;
+      destCol[di] = p.r * a;
+      destCol[di + 1] = p.g * a;
+      destCol[di + 2] = p.b * a;
+      if (p.kind === "spark") sparkLive++;
+      else live++;
     }
 
     this.pts.geometry.setDrawRange(0, live);
@@ -329,6 +378,14 @@ export class AmbianceFX {
     ).needsUpdate = true;
     (
       this.pts.geometry.getAttribute("color") as THREE.BufferAttribute
+    ).needsUpdate = true;
+
+    this.sparkPts.geometry.setDrawRange(0, sparkLive);
+    (
+      this.sparkPts.geometry.getAttribute("position") as THREE.BufferAttribute
+    ).needsUpdate = true;
+    (
+      this.sparkPts.geometry.getAttribute("color") as THREE.BufferAttribute
     ).needsUpdate = true;
 
     const mat = this.pts.material as THREE.PointsMaterial;
@@ -356,6 +413,47 @@ export class AmbianceFX {
       p.vz += Math.cos(t * 1.3 + p.x) * turb * spd * dt * 0.55;
       p.vy += Math.sin(t * 2.1) * turb * spd * dt * 0.2;
     }
+  }
+
+  burstSmoke(x: number, y: number, z: number, size = 1): void {
+    const n = Math.min(22, 12 + Math.floor(size * 6));
+    for (let i = 0; i < n; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const sp = 0.35 + Math.random() * 1.35 * size;
+      const grey = 0.42 + Math.random() * 0.28;
+      this.spawn("smoke", {
+        x: x + (Math.random() - 0.5) * 0.35 * size,
+        y: y + 0.08 + Math.random() * 0.25,
+        z: z + (Math.random() - 0.5) * 0.35 * size,
+        vx: Math.cos(ang) * sp + this.windX * 0.2,
+        vy: 0.55 + Math.random() * 1.4,
+        vz: Math.sin(ang) * sp + this.windZ * 0.2,
+        life: 0.4 + Math.random() * 0.55,
+        r: grey,
+        g: grey * 0.97,
+        b: grey * 0.94,
+        a: 0.55,
+      });
+    }
+  }
+
+  emitTorchSpark(x: number, y: number, z: number, intensity = 0.85): void {
+    const pop = Math.random() < 0.12;
+    const life = pop ? 1.35 + Math.random() * 0.7 : 0.85 + Math.random() * 0.95;
+    const up = pop ? 0.45 + Math.random() * 0.4 : 0.18 + Math.random() * 0.38;
+    this.spawn("spark", {
+      x: x + (Math.random() - 0.5) * 0.05,
+      y: y + (Math.random() - 0.5) * 0.03,
+      z: z + (Math.random() - 0.5) * 0.05,
+      vx: this.windX * 0.45 + (Math.random() - 0.5) * 0.22,
+      vy: up,
+      vz: this.windZ * 0.45 + (Math.random() - 0.5) * 0.22,
+      life,
+      r: 1,
+      g: 0.48 + Math.random() * 0.22,
+      b: 0.03 + Math.random() * 0.05,
+      a: 1 * (0.75 + 0.25 * intensity),
+    });
   }
 
   burstDust(x: number, y: number, z: number, strength = 1): void {
@@ -450,5 +548,7 @@ export class AmbianceFX {
   dispose(): void {
     this.pts.geometry.dispose();
     (this.pts.material as THREE.Material).dispose();
+    this.sparkPts.geometry.dispose();
+    (this.sparkPts.material as THREE.Material).dispose();
   }
 }

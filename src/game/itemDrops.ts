@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { BLOCKS, Block, isPlant, isWater, waterLevel, type BlockId } from "./blocks";
-import { isBlockItem, itemColor, type ItemId } from "./items";
+import { isBlockItem, itemColor, type ItemId, type ItemStack } from "./items";
 import { tileUVs } from "./textures";
 import type { World } from "./world";
 import type { Player } from "./player";
@@ -20,9 +20,12 @@ const PICKUP_RADIUS = 1.35;
 const MAGNET_RADIUS = 2.2;
 const MAX_DROPS = 96;
 const MAX_LIFE = 120; // seconds before despawn
+const DEATH_LIFE = 600; // 10 min — enough to walk back from spawn
 
 type Drop = {
   id: ItemId;
+  count: number;
+  durability?: number;
   mesh: THREE.Mesh;
   x: number;
   y: number;
@@ -33,6 +36,7 @@ type Drop = {
   age: number;
   spin: number;
   bob: number;
+  maxAge: number;
 };
 
 function buildDropGeometry(blockId: BlockId): THREE.BufferGeometry {
@@ -166,6 +170,7 @@ export class ItemDropSystem {
     const speed = 1.2 + Math.random() * 1.6;
     const drop: Drop = {
       id,
+      count: 1,
       mesh,
       x: x + 0.5 + (Math.random() - 0.5) * 0.15,
       y: y + 0.55,
@@ -176,6 +181,7 @@ export class ItemDropSystem {
       age: 0,
       spin: (Math.random() - 0.5) * 4,
       bob: Math.random() * Math.PI * 2,
+      maxAge: MAX_LIFE,
     };
     mesh.position.set(drop.x, drop.y, drop.z);
     mesh.rotation.set(
@@ -217,6 +223,7 @@ export class ItemDropSystem {
     mesh.receiveShadow = false;
     const drop: Drop = {
       id,
+      count: 1,
       mesh,
       x,
       y,
@@ -227,6 +234,61 @@ export class ItemDropSystem {
       age: -0.45,
       spin: (Math.random() - 0.5) * 5,
       bob: Math.random() * Math.PI * 2,
+      maxAge: MAX_LIFE,
+    };
+    mesh.position.set(x, y, z);
+    mesh.rotation.set(
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+    );
+    this.group.add(mesh);
+    this.drops.push(drop);
+  }
+
+  /** Scatter a full stack (death loot). Longer life, delayed magnet. */
+  spawnStack(
+    stack: ItemStack,
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vy: number,
+    vz: number,
+  ): void {
+    if (!stack.id || stack.count <= 0) return;
+    if (isBlockItem(stack.id) && !BLOCKS[stack.id]) return;
+    while (this.drops.length >= MAX_DROPS) this.removeAt(0);
+    let mesh: THREE.Mesh;
+    if (isBlockItem(stack.id)) {
+      mesh = new THREE.Mesh(this.geoFor(stack.id as BlockId), this.material);
+    } else {
+      let mat = this.itemMatCache.get(stack.id);
+      if (!mat) {
+        mat = new THREE.MeshLambertMaterial({
+          color: new THREE.Color(itemColor(stack.id)),
+        });
+        this.itemMatCache.set(stack.id, mat);
+      }
+      mesh = new THREE.Mesh(this.nuggetGeo, mat);
+    }
+    mesh.castShadow = true;
+    mesh.receiveShadow = false;
+    const drop: Drop = {
+      id: stack.id,
+      count: stack.count,
+      durability: stack.durability,
+      mesh,
+      x,
+      y,
+      z,
+      vx,
+      vy,
+      vz,
+      age: -1.4,
+      spin: (Math.random() - 0.5) * 6,
+      bob: Math.random() * Math.PI * 2,
+      maxAge: DEATH_LIFE,
     };
     mesh.position.set(x, y, z);
     mesh.rotation.set(
@@ -253,7 +315,7 @@ export class ItemDropSystem {
     dt: number,
     world: World,
     player: Player,
-    tryPickup: (id: ItemId) => boolean,
+    tryPickup: (id: ItemId, count: number, durability?: number) => number,
   ): ItemId[] {
     const picked: ItemId[] = [];
     const px = player.x;
@@ -263,7 +325,7 @@ export class ItemDropSystem {
     for (let i = this.drops.length - 1; i >= 0; i--) {
       const d = this.drops[i]!;
       d.age += dt;
-      if (d.age > MAX_LIFE) {
+      if (d.age > d.maxAge) {
         this.removeAt(i);
         continue;
       }
@@ -277,10 +339,14 @@ export class ItemDropSystem {
         const dz = pz - d.z;
         const dist = Math.hypot(dx, dy, dz);
         if (dist < PICKUP_RADIUS && dist > 1e-4) {
-          if (tryPickup(d.id)) {
-            picked.push(d.id);
-            this.removeAt(i);
-            continue;
+          const took = tryPickup(d.id, d.count, d.durability);
+          if (took > 0) {
+            d.count -= took;
+            if (d.count <= 0) {
+              picked.push(d.id);
+              this.removeAt(i);
+              continue;
+            }
           }
         } else if (dist < MAGNET_RADIUS && dist > 1e-4) {
           const pull = (inWater ? 4.5 : 10) * dt;

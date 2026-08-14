@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { Block, isPlant, isSolid, isWater, isSourceWater, isTorch, canSupportTorch, torchAttachDir, waterLevel, waterIdForLevel, lightEmission, blocksLight } from "./blocks";
-import { computeChunkLighting, applyBlockLightEdit } from "./lighting";
+import { Block, isPlant, isSolid, isWater, isSourceWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, canSupportTorch, canSupportLadder, torchAttachDir, ladderAttachDir, doorIsUpper, doorMateId, waterLevel, waterIdForLevel, lightEmission, blocksLight } from "./blocks";
+import { computeChunkLighting, applyBlockLightEdit, estimateColumnSky } from "./lighting";
 import {
   Chunk,
   CHUNK_HEIGHT,
@@ -17,6 +17,7 @@ import {
 import { sampleBiome, BIOME_LABEL, type BiomeId } from "./biomes";
 import { generateChunkBlocks } from "./chunkGen";
 import type { ChunkWorkerRequest, ChunkWorkerResponse } from "./chunkWorker";
+import { packEdit, unpackEdit } from "./save";
 
 type GenJob = { cx: number; cz: number; key: ChunkKey };
 
@@ -67,6 +68,9 @@ export class World {
   private remeshLater = new Set<Chunk>();
   private lightTouched = new Set<Chunk>();
   private chestIndex = new Map<string, { x: number; y: number; z: number }>();
+  /** Sparse player/sim edits applied on top of generated terrain */
+  private voxelEdits = new Map<ChunkKey, Map<number, number>>();
+  editsDirty = false;
 
   constructor(
     seed: number,
@@ -144,6 +148,7 @@ export class World {
 
     const chunk = new Chunk(cx, cz);
     chunk.applyBlocks(data.blocks);
+    this.applyEditsToChunk(chunk);
     this.indexChestsInChunk(chunk);
     chunk.targetLod = lodFromChunkDist(cx - this.lastPcx, cz - this.lastPcz);
     this.chunks.set(key, chunk);
@@ -191,6 +196,7 @@ export class World {
       if (this.chunks.has(job.key)) return;
       const chunk = new Chunk(job.cx, job.cz);
       chunk.applyBlocks(generateChunkBlocks(job.cx, job.cz, this.seed));
+      this.applyEditsToChunk(chunk);
       this.indexChestsInChunk(chunk);
       this.chunks.set(job.key, chunk);
       this.meshQueue.push(chunk);
@@ -228,6 +234,7 @@ export class World {
     this.genQueue = this.genQueue.filter((j) => j.key !== key);
     chunk = new Chunk(cx, cz);
     chunk.applyBlocks(generateChunkBlocks(cx, cz, this.seed));
+    this.applyEditsToChunk(chunk);
     this.indexChestsInChunk(chunk);
     chunk.targetLod = lodFromChunkDist(cx - this.lastPcx, cz - this.lastPcz);
     this.chunks.set(key, chunk);
@@ -257,9 +264,11 @@ export class World {
     if (wy < 0) return 0;
     const [cx, cz] = worldToChunk(wx, wz);
     const chunk = this.chunks.get(chunkKey(cx, cz));
-    if (!chunk || !chunk.skyLight) return 0;
+    // Unloaded ring is open sky — never a black well that infects the border.
+    if (!chunk) return 15;
     const lx = ((wx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
     const lz = ((wz % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    if (!chunk.skyLight) return estimateColumnSky(chunk, lx, wy, lz);
     return chunk.getSky(lx, wy, lz);
   }
 
@@ -426,6 +435,7 @@ export class World {
     if (existing === id) return true;
     if (existing === Block.BEDROCK && id === Block.AIR) return false;
     chunk.set(lx, wy, lz, id);
+    this.recordEdit(cx, cz, lx, wy, lz, id);
     chunk.targetLod = 0;
     this.noteChestCell(wx, wy, wz, existing, id);
 
@@ -506,6 +516,23 @@ export class World {
       (wx, wy, wz) => this.getSkyLight(wx, wy, wz),
       (wx, wy, wz) => this.getBlockLight(wx, wy, wz),
     );
+  }
+
+  /** Light existing neighbors before we sample their maps onto our faces. */
+  private ensureLitNeighbors(chunk: Chunk): void {
+    const selfUnlit = chunk.lightDirty || !chunk.skyLight;
+    for (const [dx, dz] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const n = this.chunks.get(chunkKey(chunk.cx + dx, chunk.cz + dz));
+      if (!n || (!n.lightDirty && n.skyLight)) continue;
+      this.relightChunk(n);
+      // They used this chunk's old/empty map — relight again once we fill it.
+      if (selfUnlit) n.lightDirty = true;
+    }
   }
 
   private scheduleWaterAround(wx: number, wy: number, wz: number): void {
@@ -761,10 +788,29 @@ export class World {
     out: BlockPop[],
   ): void {
     const id = this.getBlock(wx, wy, wz);
-    if (!isPlant(id)) return;
+    if (!isPlant(id) && !isLadderCell(id) && !isDoorCell(id)) return;
     if (isTorch(id)) {
       const [ax, ay, az] = torchAttachDir(id);
       if (canSupportTorch(this.getBlock(wx + ax, wy + ay, wz + az))) return;
+    } else if (isLadderCell(id)) {
+      const [ax, ay, az] = ladderAttachDir(id);
+      if (canSupportLadder(this.getBlock(wx + ax, wy + ay, wz + az))) return;
+    } else if (isDoorCell(id)) {
+      const mateY = wy + (doorIsUpper(id) ? -1 : 1);
+      const mate = this.getBlock(wx, mateY, wz);
+      const mateOk = mate === doorMateId(id);
+      if (doorIsUpper(id)) {
+        if (mateOk) return;
+      } else {
+        const below = this.getBlock(wx, wy - 1, wz);
+        const floorOk =
+          isSolid(below) && !isPlant(below) && !isDoor(below) && !isLadder(below);
+        if (mateOk && floorOk) return;
+      }
+      this.writeBlock(wx, wy, wz, Block.AIR, false);
+      if (isDoorCell(mate)) this.writeBlock(wx, mateY, wz, Block.AIR, false);
+      out.push({ x: wx, y: wy, z: wz, id: Block.DOOR });
+      return;
     } else {
       const below = this.getBlock(wx, wy - 1, wz);
       if (isSolid(below) && !isPlant(below)) return;
@@ -867,6 +913,121 @@ export class World {
     this.writeBlock(wx, wy, wz, this.grassKindFor(wx, wy, wz, src), false);
   }
 
+  /**
+   * Instant grow: dirt → grass, or burst plants on / around grass.
+   * Returns true if something changed (consume bone meal).
+   */
+  applyBoneMeal(wx: number, wy: number, wz: number): boolean {
+    const id = this.getBlock(wx, wy, wz);
+    if (id === Block.DIRT) {
+      if (!this.canGrassGrowOn(wx, wy, wz)) return false;
+      this.writeBlock(wx, wy, wz, this.grassKindFor(wx, wy, wz, Block.GRASS), true);
+      return true;
+    }
+    let gx = wx;
+    let gy = wy;
+    let gz = wz;
+    if (isPlant(id) && !isTorch(id)) {
+      gx = wx;
+      gy = wy - 1;
+      gz = wz;
+    }
+    const ground = this.getBlock(gx, gy, gz);
+    if (ground !== Block.GRASS && ground !== Block.SNOW_GRASS) return false;
+
+    const flowers = [
+      Block.SHORT_GRASS,
+      Block.SHORT_GRASS,
+      Block.FERN,
+      Block.POPPY,
+      Block.DANDELION,
+      Block.CORNFLOWER,
+      Block.ALLIUM,
+      Block.OXEYE_DAISY,
+      Block.TULIP_RED,
+      Block.TULIP_PINK,
+    ];
+    let grew = 0;
+    for (let i = 0; i < 14; i++) {
+      const dx = ((this.nextTickRand() % 7) - 3) | 0;
+      const dz = ((this.nextTickRand() % 7) - 3) | 0;
+      const tx = gx + dx;
+      const tz = gz + dz;
+      const ty = gy + ((this.nextTickRand() % 3) - 1);
+      const g = this.getBlock(tx, ty, tz);
+      if (g !== Block.GRASS && g !== Block.SNOW_GRASS && g !== Block.DIRT) continue;
+      if (g === Block.DIRT) {
+        if (this.canGrassGrowOn(tx, ty, tz)) {
+          this.writeBlock(tx, ty, tz, this.grassKindFor(tx, ty, tz, ground), true);
+          grew++;
+        }
+        continue;
+      }
+      const above = this.getBlock(tx, ty + 1, tz);
+      if (above !== Block.AIR) continue;
+      const plant = flowers[this.nextTickRand() % flowers.length]!;
+      this.writeBlock(tx, ty + 1, tz, plant, true);
+      grew++;
+    }
+    return grew > 0;
+  }
+
+  private recordEdit(
+    cx: number,
+    cz: number,
+    lx: number,
+    y: number,
+    lz: number,
+    id: number,
+  ): void {
+    const key = chunkKey(cx, cz);
+    let m = this.voxelEdits.get(key);
+    if (!m) {
+      m = new Map();
+      this.voxelEdits.set(key, m);
+    }
+    m.set(packEdit(lx, y, lz), id & 255);
+    this.editsDirty = true;
+  }
+
+  private applyEditsToChunk(chunk: Chunk): void {
+    const m = this.voxelEdits.get(chunkKey(chunk.cx, chunk.cz));
+    if (!m || m.size === 0) return;
+    for (const [k, id] of m) {
+      const { lx, y, lz } = unpackEdit(k);
+      if (y < 0 || y >= CHUNK_HEIGHT) continue;
+      chunk.set(lx, y, lz, id);
+    }
+    chunk.lightDirty = true;
+    chunk.dirty = true;
+  }
+
+  importEdits(data: Record<string, number[]>): void {
+    this.voxelEdits.clear();
+    for (const [key, flat] of Object.entries(data)) {
+      if (!flat || flat.length < 2) continue;
+      const m = new Map<number, number>();
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        m.set(flat[i]! | 0, flat[i + 1]! & 255);
+      }
+      this.voxelEdits.set(key as ChunkKey, m);
+    }
+    this.editsDirty = false;
+  }
+
+  exportEdits(): Record<string, number[]> {
+    const out: Record<string, number[]> = {};
+    for (const [key, m] of this.voxelEdits) {
+      if (m.size === 0) continue;
+      const flat: number[] = [];
+      for (const [k, id] of m) {
+        flat.push(k, id);
+      }
+      out[key] = flat;
+    }
+    return out;
+  }
+
   private remeshIfLoaded(cx: number, cz: number): void {
     const c = this.chunks.get(chunkKey(cx, cz));
     if (c) this.remeshChunk(c);
@@ -962,13 +1123,19 @@ export class World {
     for (let dz = -rSync; dz <= rSync; dz++) {
       for (let dx = -rSync; dx <= rSync; dx++) {
         if (dx * dx + dz * dz > rSync * rSync + 1) continue;
-        const cx = this.lastPcx + dx;
-        const cz = this.lastPcz + dz;
-        const chunk = this.generateSync(cx, cz);
-        if (chunk.dirty || !chunk.mesh) this.remeshChunk(chunk);
+        this.generateSync(this.lastPcx + dx, this.lastPcz + dz);
       }
     }
-    // Also mesh anything already generated
+    // Generate the ring first, then mesh — so lighting can read neighbors.
+    for (let dz = -rSync; dz <= rSync; dz++) {
+      for (let dx = -rSync; dx <= rSync; dx++) {
+        if (dx * dx + dz * dz > rSync * rSync + 1) continue;
+        const chunk = this.chunks.get(
+          chunkKey(this.lastPcx + dx, this.lastPcz + dz),
+        );
+        if (chunk && (chunk.dirty || !chunk.mesh)) this.remeshChunk(chunk);
+      }
+    }
     for (const chunk of this.chunks.values()) {
       if (chunk.dirty || !chunk.mesh) this.remeshChunk(chunk);
     }
@@ -1006,6 +1173,7 @@ export class World {
       chunk.targetLod = 0;
     }
 
+    this.ensureLitNeighbors(chunk);
     if (chunk.lightDirty || !chunk.skyLight) {
       this.relightChunk(chunk);
     }

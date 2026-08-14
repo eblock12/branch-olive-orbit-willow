@@ -26,6 +26,10 @@ import {
   knockbackImpulse,
   integrateKnockback,
   HURT_FLASH,
+  beginDeath,
+  applyDeathPose,
+  DEATH_DUR,
+  type DeathAnim,
 } from "./entityHitFx";
 
 /**
@@ -235,6 +239,7 @@ class Hostile {
   onGround = false;
   hp: number;
   alive = true;
+  dying: DeathAnim | null = null;
   attackCd = 0;
   hurtFlash = 0;
   climbHopT = 0;
@@ -273,7 +278,7 @@ class Hostile {
   }
 
   hit(fromX: number, fromZ: number, damage: number): "hurt" | "dead" | "miss" {
-    if (!this.alive) return "miss";
+    if (!this.alive || this.dying) return "miss";
     this.hp -= damage;
     this.hurtFlash = HURT_FLASH;
     const kb = knockbackImpulse(this.x, this.z, fromX, fromZ, 11.5);
@@ -283,6 +288,7 @@ class Hostile {
     this.onGround = false;
     if (this.hp <= 0) {
       this.alive = false;
+      this.dying = beginDeath(fromX, fromZ, this.x, this.z);
       return "dead";
     }
     return "hurt";
@@ -337,6 +343,7 @@ class Hostile {
       this.hp -= dt * (this.kind === "slender" ? 4 : 6);
       if (this.hp <= 0) {
         this.alive = false;
+        this.dying = beginDeath(this.x + 1, this.z, this.x, this.z);
         return null;
       }
     }
@@ -524,6 +531,50 @@ class Hostile {
     return hit;
   }
 
+  tickCorpse(dt: number, world: World): boolean {
+    if (!this.dying) return true;
+    this.hurtFlash = Math.max(0, this.hurtFlash - dt);
+    const box: EntityBox = {
+      x: this.x,
+      y: this.y,
+      z: this.z,
+      halfW: this.def.halfW,
+      height: this.def.height,
+    };
+    const g = applyEntityGravity(world, box, this.vy, dt, 28, 42);
+    this.vy = g.vy;
+    this.onGround = g.onGround;
+    const kb = integrateKnockback(world, box, this.kbX, this.kbZ, dt, this.onGround);
+    this.x = box.x;
+    this.y = box.y;
+    this.z = box.z;
+    this.kbX = kb.kbX;
+    this.kbZ = kb.kbZ;
+    applyDeathPose(
+      this.mesh,
+      this.x,
+      this.y,
+      this.z,
+      this.yaw,
+      this.def.height,
+      this.dying,
+    );
+    tickHurtOverlay(this.hurtOverlay, this.hurtFlash);
+    updateEntityShadow(
+      this.shadow,
+      this.x,
+      this.y,
+      this.z,
+      this.def.shadowR * (1 + (1 - this.dying.t / DEATH_DUR) * 0.35),
+      0,
+      this.yaw,
+      this.kind === "slender" ? 0.7 : 1.1,
+      this.kind === "slender" ? 0.55 : 0.95,
+    );
+    this.dying.t -= dt;
+    return this.dying.t <= 0;
+  }
+
   private wouldCollide(
     world: World,
     x: number,
@@ -602,6 +653,7 @@ export class HostileSystem {
   private spawnTimer = 3;
   private killed = 0;
   private lastDayFactor = 1;
+  private deaths: { x: number; y: number; z: number }[] = [];
 
   constructor() {
     this.mats = createMats();
@@ -646,6 +698,14 @@ export class HostileSystem {
     for (let i = this.list.length - 1; i >= 0; i--) {
       const h = this.list[i]!;
       if (!h.alive) {
+        if (h.dying && !h.tickCorpse(dt, world)) continue;
+        if (h.dying) {
+          this.deaths.push({
+            x: h.x,
+            y: h.y + h.def.height * 0.35,
+            z: h.z,
+          });
+        }
         this.group.remove(h.mesh);
         this.group.remove(h.shadow);
         h.dispose();
@@ -767,6 +827,12 @@ export class HostileSystem {
     if (r === "miss") return null;
     if (r === "dead") this.killed++;
     return { outcome: r, kind: best.kind, x: best.x, y: best.y, z: best.z };
+  }
+
+  consumeDeaths(): { x: number; y: number; z: number }[] {
+    const out = this.deaths;
+    this.deaths = [];
+    return out;
   }
 
   dispose(): void {

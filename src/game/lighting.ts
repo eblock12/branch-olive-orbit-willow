@@ -414,3 +414,25 @@ export function defaultSkyAt(wy: number): number {
   if (wy < 0) return 0;
   return 15;
 }
+
+/** Column-only sky (no horizontal flood). Used when a neighbor isn't lit yet. */
+export function estimateColumnSky(
+  chunk: Chunk,
+  lx: number,
+  y: number,
+  lz: number,
+): number {
+  if (y >= CHUNK_HEIGHT) return 15;
+  if (y < 0) return 0;
+  let s = 15;
+  for (let yy = CHUNK_HEIGHT - 1; yy >= y; yy--) {
+    const id = chunk.get(lx, yy, lz);
+    if (blocksLight(id)) {
+      s = 0;
+    } else if (yy > y && s > 0) {
+      s = Math.max(0, s - lightLoss(id));
+    }
+  }
+  if (blocksLight(chunk.get(lx, y, lz))) return 0;
+  return s;
+}

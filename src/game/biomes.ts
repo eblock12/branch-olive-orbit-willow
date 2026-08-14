@@ -31,6 +31,7 @@ export type BiomeSample = {
   temperature: number;
   /** 0 dry … 1 wet */
   moisture: number;
+  continental: number;
   /** Base continental height bias before local relief */
   heightBias: number;
   /** Multiplier on relief noise */
@@ -54,6 +55,63 @@ export function sampleClimate(
   // Continentalness: low = ocean basins, high = inland
   const continental = fbm2(wx * 0.0032, wz * 0.0032, seed + 400, 5, 2.0, 0.5);
   return { temperature, moisture, continental };
+}
+
+/** Hermite blend, 0 below e0 and 1 above e1. */
+export function smooth01(e0: number, e1: number, x: number): number {
+  if (e1 === e0) return x >= e1 ? 1 : 0;
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Soft climate weights for height blending (not the discrete paint biome). */
+export type TerrainInfluence = {
+  ocean: number;
+  beach: number;
+  mountain: number;
+  snow: number;
+  desert: number;
+  swamp: number;
+};
+
+export function terrainInfluence(
+  temperature: number,
+  moisture: number,
+  continental: number,
+  heightHint: number,
+  seaLevel: number,
+): TerrainInfluence {
+  const ocean = 1 - smooth01(0.26, 0.41, continental);
+  const nearCoast =
+    smooth01(0.26, 0.36, continental) * (1 - smooth01(0.40, 0.52, continental));
+  const lowLand = 1 - smooth01(seaLevel + 1, seaLevel + 8, heightHint);
+  const beach = Math.min(
+    1,
+    (1 - ocean) * nearCoast * lowLand +
+      ocean * smooth01(seaLevel - 5, seaLevel + 2, heightHint) * 0.4,
+  );
+
+  const inland = 1 - ocean;
+  const mountain =
+    inland *
+    smooth01(0.46, 0.76, continental) *
+    smooth01(seaLevel - 2, seaLevel + 18, heightHint);
+
+  const snow = inland * (1 - smooth01(0.26, 0.40, temperature));
+  const desert =
+    inland *
+    (1 - mountain * 0.7) *
+    smooth01(0.54, 0.68, temperature) *
+    (1 - smooth01(0.30, 0.44, moisture));
+  const swamp =
+    inland *
+    (1 - mountain) *
+    (1 - desert) *
+    smooth01(0.54, 0.70, moisture) *
+    (1 - smooth01(0.48, 0.62, continental)) *
+    (1 - smooth01(seaLevel + 2, seaLevel + 9, heightHint));
+
+  return { ocean, beach, mountain, snow, desert, swamp };
 }
 
 export function biomeFromClimate(
@@ -99,7 +157,7 @@ export function biomeFromClimate(
   return Biome.PLAINS;
 }
 
-export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "moisture"> {
+export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "moisture" | "continental"> {
   switch (id) {
     case Biome.OCEAN:
       return {
@@ -205,6 +263,7 @@ export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: numb
     ...params,
     temperature,
     moisture,
+    continental,
   };
 }
 
