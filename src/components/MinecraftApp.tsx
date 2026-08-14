@@ -55,6 +55,7 @@ const DEFAULT_HUD: HudSnapshot = {
   furnace: null,
   recipes: [],
   freeCraft: false,
+  cursor: null,
   tip: "Press E to craft",
 };
 
@@ -140,12 +141,15 @@ function FurnaceSlot({
   slot: HotbarSlot;
   atlasUrl: string;
   blockIcons: Record<number, string>;
-  onClick: () => void;
+  onClick: (shift: boolean) => void;
 }) {
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={(e) => {
+        e.preventDefault();
+        onClick(e.shiftKey);
+      }}
       className="flex flex-col items-center gap-1"
     >
       <span className="text-[10px] uppercase tracking-wide text-subtle">
@@ -237,11 +241,11 @@ function GameShell() {
     engineRef.current?.requestPlay();
   }, []);
 
-  const onSelect = useCallback((i: number) => {
+  const onSelect = useCallback((i: number, shift = false) => {
     const eng = engineRef.current;
     if (!eng) return;
-    eng.selectHotbar(i);
-    if (hud.furnaceOpen) eng.furnaceFromHotbar(i);
+    if (hud.furnaceOpen) eng.inventoryClickHotbar(i, shift);
+    else eng.selectHotbar(i);
   }, [hud.furnaceOpen]);
 
   const onCraft = useCallback((recipeId: string) => {
@@ -256,8 +260,8 @@ function GameShell() {
     engineRef.current?.closeFurnace();
   }, []);
 
-  const onFurnaceSlot = useCallback((slot: "input" | "fuel" | "output") => {
-    engineRef.current?.furnaceClickSlot(slot);
+  const onFurnaceSlot = useCallback((slot: "input" | "fuel" | "output", shift = false) => {
+    engineRef.current?.furnaceClickSlot(slot, shift);
   }, []);
 
   const onToggleDayNight = useCallback(() => {
@@ -573,7 +577,10 @@ function GameShell() {
                 <button
                   key={i}
                   type="button"
-                  onClick={() => onSelect(i)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onSelect(i, e.shiftKey);
+                  }}
                   className={`relative flex items-center justify-center rounded-lg border transition-colors duration-150 ${
                     lsTouch ? "h-9 w-9" : "h-11 w-11"
                   } ${
