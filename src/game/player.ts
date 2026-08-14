@@ -1,5 +1,5 @@
 import { World } from "./world";
-import { isSolid, isWater, isLadder } from "./blocks";
+import { isSolid, isWater, isLadder, cellCollidesAABB } from "./blocks";
 
 export const PLAYER_HEIGHT = 1.8;
 export const PLAYER_WIDTH = 0.6;
@@ -430,13 +430,14 @@ export class Player {
       } else {
         // Resolve to contact surface
         if (dy < 0) {
-          // Falling — snap feet to top of block below
-          const feet = this.y;
-          const top = Math.floor(feet + dy + 1e-6) + 1;
-          // Only snap if it doesn't embed us
-          if (!this.collides(world, this.x, top + 1e-4, this.z)) {
-            this.y = top + 1e-4;
+          let lo = this.y;
+          let hi = ny;
+          for (let k = 0; k < 10; k++) {
+            const mid = (lo + hi) * 0.5;
+            if (this.collides(world, this.x, mid, this.z)) hi = mid;
+            else lo = mid;
           }
+          this.y = lo;
           this.onGround = true;
         } else {
           // Ceiling — stop just below
@@ -528,7 +529,23 @@ export class Player {
     for (let y = minY; y <= maxY; y++) {
       for (let z = minZ; z <= maxZ; z++) {
         for (let x = minX; x <= maxX; x++) {
-          if (isSolid(world.getBlock(x, y, z))) return true;
+          const id = world.getBlock(x, y, z);
+          if (
+            cellCollidesAABB(
+              id,
+              x,
+              y,
+              z,
+              px - this.halfW + eps,
+              py + eps,
+              pz - this.halfW + eps,
+              px + this.halfW - eps,
+              py + this.height - eps,
+              pz + this.halfW - eps,
+            )
+          ) {
+            return true;
+          }
         }
       }
     }

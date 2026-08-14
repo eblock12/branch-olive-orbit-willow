@@ -42,12 +42,16 @@ export class GameAudio {
   private ambDuckUntil = 0;
 
   private sfxDry: GainNode | null = null;
+  /** Close / UI bus — no convolution (picks, clicks, menu) */
+  private sfxClose: GainNode | null = null;
   private verbEarly: ConvolverNode | null = null;
   private verbHall: ConvolverNode | null = null;
   private verbCanyon: ConvolverNode | null = null;
   private verbEarlyGain: GainNode | null = null;
   private verbHallGain: GainNode | null = null;
   private verbCanyonGain: GainNode | null = null;
+  private verbSend: GainNode | null = null;
+  private ambVerbSend: GainNode | null = null;
   private thunderVerbSend: GainNode | null = null;
 
   private windGain: GainNode | null = null;
@@ -201,31 +205,32 @@ export class GameAudio {
       const sky = Math.max(0, Math.min(1, opts.skyOpen ?? 1));
       const open = Math.max(0, Math.min(1, opts.spaceOpen ?? 0.5));
       const enclosed = 1 - sky;
-      // Huge cave: buried + lots of air around you
       const cave =
         enclosed *
         enclosed *
         Math.max(0, Math.min(1, (open - 0.38) / 0.42));
-      // Tight room / tunnel
       const room = enclosed * (1 - open) * (1 - cave);
-      const storm = Math.min(1, opts.rain * 0.7 + opts.windSpeed * 0.15);
+      const outdoor = sky > 0.65;
+      const send = outdoor ? 0 : 1;
+      this.verbSend?.gain.setTargetAtTime(send, now, outdoor ? 0.04 : 0.12);
+      this.ambVerbSend?.gain.setTargetAtTime(outdoor ? 0 : 0.03, now, 0.1);
 
       this.verbEarlyGain?.gain.setTargetAtTime(
-        0.016 + sky * 0.01 + room * 0.055 + cave * 0.04 + storm * 0.01,
+        outdoor ? 0 : 0.01 + room * 0.045 + cave * 0.03,
         now,
-        0.45,
+        outdoor ? 0.04 : 0.16,
       );
       this.verbHallGain?.gain.setTargetAtTime(
-        0.006 + room * 0.035 + cave * 0.09 + opts.rain * 0.012,
+        outdoor ? 0 : room * 0.028 + cave * 0.07,
         now,
-        0.45,
+        outdoor ? 0.04 : 0.16,
       );
       this.verbCanyonGain.gain.setTargetAtTime(
-        cave * cave * 0.14 + (cave > 0.55 ? 0.04 : 0),
+        outdoor ? 0 : cave * cave * 0.12 + (cave > 0.55 ? 0.025 : 0),
         now,
-        0.5,
+        outdoor ? 0.05 : 0.18,
       );
-      this.sfxDry.gain.setTargetAtTime(0.96 - cave * 0.08 - room * 0.04, now, 0.45);
+      this.sfxDry.gain.setTargetAtTime(outdoor ? 1 : 0.97 - cave * 0.08 - room * 0.04, now, 0.1);
     }
 
     if (!opts.playing) return;
@@ -399,6 +404,10 @@ export class GameAudio {
       this.sfx.connect(this.sfxDry);
       this.sfxDry.connect(this.master);
 
+      this.sfxClose = this.ctx.createGain();
+      this.sfxClose.gain.value = 0.8;
+      this.sfxClose.connect(this.master);
+
       this.buildLayeredReverb(this.ctx, this.sfx, this.master);
 
       // Ambience bed (rain / wind / day-night) → duck bus → master
@@ -410,9 +419,10 @@ export class GameAudio {
       this.ambDuck.connect(this.master);
       if (this.verbHall) {
         const ambSend = this.ctx.createGain();
-        ambSend.gain.value = 0.04;
+        ambSend.gain.value = 0;
         this.ambDuck.connect(ambSend);
         ambSend.connect(this.verbHall);
+        this.ambVerbSend = ambSend;
       }
 
       this.noiseBuf = this.makeNoise(1.5);
@@ -455,21 +465,24 @@ export class GameAudio {
     });
 
     const gEarly = ctx.createGain();
-    gEarly.gain.value = 0.02;
+    gEarly.gain.value = 0;
     const gHall = ctx.createGain();
-    gHall.gain.value = 0.008;
+    gHall.gain.value = 0;
     const gCanyon = ctx.createGain();
     gCanyon.gain.value = 0;
 
-    sfxIn.connect(early);
+    const send = ctx.createGain();
+    send.gain.value = 0;
+    sfxIn.connect(send);
+    send.connect(early);
     early.connect(gEarly);
     gEarly.connect(out);
 
-    sfxIn.connect(hall);
+    send.connect(hall);
     hall.connect(gHall);
     gHall.connect(out);
 
-    sfxIn.connect(canyon);
+    send.connect(canyon);
     canyon.connect(gCanyon);
     gCanyon.connect(out);
 
@@ -487,6 +500,7 @@ export class GameAudio {
     this.verbEarlyGain = gEarly;
     this.verbHallGain = gHall;
     this.verbCanyonGain = gCanyon;
+    this.verbSend = send;
     this.thunderVerbSend = thSend;
   }
 
@@ -1041,6 +1055,7 @@ export class GameAudio {
     detune = 0,
     world?: { x: number; y: number; z: number },
     delay = 0,
+    dry = false,
   ): void {
     if (!this.ctx || !this.sfx) return;
     const ctx = this.ctx;
@@ -1052,7 +1067,8 @@ export class GameAudio {
     const g = ctx.createGain();
     this.env(g, t0, peak, 0.01, duration);
     o.connect(g);
-    if (world) this.outSpatial(g, world.x, world.y, world.z);
+    if (dry && this.sfxClose) g.connect(this.sfxClose);
+    else if (world) this.outSpatial(g, world.x, world.y, world.z);
     else g.connect(this.sfx);
     o.start(t0);
     o.stop(t0 + duration + 0.05);
@@ -1066,6 +1082,7 @@ export class GameAudio {
     scale: readonly number[] = PENTATONIC_SEMITONES,
     octaves = 1,
     world?: { x: number; y: number; z: number },
+    dry = false,
   ): void {
     this.tone(
       scaleNoteHz(rootMidi, scale, octaves),
@@ -1074,6 +1091,8 @@ export class GameAudio {
       type,
       0,
       world,
+      0,
+      dry,
     );
   }
 
@@ -1547,16 +1566,20 @@ export class GameAudio {
   }
 
   private click(): void {
-    this.scaleTone(72, 0.035, 0.055, "square", PENTATONIC_SEMITONES, 1);
+    this.scaleTone(72, 0.035, 0.055, "square", PENTATONIC_SEMITONES, 1, undefined, true);
   }
 
   private pop(vol: number): void {
-    this.scaleTone(74, 0.07, 0.11 * vol, "sine", PENTATONIC_SEMITONES, 1);
+    this.scaleTone(74, 0.07, 0.11 * vol, "sine", PENTATONIC_SEMITONES, 1, undefined, true);
     this.tone(
       scaleNoteHz(74, PENTATONIC_SEMITONES, 0) * 1.5,
       0.05,
       0.04 * vol,
       "sine",
+      0,
+      undefined,
+      0,
+      true,
     );
   }
 
@@ -1612,22 +1635,32 @@ export function surfaceFromBlock(id: number): AudioSurface {
     case Block.SNOW_GRASS:
     case Block.SHORT_GRASS:
     case Block.LEAVES:
+    case Block.BIRCH_LEAVES:
+    case Block.SPRUCE_LEAVES:
+    case Block.VINE:
+    case Block.LILY_PAD:
       return "grass";
     case Block.DIRT:
+    case Block.CLAY:
       return "dirt";
     case Block.STONE:
     case Block.COBBLE:
+    case Block.GRAVEL:
     case Block.BEDROCK:
     case Block.COAL_ORE:
     case Block.IRON_ORE:
     case Block.FURNACE:
     case Block.FURNACE_LIT:
+    case Block.ARCANE:
       return "stone";
     case Block.SAND:
     case Block.SNOW:
       return "sand";
     case Block.WOOD:
+    case Block.BIRCH_WOOD:
+    case Block.SPRUCE_WOOD:
     case Block.PLANKS:
+    case Block.PUMPKIN:
     case Block.DOOR:
     case Block.LADDER:
       return "wood";

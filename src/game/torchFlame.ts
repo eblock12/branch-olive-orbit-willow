@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { ATLAS_TILES, TILE_SIZE } from "./blocks";
+import { blitArcaneEmissive } from "./textures";
 
 /** Atlas tile painted as the torch cross (see textures.ts). */
 const TORCH_TILE = 37;
@@ -30,6 +31,7 @@ export class TorchFlame {
   private next = new Uint8Array(FW * FH);
   private acc = 0;
   private seed = (Math.random() * 0xffffffff) >>> 0;
+  private pulseT = 0;
   /** 0..1 mean heat — used to sync point-light flicker. */
   intensity = 0.85;
 
@@ -57,6 +59,7 @@ export class TorchFlame {
     this.emissiveMap.colorSpace = THREE.SRGBColorSpace;
 
     for (let i = 0; i < 36; i++) this.step(0);
+    blitArcaneEmissive(this.emiCtx, 1);
     this.blit();
   }
 
@@ -72,6 +75,7 @@ export class TorchFlame {
 
   update(dt: number, windX = 0): void {
     this.acc += dt;
+    this.pulseT += dt;
     const step = 1 / STEP_HZ;
     let n = 0;
     while (this.acc >= step && n < 3) {
@@ -188,6 +192,8 @@ export class TorchFlame {
     }
     this.ctx.putImageData(this.tile, this.ox, this.oy);
     this.emiCtx.putImageData(this.emiTile, this.ox, this.oy);
+    const pulse = 0.72 + 0.28 * (0.5 + 0.5 * Math.sin(this.pulseT * 2.1));
+    blitArcaneEmissive(this.emiCtx, pulse);
     this.tex.needsUpdate = true;
     this.emissiveMap.needsUpdate = true;
   }

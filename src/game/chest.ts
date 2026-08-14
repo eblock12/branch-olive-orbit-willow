@@ -114,6 +114,8 @@ export class ChestSystem {
           { id: Item.ROTTEN_FLESH, lo: 1, hi: 3, w: 2 },
           { id: Item.BREAD, lo: 1, hi: 3, w: 2 },
           { id: Item.STONE_SWORD, lo: 1, hi: 1, w: 1 },
+          { id: Item.IRON_HELM, lo: 1, hi: 1, w: 1 },
+          { id: Item.IRON_BOOTS, lo: 1, hi: 1, w: 1 },
         ]
       : [
           { id: Block.PLANKS, lo: 4, hi: 16, w: 3 },

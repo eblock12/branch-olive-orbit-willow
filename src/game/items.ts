@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isPlant, isDoor, isLadder, type BlockId } from "./blocks";
+import { Block, BLOCKS, isPlant, isDoor, isLadder, isStair, isSlab, shapeMaterial, type BlockId } from "./blocks";
 
 /** Item IDs: 0–99 reserved for blocks; 100+ materials & tools */
 export const Item = {
@@ -41,6 +41,10 @@ export const Item = {
   LEATHER_LEGS: 136,
   LEATHER_BOOTS: 137,
   BONE_MEAL: 138,
+  IRON_HELM: 139,
+  IRON_CHEST: 140,
+  IRON_LEGS: 141,
+  IRON_BOOTS: 142,
 } as const;
 
 export type ItemId = number;
@@ -261,6 +265,38 @@ const TOOLS: ItemDef[] = [
     color: "#8a5a32",
   },
   {
+    id: Item.IRON_HELM,
+    name: "Iron Helmet",
+    maxStack: 1,
+    maxDurability: 140,
+    armor: { slot: "head", points: 2 },
+    color: "#c4c8d0",
+  },
+  {
+    id: Item.IRON_CHEST,
+    name: "Iron Chestplate",
+    maxStack: 1,
+    maxDurability: 200,
+    armor: { slot: "chest", points: 6 },
+    color: "#c4c8d0",
+  },
+  {
+    id: Item.IRON_LEGS,
+    name: "Iron Leggings",
+    maxStack: 1,
+    maxDurability: 185,
+    armor: { slot: "legs", points: 5 },
+    color: "#c4c8d0",
+  },
+  {
+    id: Item.IRON_BOOTS,
+    name: "Iron Boots",
+    maxStack: 1,
+    maxDurability: 160,
+    armor: { slot: "feet", points: 2 },
+    color: "#c4c8d0",
+  },
+  {
     id: Item.BONE_MEAL,
     name: "Bone Meal",
     maxStack: 64,
@@ -366,10 +402,15 @@ export function getTool(id: ItemId | null | undefined): {
 export function baseMineTime(blockId: number): number {
   if (isPlant(blockId)) return 0.05;
   if (isDoor(blockId) || isLadder(blockId)) return 0.4;
+  if (isStair(blockId) || isSlab(blockId)) {
+    return shapeMaterial(blockId) === Block.PLANKS ? 1.0 : 1.5;
+  }
   switch (blockId) {
     case Block.BEDROCK:
       return Infinity;
     case Block.LEAVES:
+    case Block.BIRCH_LEAVES:
+    case Block.SPRUCE_LEAVES:
       return 0.28;
     case Block.SNOW:
     case Block.SNOW_GRASS:
@@ -377,16 +418,25 @@ export function baseMineTime(blockId: number): number {
     case Block.DIRT:
     case Block.GRASS:
     case Block.SAND:
+    case Block.GRAVEL:
+    case Block.CLAY:
       return 0.55;
     case Block.CACTUS:
     case Block.ICE:
       return 0.55;
     case Block.WOOD:
+    case Block.BIRCH_WOOD:
+    case Block.SPRUCE_WOOD:
     case Block.PLANKS:
+    case Block.PLANKS_STAIR:
+    case Block.PLANKS_SLAB:
     case Block.CHEST:
     case Block.BED:
+    case Block.PUMPKIN:
       return 1.0;
     case Block.COBBLE:
+    case Block.COBBLE_STAIR:
+    case Block.COBBLE_SLAB:
     case Block.STONE:
     case Block.COAL_ORE:
     case Block.FURNACE:
@@ -394,6 +444,10 @@ export function baseMineTime(blockId: number): number {
       return 2.2;
     case Block.IRON_ORE:
       return 2.8;
+    case Block.ARCANE:
+      return 8.5;
+    case Block.PORTAL:
+      return 0.35;
     case Block.WATER:
       return Infinity;
     default:
@@ -409,19 +463,26 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.BEDROCK ||
     blockId === Block.COAL_ORE ||
     blockId === Block.IRON_ORE ||
+    blockId === Block.ARCANE ||
     blockId === Block.FURNACE ||
-    blockId === Block.FURNACE_LIT
+    blockId === Block.FURNACE_LIT ||
+    ((isStair(blockId) || isSlab(blockId)) && shapeMaterial(blockId) === Block.COBBLE)
   ) {
     return "pickaxe";
   }
   if (
     blockId === Block.WOOD ||
+    blockId === Block.BIRCH_WOOD ||
+    blockId === Block.SPRUCE_WOOD ||
     blockId === Block.PLANKS ||
     blockId === Block.LEAVES ||
+    blockId === Block.BIRCH_LEAVES ||
+    blockId === Block.SPRUCE_LEAVES ||
     blockId === Block.CHEST ||
     blockId === Block.BED ||
     isDoor(blockId) ||
-    isLadder(blockId)
+    isLadder(blockId) ||
+    ((isStair(blockId) || isSlab(blockId)) && shapeMaterial(blockId) === Block.PLANKS)
   ) {
     return "axe";
   }
@@ -429,6 +490,8 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.DIRT ||
     blockId === Block.GRASS ||
     blockId === Block.SAND ||
+    blockId === Block.GRAVEL ||
+    blockId === Block.CLAY ||
     blockId === Block.SNOW ||
     blockId === Block.SNOW_GRASS
   ) {
@@ -529,6 +592,48 @@ export const RECIPES: Recipe[] = [
     inputs: [{ id: Block.WOOD, count: 1 }],
     output: { id: Block.PLANKS, count: 4 },
     hint: "Log → 4 planks",
+  },
+  {
+    id: "planks_birch",
+    name: "Birch Planks",
+    inputs: [{ id: Block.BIRCH_WOOD, count: 1 }],
+    output: { id: Block.PLANKS, count: 4 },
+    hint: "Birch log → 4 planks",
+  },
+  {
+    id: "planks_spruce",
+    name: "Spruce Planks",
+    inputs: [{ id: Block.SPRUCE_WOOD, count: 1 }],
+    output: { id: Block.PLANKS, count: 4 },
+    hint: "Spruce log → 4 planks",
+  },
+  {
+    id: "planks_stairs",
+    name: "Oak Stairs",
+    inputs: [{ id: Block.PLANKS, count: 6 }],
+    output: { id: Block.PLANKS_STAIR, count: 4 },
+    hint: "Faces you when placed",
+  },
+  {
+    id: "planks_slabs",
+    name: "Oak Slabs",
+    inputs: [{ id: Block.PLANKS, count: 3 }],
+    output: { id: Block.PLANKS_SLAB, count: 6 },
+    hint: "Half-block · stack for a full plank",
+  },
+  {
+    id: "cobble_stairs",
+    name: "Cobble Stairs",
+    inputs: [{ id: Block.COBBLE, count: 6 }],
+    output: { id: Block.COBBLE_STAIR, count: 4 },
+    hint: "Stone steps",
+  },
+  {
+    id: "cobble_slabs",
+    name: "Cobble Slabs",
+    inputs: [{ id: Block.COBBLE, count: 3 }],
+    output: { id: Block.COBBLE_SLAB, count: 6 },
+    hint: "Half cobble",
   },
   {
     id: "sticks",
@@ -763,6 +868,34 @@ export const RECIPES: Recipe[] = [
     name: "Leather Boots",
     inputs: [{ id: Item.LEATHER, count: 4 }],
     output: { id: Item.LEATHER_BOOTS, count: 1 },
+  },
+  {
+    id: "iron_helm",
+    name: "Iron Helmet",
+    inputs: [{ id: Item.IRON_INGOT, count: 5 }],
+    output: { id: Item.IRON_HELM, count: 1 },
+    hint: "Smelt ore · 2 armor",
+  },
+  {
+    id: "iron_chest",
+    name: "Iron Chestplate",
+    inputs: [{ id: Item.IRON_INGOT, count: 8 }],
+    output: { id: Item.IRON_CHEST, count: 1 },
+    hint: "Best iron piece · 6 armor",
+  },
+  {
+    id: "iron_legs",
+    name: "Iron Leggings",
+    inputs: [{ id: Item.IRON_INGOT, count: 7 }],
+    output: { id: Item.IRON_LEGS, count: 1 },
+    hint: "5 armor",
+  },
+  {
+    id: "iron_boots",
+    name: "Iron Boots",
+    inputs: [{ id: Item.IRON_INGOT, count: 4 }],
+    output: { id: Item.IRON_BOOTS, count: 1 },
+    hint: "2 armor",
   },
   {
     id: "crafting_cobble",
@@ -1015,6 +1148,57 @@ function paintItemIcon(id: ItemId): string {
     ctx.fillStyle = "#8a5a32";
     ctx.fillRect(6, 14, 8, 6);
     ctx.fillRect(18, 14, 8, 6);
+    return c.toDataURL("image/png");
+  }
+  if (
+    id === Item.IRON_HELM ||
+    id === Item.IRON_CHEST ||
+    id === Item.IRON_LEGS ||
+    id === Item.IRON_BOOTS
+  ) {
+    const mid = "#c4c8d0";
+    const dark = "#7a8088";
+    const hi = "#e8ecf2";
+    if (id === Item.IRON_HELM) {
+      ctx.fillStyle = mid;
+      ctx.fillRect(8, 9, 16, 13);
+      ctx.fillStyle = dark;
+      ctx.fillRect(8, 9, 16, 3);
+      ctx.fillStyle = "#3a4048";
+      ctx.fillRect(12, 16, 8, 6);
+      ctx.fillStyle = hi;
+      ctx.fillRect(10, 11, 4, 2);
+    } else if (id === Item.IRON_CHEST) {
+      ctx.fillStyle = mid;
+      ctx.fillRect(8, 8, 16, 18);
+      ctx.fillStyle = dark;
+      ctx.fillRect(8, 8, 5, 7);
+      ctx.fillRect(19, 8, 5, 7);
+      ctx.fillStyle = hi;
+      ctx.fillRect(13, 14, 6, 3);
+      ctx.fillStyle = dark;
+      ctx.fillRect(15, 18, 2, 6);
+    } else if (id === Item.IRON_LEGS) {
+      ctx.fillStyle = mid;
+      ctx.fillRect(9, 6, 14, 8);
+      ctx.fillRect(9, 13, 6, 14);
+      ctx.fillRect(17, 13, 6, 14);
+      ctx.fillStyle = dark;
+      ctx.fillRect(9, 24, 6, 3);
+      ctx.fillRect(17, 24, 6, 3);
+      ctx.fillStyle = hi;
+      ctx.fillRect(11, 8, 4, 2);
+    } else {
+      ctx.fillStyle = dark;
+      ctx.fillRect(6, 18, 8, 8);
+      ctx.fillRect(18, 18, 8, 8);
+      ctx.fillStyle = mid;
+      ctx.fillRect(6, 14, 8, 6);
+      ctx.fillRect(18, 14, 8, 6);
+      ctx.fillStyle = hi;
+      ctx.fillRect(7, 15, 3, 2);
+      ctx.fillRect(19, 15, 3, 2);
+    }
     return c.toDataURL("image/png");
   }
 

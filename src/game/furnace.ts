@@ -33,6 +33,8 @@ const SMELT: Record<number, { out: ItemId; count: number }> = {
 const FUEL_SECONDS: Record<number, number> = {
   [Item.COAL]: 80,
   [Block.WOOD]: 15,
+  [Block.BIRCH_WOOD]: 15,
+  [Block.SPRUCE_WOOD]: 15,
   [Block.PLANKS]: 15,
   [Item.STICK]: 5,
 };

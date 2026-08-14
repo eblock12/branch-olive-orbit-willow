@@ -22,10 +22,12 @@ const DEFAULT_HUD: HudSnapshot = {
   chunkGen: {
     queued: 0,
     generating: 0,
+    ready: 0,
     mesh: 0,
     loaded: 0,
     workers: 0,
     idleWorkers: 0,
+    shared: false,
   },
   target: null,
   isTouch: false,
@@ -46,6 +48,7 @@ const DEFAULT_HUD: HudSnapshot = {
   hunger: 20,
   maxHunger: 20,
   armor: 0,
+  armorSlots: [null, null, null, null],
   air: 5,
   maxAir: 5,
   submerged: false,
@@ -198,6 +201,7 @@ function SlotCell({
   active,
   indexLabel,
   onClick,
+  fluid,
 }: {
   slot: HotbarSlot;
   atlasUrl: string;
@@ -205,6 +209,7 @@ function SlotCell({
   active?: boolean;
   indexLabel?: string;
   onClick: (shift: boolean) => void;
+  fluid?: boolean;
 }) {
   const id = slot?.id;
   const name = id != null ? itemName(id) : "Empty";
@@ -220,7 +225,9 @@ function SlotCell({
         if (e.button !== 0) return;
         e.stopPropagation();
       }}
-      className={`relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors ${
+      className={`relative flex aspect-square items-center justify-center overflow-hidden rounded-lg border p-0.5 transition-colors ${
+        fluid ? "h-auto w-full min-w-0" : "h-11 w-11 shrink-0"
+      } ${
         active
           ? "border-accent bg-elevated ring-1 ring-accent/40"
           : "border-border bg-bg/60 hover:bg-elevated"
@@ -277,7 +284,7 @@ function InvGrid({
   onSlot: (i: number, shift: boolean) => void;
 }) {
   return (
-    <div className="grid grid-cols-9 gap-1">
+    <div className="grid w-full grid-cols-9 gap-1">
       {slots.map((slot, i) => (
         <SlotCell
           key={i}
@@ -287,8 +294,74 @@ function InvGrid({
           active={selected === i}
           indexLabel={showHotbarNums && i < 9 ? String(i + 1) : undefined}
           onClick={(shift) => onSlot(i, shift)}
+          fluid
         />
       ))}
+    </div>
+  );
+}
+
+const ARMOR_LABELS = ["Head", "Chest", "Legs", "Feet"] as const;
+
+function ArmorDoll({
+  slots,
+  atlasUrl,
+  blockIcons,
+  points,
+  onSlot,
+  engineRef,
+  active,
+}: {
+  slots: HotbarSlot[];
+  atlasUrl: string;
+  blockIcons: Record<number, string>;
+  points: number;
+  onSlot: (i: number) => void;
+  engineRef: React.RefObject<GameEngine | null>;
+  active: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const eng = engineRef.current;
+    if (!active || !eng) {
+      eng?.setPreviewCanvas(null);
+      return;
+    }
+    eng.setPreviewCanvas(canvasRef.current);
+    return () => eng.setPreviewCanvas(null);
+  }, [active, engineRef]);
+
+  return (
+    <div className="flex shrink-0 gap-2 rounded-xl border border-border bg-bg/40 px-2 py-2">
+      <div className="flex flex-col items-center gap-1">
+        <p className="text-[9px] font-medium uppercase tracking-wide text-subtle">
+          Armor {points > 0 ? points : ""}
+        </p>
+        {ARMOR_LABELS.map((label, i) => (
+          <div key={label} className="flex flex-col items-center">
+            <SlotCell
+              slot={slots[i] ?? null}
+              atlasUrl={atlasUrl}
+              blockIcons={blockIcons}
+              onClick={() => onSlot(i)}
+            />
+            <span className="mt-0.5 text-[8px] uppercase tracking-wide text-subtle">
+              {label}
+            </span>
+          </div>
+        ))}
+      </div>
+      <canvas
+        ref={canvasRef}
+        className="h-[208px] w-[128px] shrink-0 cursor-grab touch-none rounded-lg bg-transparent active:cursor-grabbing"
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          engineRef.current?.previewPointerDown(e.clientX);
+        }}
+        onPointerMove={(e) => engineRef.current?.previewPointerMove(e.clientX)}
+        onPointerUp={() => engineRef.current?.previewPointerUp()}
+        onPointerCancel={() => engineRef.current?.previewPointerUp()}
+      />
     </div>
   );
 }
@@ -398,6 +471,10 @@ function GameShell() {
 
   const onSelect = useCallback((i: number, shift = false) => {
     engineRef.current?.inventoryClickHotbar(i, shift);
+  }, []);
+
+  const onArmor = useCallback((i: number) => {
+    engineRef.current?.inventoryClickArmor(i);
   }, []);
 
   const onCraft = useCallback((recipeId: string) => {
@@ -568,11 +645,13 @@ function GameShell() {
                 lsTouch ? "text-[9px]" : "text-[10px]"
               }`}
             >
-              gen {hud.chunkGen.queued}q {hud.chunkGen.generating}run · mesh{" "}
-              {hud.chunkGen.mesh} · {hud.chunkGen.loaded} loaded
+              gen {hud.chunkGen.queued}q {hud.chunkGen.generating}run{" "}
+              {hud.chunkGen.ready}rdy · mesh {hud.chunkGen.mesh} ·{" "}
+              {hud.chunkGen.loaded} loaded
               {hud.chunkGen.workers > 0
                 ? ` · ${hud.chunkGen.workers - hud.chunkGen.idleWorkers}/${hud.chunkGen.workers} wrk`
                 : " · sync"}
+              {hud.chunkGen.shared ? " · sab" : ""}
             </p>
           </div>
           <div
@@ -742,7 +821,7 @@ function GameShell() {
                   {lsTouch ? "Ar" : "Armor"}
                 </span>
                 <div className="flex flex-1 gap-0.5">
-                  {Array.from({ length: 7 }, (_, i) => {
+                  {Array.from({ length: 10 }, (_, i) => {
                     const fill = Math.max(0, Math.min(1, hud.armor - i));
                     return (
                       <div
@@ -958,7 +1037,7 @@ function GameShell() {
         <div className={`pointer-events-none absolute inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 ${
           hud.isTouch ? "pb-[max(1rem,env(safe-area-inset-bottom))]" : "pb-36"
         }`}>
-          <div className="pointer-events-auto flex max-h-[min(82vh,720px)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-xl backdrop-blur-sm">
+          <div className="pointer-events-auto flex max-h-[min(82vh,720px)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-xl backdrop-blur-sm">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold text-fg">Inventory</h2>
@@ -967,7 +1046,7 @@ function GameShell() {
                     ? "Tap a slot to pick up or place"
                     : hud.freeCraft
                     ? "Free craft ON — recipes ignore ingredients"
-                    : "Click to move · Shift-click hotbar ↔ pack"}
+                    : "Click to move · Shift-click armor to wear"}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -992,14 +1071,27 @@ function GameShell() {
               </div>
             </div>
             <div className="space-y-3 overflow-y-auto p-3">
-              <InvGrid
-                slots={hud.inventory}
-                atlasUrl={hud.atlasUrl}
-                blockIcons={hud.blockIcons}
-                selected={hud.selectedSlot}
-                showHotbarNums
-                onSlot={onSelect}
-              />
+              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+                <ArmorDoll
+                  slots={hud.armorSlots ?? [null, null, null, null]}
+                  atlasUrl={hud.atlasUrl}
+                  blockIcons={hud.blockIcons}
+                  points={hud.armor}
+                  onSlot={onArmor}
+                  engineRef={engineRef}
+                  active={hud.craftingOpen}
+                />
+                <div className="min-w-0 flex-1">
+                  <InvGrid
+                    slots={hud.inventory}
+                    atlasUrl={hud.atlasUrl}
+                    blockIcons={hud.blockIcons}
+                    selected={hud.selectedSlot}
+                    showHotbarNums
+                    onSlot={onSelect}
+                  />
+                </div>
+              </div>
               <div className="border-t border-border pt-2">
                 <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-subtle">
                   Crafting

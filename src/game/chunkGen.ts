@@ -1,5 +1,5 @@
-import { Block, isSolid } from "./blocks";
-import { fbm2, shouldPlaceTree, shouldPlaceCactus } from "./noise";
+import { Block, isLeaves, isLog, isSolid } from "./blocks";
+import { fbm2, hash2, shouldPlaceTree, shouldPlaceCactus } from "./noise";
 import { sampleBiome, terrainInfluence, Biome, type BiomeId } from "./biomes";
 import { shouldCarveCave, shouldFloodCave } from "./caves";
 import { placeStructuresInChunk } from "./structures";
@@ -40,8 +40,8 @@ function normalizeWater(blocks: Uint8Array, surfH: Int16Array): void {
           if (
             cur === Block.AIR ||
             cur === Block.WATER ||
-            cur === Block.LEAVES ||
-            cur === Block.WOOD
+            isLeaves(cur) ||
+            isLog(cur)
           ) {
             blocks[i] = Block.WATER;
           }
@@ -67,8 +67,8 @@ function normalizeWater(blocks: Uint8Array, surfH: Int16Array): void {
         const below = blocks[index(lx, y - 1, lz)]!;
         if (
           below === Block.AIR ||
-          below === Block.LEAVES ||
-          below === Block.WOOD
+          isLeaves(below) ||
+          isLog(below)
         ) {
           // drop: clear floating cell
           blocks[i] = Block.AIR;
@@ -168,8 +168,10 @@ export function generateChunkBlocks(
   cx: number,
   cz: number,
   seed: number,
+  out?: Uint8Array,
 ): Uint8Array {
-  const blocks = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+  const blocks = out ?? new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+  if (out) blocks.fill(0);
   const getLocal = (x: number, y: number, z: number): number => {
     if (x < 0 || y < 0 || z < 0 || x >= CHUNK_SIZE || z >= CHUNK_SIZE || y >= CHUNK_HEIGHT)
       return Block.AIR;
@@ -232,7 +234,8 @@ export function generateChunkBlocks(
       inf.snow * 0.18 -
       inf.ocean * 0.55 -
       inf.beach * 0.5 -
-      inf.swamp * 0.65;
+      inf.swamp * 0.65 -
+      inf.desert * 0.4;
     const bias =
       inf.mountain * 14 +
       inf.snow * 5 +
@@ -255,22 +258,26 @@ export function generateChunkBlocks(
       inf.mountain *
       (ridgedPeak * 48 + ridge * 18 + macro * 12 + Math.pow(ridged, 3.2) * 22);
     height += inf.snow * (1 - inf.mountain * 0.55) * (ridgedPeak * 22 + hills * 8);
-    height +=
-      inf.desert *
-      (Math.sin(wx * 0.09 + warpX * 6) * 3.5 +
-        Math.sin(wz * 0.07 + warpZ * 5) * 2.8 +
-        ridged * 4);
+    const dunes =
+      Math.sin(wx * 0.09 + warpX * 6) * 3.5 +
+      Math.sin(wz * 0.07 + warpZ * 5) * 2.8 +
+      ridged * 4;
+    height += inf.desert * dunes;
     // Gentle countryside folds where mountains haven't taken over
     height +=
       (1 - inf.ocean) *
       (1 - inf.beach) *
       (1 - inf.swamp) *
+      (1 - inf.desert) *
       (1 - inf.mountain) *
       ridgedPeak *
       6;
 
     const swampH = SEA_LEVEL - 2 + hills * 3.5 + detail * 1.5 + (macro - 0.5) * 2;
     height = height * (1 - inf.swamp) + swampH * inf.swamp;
+
+    const desertH = SEA_LEVEL - 1 + hills * 5 + detail * 2 + dunes;
+    height = height * (1 - inf.desert) + desertH * inf.desert;
 
     const beachH = SEA_LEVEL + (hills - 0.4) * 4 + detail * 1.5;
     height = height * (1 - inf.beach) + beachH * inf.beach;
@@ -298,13 +305,28 @@ export function generateChunkBlocks(
   };
 
 
-  const surfaceBlock = (biome: BiomeId, height: number, snowLine: number): number => {
-    if (biome === Biome.DESERT || biome === Biome.BEACH) return Block.SAND;
-    if (biome === Biome.OCEAN) return height < SEA_LEVEL - 2 ? Block.SAND : Block.SAND;
+  const surfaceBlock = (
+    biome: BiomeId,
+    height: number,
+    snowLine: number,
+    wx: number,
+    wz: number,
+  ): number => {
+    if (biome === Biome.DESERT) return Block.SAND;
+    if (biome === Biome.BEACH) {
+      return hash2(wx, wz, seed + 78) > 0.68 && height <= SEA_LEVEL + 2
+        ? Block.GRAVEL
+        : Block.SAND;
+    }
+    if (biome === Biome.OCEAN) return Block.SAND;
     if (biome === Biome.MOUNTAINS && height >= snowLine) return Block.SNOW;
-    if (biome === Biome.MOUNTAINS && height >= snowLine - 6) return Block.STONE;
+    if (biome === Biome.MOUNTAINS && height >= snowLine - 6) {
+      return hash2(wx, wz, seed + 79) > 0.8 ? Block.GRAVEL : Block.STONE;
+    }
     if (biome === Biome.SNOW || height >= snowLine) return Block.SNOW_GRASS;
-    if (biome === Biome.SWAMP) return Block.GRASS;
+    if (biome === Biome.SWAMP) {
+      return hash2(wx, wz, seed + 77) > 0.55 ? Block.CLAY : Block.GRASS;
+    }
     return Block.GRASS;
   };
 
@@ -324,7 +346,7 @@ export function generateChunkBlocks(
       const wx = baseX + lx;
       const wz = baseZ + lz;
       const { height, biome, snowLine } = surfaceAt(wx, wz);
-      const topId = surfaceBlock(biome, height, snowLine);
+      const topId = surfaceBlock(biome, height, snowLine, wx, wz);
 
       for (let y = 0; y < CHUNK_HEIGHT; y++) {
         let id: number = Block.AIR;
@@ -405,7 +427,7 @@ export function generateChunkBlocks(
   placeOresInChunk(blocks, cx, cz, seed);
 
   // Pass 2: trees / cactus — sample outside chunk for canopy wrap
-  const CANOPY = 2;
+  const CANOPY = 3;
   for (let oz = -CANOPY; oz < CHUNK_SIZE + CANOPY; oz++) {
     for (let ox = -CANOPY; ox < CHUNK_SIZE + CANOPY; ox++) {
       const wx = baseX + ox;
@@ -428,6 +450,7 @@ export function generateChunkBlocks(
 
       // Cactus in desert
       if (cactus) {
+        if (height > SEA_LEVEL + 14) continue;
         if (!shouldPlaceCactus(wx, wz, seed)) continue;
         if (ox < 0 || oz < 0 || ox >= CHUNK_SIZE || oz >= CHUNK_SIZE) continue;
         const h = 2 + Math.floor(fbm2(wx, wz, seed + 3) * 3);
@@ -441,32 +464,71 @@ export function generateChunkBlocks(
       if (biome === Biome.DESERT) continue;
       if (!shouldPlaceTree(wx, wz, seed, treeThreshold)) continue;
 
-      // Snow / mountain: taller thin spruce-like
-      const isTall =
-        biome === Biome.SNOW || biome === Biome.MOUNTAINS || biome === Biome.FOREST;
-      const trunkH = isTall
-        ? 5 + Math.floor(fbm2(wx, wz, seed + 7) * 4)
-        : 4 + Math.floor(fbm2(wx, wz, seed + 7) * 3);
+      const pick = fbm2(wx * 0.8, wz * 0.8, seed + 19);
+      type Species = "oak" | "birch" | "spruce" | "willow";
+      let species: Species = "oak";
+      if (biome === Biome.SNOW || biome === Biome.MOUNTAINS) species = "spruce";
+      else if (biome === Biome.SWAMP) species = pick > 0.35 ? "willow" : "oak";
+      else if (biome === Biome.PLAINS) species = pick > 0.58 ? "birch" : "oak";
+      else if (biome === Biome.FOREST) {
+        species = pick > 0.7 ? "birch" : pick < 0.18 ? "spruce" : "oak";
+      }
+
+      const wood =
+        species === "birch"
+          ? Block.BIRCH_WOOD
+          : species === "spruce"
+            ? Block.SPRUCE_WOOD
+            : Block.WOOD;
+      const leaf =
+        species === "birch"
+          ? Block.BIRCH_LEAVES
+          : species === "spruce"
+            ? Block.SPRUCE_LEAVES
+            : Block.LEAVES;
+
+      const trunkH =
+        species === "birch"
+          ? 6 + Math.floor(fbm2(wx, wz, seed + 7) * 4)
+          : species === "spruce"
+            ? 6 + Math.floor(fbm2(wx, wz, seed + 7) * 5)
+            : species === "willow"
+              ? 3 + Math.floor(fbm2(wx, wz, seed + 7) * 3)
+              : 4 + Math.floor(fbm2(wx, wz, seed + 7) * 3);
       const top = height + trunkH;
-      const canopyR = biome === Biome.FOREST ? 2 : biome === Biome.SNOW ? 1 : 2;
+      const canopyR =
+        species === "willow" ? 3 : species === "spruce" ? 2 : species === "birch" ? 2 : 2;
 
       if (ox >= 0 && oz >= 0 && ox < CHUNK_SIZE && oz < CHUNK_SIZE) {
         for (let t = 1; t <= trunkH; t++) {
           const ty = height + t;
           if (ty >= 0 && ty < CHUNK_HEIGHT) {
-            blocks[index(ox, ty, oz)] = Block.WOOD;
+            blocks[index(ox, ty, oz)] = wood;
           }
         }
       }
 
-      for (let dy = -2; dy <= 3; dy++) {
+      for (let dy = -2; dy <= 4; dy++) {
         for (let dx = -canopyR; dx <= canopyR; dx++) {
           for (let dz = -canopyR; dz <= canopyR; dz++) {
             const dist = Math.abs(dx) + Math.abs(dz);
-            if (biome === Biome.SNOW || biome === Biome.MOUNTAINS) {
-              // Conical spruce
-              const layerR = Math.max(0, 2 - Math.floor((dy + 2) * 0.6));
+            if (species === "spruce") {
+              const layerR = Math.max(0, 2 - Math.floor((dy + 2) * 0.55));
               if (dist > layerR) continue;
+            } else if (species === "willow") {
+              if (dy < 0 || dy > 2) continue;
+              if (dy === 0 && dist > 3) continue;
+              if (dy === 1 && dist > 3) continue;
+              if (dy === 2 && dist > 2) continue;
+              if (Math.abs(dx) === 3 && Math.abs(dz) === 3) continue;
+            } else if (species === "birch") {
+              if (dy === -2 && dist > 0) continue;
+              if (dy === -1 && dist > 1) continue;
+              if (dy === 0 && dist > 2) continue;
+              if (dy === 1 && dist > 2) continue;
+              if (dy === 2 && dist > 1) continue;
+              if (dy > 2 && dist > 0) continue;
+              if (Math.abs(dx) === 2 && Math.abs(dz) === 2 && dy < 1) continue;
             } else {
               if (dy === -2 && dist > 1) continue;
               if (dy === -1 && dist > 2) continue;
@@ -474,6 +536,7 @@ export function generateChunkBlocks(
               if (dy === 1 && dist > 2) continue;
               if (dy === 2 && dist > 1) continue;
               if (dy === 3 && dist > 0) continue;
+              if (dy > 3) continue;
               if (Math.abs(dx) === canopyR && Math.abs(dz) === canopyR && dy < 2) {
                 continue;
               }
@@ -495,7 +558,25 @@ export function generateChunkBlocks(
             }
             const idx = index(lx2, ly, lz2);
             if (blocks[idx] === Block.AIR) {
-              blocks[idx] = Block.LEAVES;
+              blocks[idx] = leaf;
+            }
+
+            // Willow / forest vines from the canopy rim
+            if (
+              (species === "willow" || (species === "oak" && biome === Biome.FOREST)) &&
+              dist >= canopyR - 1 &&
+              dy >= 0 &&
+              dy <= 1 &&
+              fbm2(wx + dx, wz + dz, seed + 41) > 0.72
+            ) {
+              const hang = species === "willow" ? 3 : 2;
+              for (let v = 1; v <= hang; v++) {
+                const vy = ly - v;
+                if (vy <= height || vy < 0) break;
+                const vi = index(lx2, vy, lz2);
+                if (blocks[vi] !== Block.AIR) break;
+                blocks[vi] = Block.VINE;
+              }
             }
           }
         }

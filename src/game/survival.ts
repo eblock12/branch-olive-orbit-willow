@@ -1,4 +1,4 @@
-import { Block, BLOCKS, isPlant, isTorch, isDoor, isLadder, type BlockId } from "./blocks";
+import { Block, BLOCKS, isPlant, isTorch, isDoor, isLadder, isStair, stairItemFromCell, type BlockId } from "./blocks";
 import {
   CRAFTABLE_RECIPES,
   ITEM_DEFS,
@@ -32,6 +32,7 @@ export function blockDrop(id: number): ItemId | null {
   if (isPlant(id) && !isTorch(id)) return id as BlockId;
   if (isDoor(id)) return Block.DOOR;
   if (isLadder(id)) return Block.LADDER;
+  if (isStair(id)) return stairItemFromCell(id) as BlockId;
   switch (id) {
     case Block.GRASS:
     case Block.SNOW_GRASS:
@@ -64,13 +65,19 @@ export function blockDrop(id: number): ItemId | null {
     case Block.DIRT:
     case Block.SAND:
     case Block.WOOD:
+    case Block.BIRCH_WOOD:
+    case Block.SPRUCE_WOOD:
     case Block.COBBLE:
     case Block.PLANKS:
     case Block.SNOW:
     case Block.CACTUS:
-    case Block.ICE:
+    case Block.CLAY:
+    case Block.ARCANE:
+    case Block.PORTAL:
       return id as BlockId;
     case Block.LEAVES:
+    case Block.BIRCH_LEAVES:
+    case Block.SPRUCE_LEAVES:
       return Math.random() < 0.12 ? Block.PLANKS : null;
     case Block.BEDROCK:
     case Block.WATER:
@@ -399,6 +406,48 @@ export class SurvivalState {
     if (s.count <= 0) this.slots[this.selected] = null;
     this.armor[info.slotIndex] = piece;
     if (worn) this.addItem(worn.id, worn.count, worn.durability);
+    this.madeArmor = true;
+    return true;
+  }
+
+  /** Click an armor doll slot: pick up, place, or swap if the piece fits. */
+  clickArmor(i: number): void {
+    if (i < 0 || i > 3) return;
+    const worn = this.armor[i];
+    const cur = this.cursor;
+    if (cur) {
+      const info = armorInfo(cur.id);
+      if (!info || info.slotIndex !== i) return;
+      const piece: ItemStack = {
+        id: cur.id,
+        count: 1,
+        durability: cur.durability ?? ITEM_DEFS[cur.id]?.maxDurability,
+      };
+      const leftover =
+        cur.count > 1 ? { ...cur, count: cur.count - 1 } : null;
+      this.armor[i] = piece;
+      this.cursor = leftover ?? worn;
+      this.madeArmor = true;
+    } else if (worn) {
+      this.cursor = worn;
+      this.armor[i] = null;
+    }
+  }
+
+  /** Shift-click a bag slot: swap that piece onto the matching doll slot. */
+  equipFromSlot(i: number): boolean {
+    if (i < 0 || i >= this.slots.length) return false;
+    const s = this.slots[i];
+    if (!s) return false;
+    const info = armorInfo(s.id);
+    if (!info) return false;
+    const worn = this.armor[info.slotIndex] ?? null;
+    this.armor[info.slotIndex] = {
+      id: s.id,
+      count: 1,
+      durability: s.durability ?? ITEM_DEFS[s.id]?.maxDurability,
+    };
+    this.slots[i] = worn;
     this.madeArmor = true;
     return true;
   }

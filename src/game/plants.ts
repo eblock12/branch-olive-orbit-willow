@@ -68,6 +68,22 @@ export function placePlantsInChunk(
             }
           }
         }
+        if (biome === Biome.SWAMP) {
+          const pad = hash2(wx, wz, seed + 508);
+          if (pad > 0.88) {
+            const wy = SEA_LEVEL;
+            const ay = wy + 1;
+            if (ay < CHUNK_HEIGHT) {
+              const water = blocks[idx(lx, wy, lz)];
+              if (
+                (water === Block.WATER || water === Block.WATER7) &&
+                blocks[idx(lx, ay, lz)] === Block.AIR
+              ) {
+                blocks[idx(lx, ay, lz)] = Block.LILY_PAD;
+              }
+            }
+          }
+        }
         continue;
       }
 
@@ -79,7 +95,7 @@ export function placePlantsInChunk(
       // Must sit on grass / dirt / sand / snow
       const onGrass =
         ground === Block.GRASS || ground === Block.SNOW_GRASS;
-      const onDirt = ground === Block.DIRT;
+      const onDirt = ground === Block.DIRT || ground === Block.CLAY;
       const onSand = ground === Block.SAND;
       const onSnow = ground === Block.SNOW || ground === Block.SNOW_GRASS;
       if (!onGrass && !onDirt && !onSand && !onSnow) continue;
@@ -110,6 +126,12 @@ export function placePlantsInChunk(
           blocks[idx(lx, py, lz)] =
             h > 0.99 ? Block.FERN : Block.SHORT_GRASS;
         }
+        continue;
+      }
+
+      // Pumpkin patches on open plains
+      if (biome === Biome.PLAINS && onGrass && patch > 0.48 && patch < 0.56 && h > 0.978) {
+        blocks[idx(lx, py, lz)] = Block.PUMPKIN;
         continue;
       }
 

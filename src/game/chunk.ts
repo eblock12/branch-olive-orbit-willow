@@ -1,6 +1,7 @@
 import * as THREE from "three";
-import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, doorPlane, waterLevel, lightEmission } from "./blocks";
+import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isSlab, isStairCell, isLeaves, stairFacing, shapeMaterial, doorPlane, waterLevel, lightEmission } from "./blocks";
 import { tileUVs } from "./textures";
+import { grassTintMul } from "./biomes";
 
 export { CHUNK_SIZE, CHUNK_HEIGHT, SEA_LEVEL } from "./chunkConstants";
 import { CHUNK_SIZE, CHUNK_HEIGHT } from "./chunkConstants";
@@ -49,6 +50,14 @@ export class Chunk {
   meshLod: number = -1;
   /** Desired LOD from distance */
   targetLod: ChunkLod = 0;
+  /** SAB voxel slot, or -1 if this chunk owns a private buffer */
+  sharedSlot = -1;
+  /** Bumps when the CPU mesh is stale vs an in-flight worker bake */
+  meshEpoch = 0;
+  /** True after sky/block light has been computed into the maps */
+  lightReady = false;
+  /** Bitmask of neighbor dirs (+X=1,-X=2,+Z=4,-Z=8) that were lit when last baked */
+  bakeMask = 0;
 
   constructor(cx: number, cz: number) {
     this.cx = cx;
@@ -302,13 +311,24 @@ export type ChunkLoadedFn = (wx: number, wz: number) => boolean;
 
 function windFactorFor(id: number): number {
   if (isTorch(id)) return 0.18;
-  if (id === Block.LEAVES) return 1;
+  if (isLeaves(id)) return 1;
   if (isPlant(id)) return 0.85;
   return 0;
 }
 
 export type LightSample = { block: number; sky: number };
 export type LightGetter = (wx: number, wy: number, wz: number) => LightSample;
+
+function usesGrassTint(id: number, faceIdx?: number): boolean {
+  if (id === Block.GRASS) return faceIdx === undefined || faceIdx === 0;
+  return (
+    id === Block.SHORT_GRASS ||
+    id === Block.FERN ||
+    id === Block.VINE ||
+    id === Block.LILY_PAD ||
+    id === Block.CATTAIL
+  );
+}
 
 const FULL_SKY: LightSample = { block: 0, sky: 15 };
 
@@ -332,6 +352,7 @@ function emitQuad(
   wind: number | [number, number, number, number],
   doubleSided: boolean,
   light: LightSample = FULL_SKY,
+  tint: [number, number, number] = [1, 1, 1],
 ): void {
   const base = m.base;
   const windAt = (c: number) =>
@@ -344,7 +365,7 @@ function emitQuad(
     m.normals.push(normal[0], normal[1], normal[2]);
     const uv = uvs[c]!;
     m.uvs.push(uv[0], uv[1]);
-    m.colors.push(shade, shade, shade);
+    m.colors.push(shade * tint[0], shade * tint[1], shade * tint[2]);
     m.winds.push(windAt(c));
     m.lights.push(lb, ls);
   }
@@ -358,7 +379,7 @@ function emitQuad(
       m.normals.push(-normal[0], -normal[1], -normal[2]);
       const uv = uvs[c]!;
       m.uvs.push(uv[0], uv[1]);
-      m.colors.push(shade * 0.92, shade * 0.92, shade * 0.92);
+      m.colors.push(shade * 0.92 * tint[0], shade * 0.92 * tint[1], shade * 0.92 * tint[2]);
       m.winds.push(windAt(c));
       m.lights.push(lb, ls);
     }
@@ -401,6 +422,9 @@ function emitCrossPlant(
   // Bottom corners stay planted (wind 0); top corners take full sway → shear
   const tip = Math.min(1.2, wind * 1.15);
   const plantWinds: [number, number, number, number] = [0, 0, tip, tip];
+  const tint = usesGrassTint(id)
+    ? grassTintMul(wx, wz, m.seed)
+    : ([1, 1, 1] as [number, number, number]);
 
   // Plane A: (x0,z0) -> (x1,z1) — verts: bot, bot, top, top
   emitQuad(
@@ -417,6 +441,7 @@ function emitCrossPlant(
     plantWinds,
     true,
     light,
+    tint,
   );
   // Plane B: (x0,z1) -> (x1,z0)
   emitQuad(
@@ -433,6 +458,7 @@ function emitCrossPlant(
     plantWinds,
     true,
     light,
+    tint,
   );
 }
 
@@ -595,6 +621,53 @@ function emitLadder(
   emitQuad(m, pts, uvPairs, nrm, 1, [0, 0, 0, 0], true, light);
 }
 
+function emitPartialBox(
+  m: MeshBuild,
+  wx: number,
+  wy: number,
+  wz: number,
+  x0: number,
+  y0: number,
+  z0: number,
+  x1: number,
+  y1: number,
+  z1: number,
+  id: number,
+  light: LightSample,
+): void {
+  const pad = 0.001;
+  const ox = wx + x0 + pad;
+  const oy = wy + y0 + pad;
+  const oz = wz + z0 + pad;
+  const sx = Math.max(0.02, x1 - x0 - pad * 2);
+  const sy = Math.max(0.02, y1 - y0 - pad * 2);
+  const sz = Math.max(0.02, z1 - z0 - pad * 2);
+  for (let f = 0; f < 6; f++) {
+    emitFace(m, ox, oy, oz, sx, sy, sz, f, id, 0, undefined, light);
+  }
+}
+
+function emitShapeBlock(
+  m: MeshBuild,
+  wx: number,
+  wy: number,
+  wz: number,
+  id: number,
+  light: LightSample,
+): void {
+  if (isSlab(id)) {
+    emitPartialBox(m, wx, wy, wz, 0, 0, 0, 1, 0.5, 1, id, light);
+    return;
+  }
+  if (!isStairCell(id)) return;
+  emitPartialBox(m, wx, wy, wz, 0, 0, 0, 1, 0.5, 1, id, light);
+  const f = stairFacing(id);
+  if (f === 0) emitPartialBox(m, wx, wy, wz, 0, 0.5, 0, 0.5, 1, 1, id, light);
+  else if (f === 1) emitPartialBox(m, wx, wy, wz, 0.5, 0.5, 0, 1, 1, 1, id, light);
+  else if (f === 2) emitPartialBox(m, wx, wy, wz, 0, 0.5, 0, 1, 1, 0.5, id, light);
+  else emitPartialBox(m, wx, wy, wz, 0, 0.5, 0.5, 1, 1, 1, id, light);
+}
+
 type MeshBuild = {
   positions: number[];
   normals: number[];
@@ -604,9 +677,10 @@ type MeshBuild = {
   lights: number[];
   indices: number[];
   base: number;
+  seed: number;
 };
 
-function newMeshBuild(): MeshBuild {
+function newMeshBuild(seed = 0): MeshBuild {
   return {
     positions: [],
     normals: [],
@@ -616,6 +690,7 @@ function newMeshBuild(): MeshBuild {
     lights: [],
     indices: [],
     base: 0,
+    seed,
   };
 }
 
@@ -659,7 +734,9 @@ function emitFace(
     m.uvs.push(uv[0], uv[1]);
     const ao = cornerAO ? cornerAO[c]! : 1;
     const s = shade * ao;
-    m.colors.push(s, s, s);
+    const tint =
+      usesGrassTint(id, faceIdx) ? grassTintMul(ox, oz, m.seed) : [1, 1, 1];
+    m.colors.push(s * tint[0], s * tint[1], s * tint[2]);
     m.winds.push(wind);
     m.lights.push(Math.min(1, light.block / 15), Math.min(1, light.sky / 15));
   }
@@ -669,14 +746,34 @@ function emitFace(
 
 function finalizeMesh(m: MeshBuild): THREE.BufferGeometry | null {
   if (m.positions.length === 0) return null;
+  return geometryFromPacked({
+    positions: new Float32Array(m.positions),
+    normals: new Float32Array(m.normals),
+    uvs: new Float32Array(m.uvs),
+    colors: new Float32Array(m.colors),
+    winds: new Float32Array(m.winds),
+    lights: new Float32Array(m.lights),
+    indices: new Uint32Array(m.indices),
+  });
+}
+
+export function geometryFromPacked(d: {
+  positions: Float32Array;
+  normals: Float32Array;
+  uvs?: Float32Array;
+  colors: Float32Array;
+  winds?: Float32Array;
+  lights?: Float32Array;
+  indices: Uint32Array;
+}): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(m.positions, 3));
-  geo.setAttribute("normal", new THREE.Float32BufferAttribute(m.normals, 3));
-  geo.setAttribute("uv", new THREE.Float32BufferAttribute(m.uvs, 2));
-  geo.setAttribute("color", new THREE.Float32BufferAttribute(m.colors, 3));
-  geo.setAttribute("wind", new THREE.Float32BufferAttribute(m.winds, 1));
-  geo.setAttribute("light", new THREE.Float32BufferAttribute(m.lights, 2));
-  geo.setIndex(m.indices);
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(d.positions, 3));
+  geo.setAttribute("normal", new THREE.Float32BufferAttribute(d.normals, 3));
+  if (d.uvs) geo.setAttribute("uv", new THREE.Float32BufferAttribute(d.uvs, 2));
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(d.colors, 3));
+  if (d.winds) geo.setAttribute("wind", new THREE.Float32BufferAttribute(d.winds, 1));
+  if (d.lights) geo.setAttribute("light", new THREE.Float32BufferAttribute(d.lights, 2));
+  geo.setIndex(new THREE.Uint32BufferAttribute(d.indices, 1));
   geo.computeBoundingSphere();
   return geo;
 }
@@ -727,20 +824,18 @@ function dominantCell(
       const x = lx + dx;
       const z = lz + dz;
       if (x >= CHUNK_SIZE || z >= CHUNK_SIZE) continue;
-      const id = chunk.get(x, y, z);
+      let id = chunk.get(x, y, z);
       if (id === Block.AIR || isWater(id)) continue;
       // Plants never contribute to LOD mesh (too thin at range)
       if (isPlant(id) || isDoor(id) || isLadder(id)) continue;
+      if (isStairCell(id) || isSlab(id)) id = shapeMaterial(id);
       if (
         !includeFoliage &&
-        (id === Block.LEAVES || id === Block.CACTUS)
+        (isLeaves(id) || id === Block.CACTUS)
       ) {
         continue;
       }
-      const weight =
-        includeFoliage && (id === Block.LEAVES || id === Block.CACTUS)
-          ? 1
-          : 2;
+      const weight = includeFoliage && (isLeaves(id) || id === Block.CACTUS) ? 1 : 2;
       const n = (counts.get(id) ?? 0) + weight;
       counts.set(id, n);
       if (n > bestN) {
@@ -763,10 +858,11 @@ export function buildChunkGeometry(
   lod: ChunkLod = 0,
   _isLoaded?: ChunkLoadedFn,
   getLight?: LightGetter,
+  seed = 0,
 ): THREE.BufferGeometry | null {
-  if (lod === 0) return buildLod0(chunk, getBlock, getLight);
-  if (lod === 1) return buildLod1(chunk, getBlock, getLight);
-  return buildLod2(chunk, getBlock, getLight);
+  if (lod === 0) return buildLod0(chunk, getBlock, getLight, seed);
+  if (lod === 1) return buildLod1(chunk, getBlock, getLight, seed);
+  return buildLod2(chunk, getBlock, getLight, seed);
 }
 
 
@@ -775,10 +871,11 @@ function buildLod0(
   chunk: Chunk,
   getBlock: NeighborGetter,
   getLight?: LightGetter,
+  seed = 0,
 ): THREE.BufferGeometry | null {
   const baseX = chunk.cx * CHUNK_SIZE;
   const baseZ = chunk.cz * CHUNK_SIZE;
-  const m = newMeshBuild();
+  const m = newMeshBuild(seed);
 
   for (let y = 0; y < CHUNK_HEIGHT; y++) {
     for (let lz = 0; lz < CHUNK_SIZE; lz++) {
@@ -793,7 +890,7 @@ function buildLod0(
         const wz = baseZ + lz;
         const wind = windFactorFor(id);
         const heightBoost =
-          id === Block.LEAVES || isPlant(id)
+          isLeaves(id) || isPlant(id)
             ? 0.15 + (y / CHUNK_HEIGHT) * 0.35
             : 0;
         const w = Math.min(1, wind + heightBoost * wind);
@@ -804,6 +901,10 @@ function buildLod0(
         }
         if (isLadderCell(id)) {
           emitLadder(m, wx, wy, wz, id, lightAt(getLight, wx, wy, wz));
+          continue;
+        }
+        if (isSlab(id) || isStairCell(id)) {
+          emitShapeBlock(m, wx, wy, wz, id, lightAt(getLight, wx, wy, wz));
           continue;
         }
 
@@ -883,11 +984,12 @@ function buildLod1(
   chunk: Chunk,
   getBlock: NeighborGetter,
   getLight?: LightGetter,
+  seed = 0,
 ): THREE.BufferGeometry | null {
   const baseX = chunk.cx * CHUNK_SIZE;
   const baseZ = chunk.cz * CHUNK_SIZE;
   const step = 2;
-  const m = newMeshBuild();
+  const m = newMeshBuild(seed);
   const cellOpts = { includeFoliage: true };
 
   for (let y = 0; y < CHUNK_HEIGHT; y++) {
@@ -900,7 +1002,7 @@ function buildLod1(
         const sx = Math.min(step, CHUNK_SIZE - lx);
         const sz = Math.min(step, CHUNK_SIZE - lz);
         const wind =
-          id === Block.LEAVES
+          isLeaves(id)
             ? Math.min(1, 0.15 + (y / CHUNK_HEIGHT) * 0.35)
             : 0;
 
@@ -940,7 +1042,7 @@ function buildLod1(
                   const swx = dx !== 0 ? wx + (dx > 0 ? sx : -1) : wx + i;
                   const swz = dz !== 0 ? wz + (dz > 0 ? sz : -1) : wz + i;
                   const bid = getBlock(swx, y, swz);
-                  if (isOccluder(bid) || bid === Block.LEAVES) anySolid = true;
+          if (isOccluder(bid) || isLeaves(bid)) anySolid = true;
                 }
                 if (anySolid) continue;
                 neighbor = Block.AIR;
@@ -949,7 +1051,7 @@ function buildLod1(
           }
           // Leaves are transparent-ish — still occlude other leaves at LOD1
           if (isOccluder(neighbor)) continue;
-          if (id === Block.LEAVES && neighbor === Block.LEAVES) continue;
+          if (isLeaves(id) && isLeaves(neighbor)) continue;
           if (id === Block.ICE && neighbor === Block.ICE) continue;
           emitFace(
             m,
@@ -978,6 +1080,7 @@ function buildLod2(
   chunk: Chunk,
   getBlock: NeighborGetter,
   getLight?: LightGetter,
+  seed = 0,
 ): THREE.BufferGeometry | null {
   const baseX = chunk.cx * CHUNK_SIZE;
   const baseZ = chunk.cz * CHUNK_SIZE;
@@ -1000,13 +1103,13 @@ function buildLod2(
           includeFoliage: false,
         });
         if (id === Block.AIR || isWater(id)) continue;
-        if (id === Block.LEAVES || id === Block.CACTUS) continue;
+        if (isLeaves(id) || id === Block.CACTUS) continue;
         h = y;
         tid = id;
         // Sample a bit below for cliff material
         const below = dominantCell(chunk, lx, Math.max(0, y - 2), lz, step);
         fid =
-          below !== Block.AIR && !isWater(below) && below !== Block.LEAVES
+          below !== Block.AIR && !isWater(below) && !isLeaves(below)
             ? below
             : id === Block.GRASS || id === Block.SNOW_GRASS
               ? Block.DIRT
@@ -1019,7 +1122,7 @@ function buildLod2(
     }
   }
 
-  const m = newMeshBuild();
+  const m = newMeshBuild(seed);
 
   const neighborH = (ix: number, iz: number, faceIdx: number): number => {
     const nix =
@@ -1045,7 +1148,7 @@ function buildLod2(
       if (
         bid !== Block.AIR &&
         !isWater(bid) &&
-        bid !== Block.LEAVES &&
+        !isLeaves(bid) &&
         bid !== Block.CACTUS &&
         isSolid(bid)
       ) {

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, isDoor, isDoorCell, isLadder, canSupportTorch, canSupportLadder, plantHitbox, torchIdFromHitFace, torchAttachDir, doorId, doorFacingFromLook, doorIsUpper, doorToggle, doorIsOpen, ladderIdFromHitFace, ladderAttachDir, type BlockId } from "./blocks";
+import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, isDoor, isDoorCell, isLadder, isLeaves, canSupportTorch, canSupportLadder, plantHitbox, torchIdFromHitFace, torchAttachDir, doorId, doorFacingFromLook, doorIsUpper, doorToggle, doorIsOpen, ladderIdFromHitFace, ladderAttachDir, blocksLight, isStairItem, stairIdFromItem, type BlockId } from "./blocks";
 
 import { Player, MOUSE_SENS } from "./player";
 import { World } from "./world";
@@ -44,6 +44,7 @@ import { ChestVisuals } from "./chestVisuals";
 import { mobLoot } from "./loot";
 import { TorchFlame } from "./torchFlame";
 import { ProjectileSystem } from "./projectiles";
+import { PlayerRig } from "./playerRig";
 import {
   loadWorldSave,
   writeWorldSave,
@@ -63,10 +64,12 @@ export type HudSnapshot = {
   chunkGen: {
     queued: number;
     generating: number;
+    ready: number;
     mesh: number;
     loaded: number;
     workers: number;
     idleWorkers: number;
+    shared: boolean;
   };
   target: VoxelHit | null;
   isTouch: boolean;
@@ -87,6 +90,7 @@ export type HudSnapshot = {
   hunger: number;
   maxHunger: number;
   armor: number;
+  armorSlots: HotbarSlot[];
   air: number;
   maxAir: number;
   submerged: boolean;
@@ -219,6 +223,16 @@ export class GameEngine {
   private camKickZ = 0;
   private _caterHurt = 0;
   private craftingOpen = false;
+  private previewRig = new PlayerRig();
+  private previewScene = new THREE.Scene();
+  private previewCam = new THREE.PerspectiveCamera(28, 132 / 200, 0.1, 20);
+  private previewRT: THREE.WebGLRenderTarget | null = null;
+  private previewCanvas: HTMLCanvasElement | null = null;
+  private previewPixels: Uint8Array | null = null;
+  private previewDragging = false;
+  private previewLastX = 0;
+  private previewSize = new THREE.Vector2();
+  private previewClear = new THREE.Color();
   private furnaces = new FurnaceSystem();
   private openFurnacePos: { x: number; y: number; z: number } | null = null;
   private chests = new ChestSystem();
@@ -285,6 +299,16 @@ export class GameEngine {
     this.hemi = new THREE.HemisphereLight(0xc8e4ff, 0x5a7a48, 0.48);
     this.scene.add(this.hemi);
 
+    this.previewScene.background = null;
+    const pHemi = new THREE.HemisphereLight(0xe8eef4, 0x3a4038, 1.05);
+    const pKey = new THREE.DirectionalLight(0xfff4e4, 1.15);
+    pKey.position.set(1.4, 2.4, 2.2);
+    const pFill = new THREE.DirectionalLight(0xa8c0e0, 0.35);
+    pFill.position.set(-1.6, 0.8, 0.6);
+    this.previewScene.add(pHemi, pKey, pFill, this.previewRig.group);
+    this.previewCam.position.set(0.15, 1.12, 3.35);
+    this.previewCam.lookAt(0, 0.92, 0);
+
     for (let i = 0; i < 5; i++) {
       const pl = new THREE.PointLight(0xffb060, 0, 12, 2);
       pl.castShadow = false;
@@ -314,7 +338,7 @@ export class GameEngine {
 
     const loaded = loadWorldSave();
     const seed = loaded?.seed ?? ((Math.random() * 0x7fffffff) | 0);
-    this.world = new World(seed, this.material, this.waterFX.material, 16, 7);
+    this.world = new World(seed, this.material, this.waterFX.material, 16, 1);
     if (loaded?.edits) this.world.importEdits(loaded.edits);
     if (loaded?.chests) this.chests.importAll(loaded.chests.map((c) => ({
       x: c.x,
@@ -770,6 +794,9 @@ export class GameEngine {
     this.itemDrops.dispose();
     this.chestVisuals.dispose();
     this.viewHand.dispose();
+    this.previewRig.dispose();
+    this.previewRT?.dispose();
+    this.previewCanvas = null;
     this.caterpillars.dispose();
     this.animals.dispose();
     this.hostiles.dispose();
@@ -1379,8 +1406,26 @@ export class GameEngine {
       return;
     }
 
+    if (isStairItem(blockId)) {
+      const [lx, , lz] = this.player.lookDir();
+      const facing = doorFacingFromLook(lx, lz);
+      const placed = stairIdFromItem(blockId, facing);
+      const ok = this.world.setBlock(px, py, pz, placed);
+      if (ok) {
+        this.viewHand.punch();
+        this.audio.placeBlock("wood", px + 0.5, py + 0.5, pz + 0.5);
+        this.survival.consumeSelected();
+        this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+        this.lastPlace = now;
+        this.survival.addExhaustion(0.15);
+        this.markSave();
+        this.emitHud();
+      }
+      return;
+    }
+
     if (isPlant(blockId)) {
-      if (isWater(dest)) return;
+      if (isWater(dest) && blockId !== Block.LILY_PAD) return;
       if (isTorch(blockId)) {
         const placed = torchIdFromHitFace(
           this.target.nx,
@@ -1409,7 +1454,14 @@ export class GameEngine {
         return;
       }
       const below = this.world.getBlock(px, py - 1, pz);
-      if (!isSolid(below) || isPlant(below) || isWater(below)) return;
+      if (blockId === Block.LILY_PAD) {
+        if (!isWater(below) && (!isSolid(below) || isPlant(below))) return;
+      } else if (blockId === Block.VINE) {
+        const above = this.world.getBlock(px, py + 1, pz);
+        if (!isLeaves(above) && above !== Block.VINE) return;
+      } else if (!isSolid(below) || isPlant(below) || isWater(below)) {
+        return;
+      }
     }
 
     const ok = this.world.setBlock(px, py, pz, blockId);
@@ -1674,10 +1726,22 @@ export class GameEngine {
       );
       this.survival.shiftInto(i, st.slots);
     } else if (shift && this.craftingOpen) {
-      this.survival.shiftHotbarBackpack(i);
+      const s = this.survival.slots[i];
+      if (s && armorInfo(s.id) && this.survival.equipFromSlot(i)) {
+        this.flashNotice("Equipped " + itemName(s.id));
+      } else {
+        this.survival.shiftHotbarBackpack(i);
+      }
     } else {
       this.survival.clickSlot(i);
     }
+    this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+    this.audio.ui();
+    this.emitHud();
+  }
+
+  inventoryClickArmor(i: number): void {
+    this.survival.clickArmor(i);
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
     this.audio.ui();
     this.emitHud();
@@ -2338,6 +2402,76 @@ export class GameEngine {
 
     this.renderer.render(this.scene, this.camera);
     this.waterFX.renderUnderwaterOverlay(this.renderer);
+    this.renderPlayerPreview(dt);
+  }
+
+  setPreviewCanvas(el: HTMLCanvasElement | null): void {
+    this.previewCanvas = el;
+    if (el) this.previewRig.yaw = 0.4;
+  }
+
+  previewPointerDown(x: number): void {
+    this.previewDragging = true;
+    this.previewLastX = x;
+  }
+
+  previewPointerMove(x: number): void {
+    if (!this.previewDragging) return;
+    this.previewRig.yaw += (x - this.previewLastX) * 0.012;
+    this.previewLastX = x;
+  }
+
+  previewPointerUp(): void {
+    this.previewDragging = false;
+  }
+
+  private renderPlayerPreview(dt: number): void {
+    const canvas = this.previewCanvas;
+    if (!canvas || !this.craftingOpen) return;
+    this.previewRig.setArmor(this.survival.armor);
+    this.previewRig.update(dt, !this.previewDragging);
+
+    const w = 180;
+    const h = 270;
+    if (!this.previewRT || this.previewRT.width !== w || this.previewRT.height !== h) {
+      this.previewRT?.dispose();
+      this.previewRT = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+      });
+    }
+
+    const prevClear = this.renderer.getClearColor(this.previewClear);
+    const prevAlpha = this.renderer.getClearAlpha();
+    const prevAuto = this.renderer.shadowMap.autoUpdate;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.setRenderTarget(this.previewRT);
+    this.renderer.setClearColor(0x101214, 0);
+    this.renderer.clear();
+    this.renderer.render(this.previewScene, this.previewCam);
+    this.renderer.setRenderTarget(null);
+    this.renderer.setClearColor(prevClear, prevAlpha);
+    this.renderer.shadowMap.autoUpdate = prevAuto;
+    this.renderer.getSize(this.previewSize);
+    this.renderer.setViewport(0, 0, this.previewSize.x, this.previewSize.y);
+
+    const n = w * h * 4;
+    if (!this.previewPixels || this.previewPixels.length !== n) {
+      this.previewPixels = new Uint8Array(n);
+    }
+    this.renderer.readRenderTargetPixels(this.previewRT, 0, 0, w, h, this.previewPixels);
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const img = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w * 4;
+      img.data.set(this.previewPixels.subarray(src, src + w * 4), y * w * 4);
+    }
+    ctx.putImageData(img, 0, 0);
   }
 
   private updatePlayer(dt: number): void {
@@ -2374,12 +2508,22 @@ export class GameEngine {
     const x = Math.floor(this.player.x);
     const y = Math.floor(this.player.eyeY);
     const z = Math.floor(this.player.z);
-    const sky = Math.max(
-      this.world.getSkyLight(x, y, z),
-      this.world.getSkyLight(x, y + 1, z),
-      this.world.getSkyLight(x, y + 2, z),
-    );
-    this.audioSky = sky / 15;
+
+    // Geometry wins over lightmaps: walk straight up until a real ceiling.
+    const maxUp = 28;
+    let up = 0;
+    for (; up < maxUp; up++) {
+      const id = this.world.getBlock(x, y + 1 + up, z);
+      if (blocksLight(id)) break;
+    }
+    const skyGeom = up >= maxUp ? 1 : up / maxUp;
+    const skyLit =
+      Math.max(
+        this.world.getSkyLight(x, y, z),
+        this.world.getSkyLight(x, y + 1, z),
+        this.world.getSkyLight(x, y + 2, z),
+      ) / 15;
+    this.audioSky = Math.max(skyGeom, skyLit);
 
     const dirs: [number, number, number][] = [
       [1, 0, 0],
@@ -2656,7 +2800,7 @@ export class GameEngine {
           : !this.survival.smeltedIron
             ? "Caves hide coal and iron · stone pick for iron · smelt in the furnace"
             : !this.survival.madeBow && !this.survival.madeArmor
-              ? "Hunt cows for leather · chickens for feathers · nights drop bones · string from crawlers"
+              ? "Hunt cows for leather · smelt iron for armor · nights drop bones"
               : night && hs.alive > 0
               ? hs.slender > 0
                 ? "Something tall is watching — craft a sword, find shelter"
@@ -2696,6 +2840,9 @@ export class GameEngine {
       hunger: this.survival.hunger,
       maxHunger: MAX_HUNGER,
       armor: this.survival.armorPoints(),
+      armorSlots: this.survival.armor.map((s) =>
+        s ? { id: s.id, count: s.count, durability: s.durability } : null,
+      ),
       air: this._air,
       maxAir: 5,
       submerged: this.player.submerged,

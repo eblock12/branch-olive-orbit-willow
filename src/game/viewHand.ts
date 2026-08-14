@@ -56,25 +56,25 @@ export class ViewHand {
       fog: false,
     });
 
-    // Camera-local placement: lower-right, slightly forward
-    this.root.position.set(0.28, -0.32, -0.42);
+    // Camera-local: lower-right, reaching into the world (-Z)
+    this.root.position.set(0.32, -0.38, -0.5);
     this.root.add(this.armPivot);
 
     // Forearm / sleeve
     const armGeo = new THREE.BoxGeometry(0.12, 0.36, 0.12);
     this.arm = new THREE.Mesh(armGeo, this.sleeveMat);
-    this.arm.position.set(0, -0.12, 0.02);
-    this.arm.rotation.x = 0.35;
+    this.arm.position.set(0, -0.1, -0.04);
+    this.arm.rotation.x = -0.55;
     this.armPivot.add(this.arm);
 
-    // Hand / fist
+    // Hand / fist — further along the reach
     const handGeo = new THREE.BoxGeometry(0.14, 0.14, 0.16);
     this.hand = new THREE.Mesh(handGeo, this.skinMat);
-    this.hand.position.set(0, -0.28, 0.06);
+    this.hand.position.set(0, -0.26, -0.08);
     this.armPivot.add(this.hand);
 
-    // Held item sits in front of the hand
-    this.itemRoot.position.set(0.02, -0.28, -0.1);
+    // Held item sits in front of the fist
+    this.itemRoot.position.set(0.04, -0.22, -0.18);
     this.armPivot.add(this.itemRoot);
 
     this.root.renderOrder = 10;
@@ -195,9 +195,9 @@ export class ViewHand {
     const equipDrop = (1 - easeOutCubic(this.equipT)) * 0.35;
 
     // Base pose
-    let rotX = 0.15 + idleBob * 0.35 + walkPitch;
-    let rotY = -0.12 + walkX * 0.35;
-    let rotZ = 0.08 + walkRoll;
+    let rotX = -0.08 + idleBob * 0.35 + walkPitch;
+    let rotY = -0.18 + walkX * 0.35;
+    let rotZ = 0.06 + walkRoll;
     let posY = idleBob + walkY - equipDrop;
     let posX = walkX * 0.85;
     let posZ = walkZ;
@@ -360,11 +360,12 @@ function buildHeldGeometry(blockId: BlockId): THREE.BufferGeometry {
   for (let f = 0; f < 6; f++) {
     const { u0, v0, u1, v1 } = tileUVs(faceTiles[f]!);
     const base = f * 4;
+    // BoxGeometry verts per face: TL, TR, BL, BR (uv y-down in the builder)
     const pairs: [number, number][] = [
+      [u0, v1],
+      [u1, v1],
       [u0, v0],
       [u1, v0],
-      [u1, v1],
-      [u0, v1],
     ];
     for (let i = 0; i < 4; i++) {
       uvAttr.setXY(base + i, pairs[i]![0], pairs[i]![1]);

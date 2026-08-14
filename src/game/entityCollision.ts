@@ -1,4 +1,4 @@
-import { isSolid } from "./blocks";
+import { cellCollidesAABB } from "./blocks";
 import type { World } from "./world";
 
 export type EntityBox = {
@@ -32,7 +32,22 @@ export function entityCollides(
   for (let by = minY; by <= maxY; by++) {
     for (let bz = minZ; bz <= maxZ; bz++) {
       for (let bx = minX; bx <= maxX; bx++) {
-        if (isSolid(world.getBlock(bx, by, bz))) return true;
+        if (
+          cellCollidesAABB(
+            world.getBlock(bx, by, bz),
+            bx,
+            by,
+            bz,
+            x - halfW,
+            y + eps,
+            z - halfW,
+            x + halfW - eps,
+            y + height - eps,
+            z + halfW - eps,
+          )
+        ) {
+          return true;
+        }
       }
     }
   }

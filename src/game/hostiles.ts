@@ -66,13 +66,13 @@ const KINDS: KindDef[] = [
     kind: "shambler",
     hp: 14,
     speed: 1.15,
-    chaseSpeed: 2.05,
+    chaseSpeed: 1.62,
     damage: 3,
     attackCd: 1.15,
     halfW: 0.32,
     height: 1.75,
     eyeY: 1.55,
-    notice: 18,
+    notice: 13,
     attackRange: 1.35,
     shadowR: 0.4,
     weight: 1.2,
@@ -81,14 +81,14 @@ const KINDS: KindDef[] = [
   {
     kind: "crawler",
     hp: 8,
-    speed: 1.55,
-    chaseSpeed: 3.1,
+    speed: 1.45,
+    chaseSpeed: 2.35,
     damage: 2,
     attackCd: 0.75,
     halfW: 0.34,
     height: 0.72,
     eyeY: 0.45,
-    notice: 14,
+    notice: 11,
     attackRange: 1.15,
     shadowR: 0.42,
     weight: 0.85,
@@ -112,10 +112,10 @@ const KINDS: KindDef[] = [
   },
 ];
 
-const MAX_ALIVE = 10;
+const MAX_ALIVE = 5;
 const MAX_SLENDER = 1;
-const DESPAWN_DIST = 56;
-const SPAWN_CHECK = 2.4;
+const DESPAWN_DIST = 64;
+const SPAWN_CHECK = 7.5;
 
 type Mats = {
   shamblerBody: THREE.MeshLambertMaterial;
@@ -160,12 +160,18 @@ function buildHostileMesh(kind: HostileKind, mats: Mats): THREE.Group {
     head.scale.set(0.42, 0.42, 0.42);
     head.position.y = 1.65;
     root.add(head);
-    for (const side of [-1, 1]) {
+    const arms: THREE.Group[] = [];
+    for (const side of [-1, 1] as const) {
+      const shoulder = new THREE.Group();
+      shoulder.position.set(side * 0.36, 1.38, 0.06);
+      shoulder.userData.side = side;
+      shoulder.rotation.x = -1.28;
       const arm = new THREE.Mesh(geoBox, mats.shamblerBody);
-      arm.scale.set(0.18, 0.7, 0.18);
-      arm.position.set(side * 0.38, 1.05, 0);
-      arm.rotation.z = side * 0.15;
-      root.add(arm);
+      arm.scale.set(0.16, 0.74, 0.16);
+      arm.position.set(0, -0.37, 0);
+      shoulder.add(arm);
+      root.add(shoulder);
+      arms.push(shoulder);
       const leg = new THREE.Mesh(geoBox, mats.shamblerBody);
       leg.scale.set(0.2, 0.65, 0.2);
       leg.position.set(side * 0.14, 0.35, 0);
@@ -175,6 +181,7 @@ function buildHostileMesh(kind: HostileKind, mats: Mats): THREE.Group {
       eye.position.set(side * 0.1, 1.7, 0.2);
       root.add(eye);
     }
+    root.userData.arms = arms;
   } else if (kind === "crawler") {
     const body = new THREE.Mesh(geoBox, mats.crawlerBody);
     body.scale.set(0.7, 0.28, 0.85);
@@ -618,6 +625,15 @@ class Hostile {
   private syncMesh(): void {
     this.mesh.position.set(this.x, this.y, this.z);
     this.mesh.rotation.y = this.yaw;
+    const arms = this.mesh.userData.arms as THREE.Group[] | undefined;
+    if (arms) {
+      for (const a of arms) {
+        const side = (a.userData.side as number) || 1;
+        a.rotation.x = -1.28 + Math.sin(this.walkPhase + side) * 0.1;
+        a.rotation.z = side * 0.05;
+        a.rotation.y = Math.sin(this.walkPhase * 0.5) * 0.04;
+      }
+    }
     // Walk bob
     const bob = this.onGround
       ? Math.sin(this.walkPhase) * 0.03
@@ -650,7 +666,7 @@ export class HostileSystem {
   readonly group = new THREE.Group();
   private mats: Mats;
   private list: Hostile[] = [];
-  private spawnTimer = 3;
+  private spawnTimer = 10;
   private killed = 0;
   private lastDayFactor = 1;
   private deaths: { x: number; y: number; z: number }[] = [];
@@ -723,19 +739,14 @@ export class HostileSystem {
       const hit = h.update(dt, world, player, dayFactor);
       if (hit) hits.push({ damage: hit.damage, kind: h.kind });
     }
+    this.separate();
 
     // Night spawning
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0) {
-      this.spawnTimer = SPAWN_CHECK + Math.random() * 1.5;
+      this.spawnTimer = SPAWN_CHECK + Math.random() * 5;
       if (dayFactor < 0.35 && this.count < MAX_ALIVE) {
-        // Stronger pressure deeper into night
-        const night = 1 - dayFactor;
-        const rolls = night > 0.85 ? 2 : 1;
-        for (let r = 0; r < rolls; r++) {
-          if (this.count >= MAX_ALIVE) break;
-          this.trySpawnNear(world, player, dayFactor);
-        }
+        this.trySpawnNear(world, player);
       } else if (dayFactor > 0.7) {
         // Daytime: slowly cull remaining hostiles far away
         for (let i = this.list.length - 1; i >= 0; i--) {
@@ -751,25 +762,48 @@ export class HostileSystem {
     return hits;
   }
 
-  private trySpawnNear(
-    world: World,
-    player: Player,
-    dayFactor: number,
-  ): void {
+  private separate(): void {
+    const n = this.list.length;
+    for (let i = 0; i < n; i++) {
+      const a = this.list[i]!;
+      if (!a.alive) continue;
+      for (let j = i + 1; j < n; j++) {
+        const b = this.list[j]!;
+        if (!b.alive) continue;
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const d = Math.hypot(dx, dz);
+        const min = a.def.halfW + b.def.halfW + 1.05;
+        if (d < 0.04 || d >= min) continue;
+        const push = (min - d) * 0.45;
+        const nx = dx / d;
+        const nz = dz / d;
+        a.x -= nx * push;
+        a.z -= nz * push;
+        b.x += nx * push;
+        b.z += nz * push;
+      }
+    }
+  }
+
+  private trySpawnNear(world: World, player: Player): void {
+    const [fx, fz] = player.forwardXZ();
     const ang = Math.random() * Math.PI * 2;
-    // Prefer behind / not in face; mid distance
-    const dist = 16 + Math.random() * 14;
-    const x = player.x + Math.cos(ang) * dist;
-    const z = player.z + Math.sin(ang) * dist;
+    const ox = Math.cos(ang);
+    const oz = Math.sin(ang);
+    // Usually spawn off to the side / behind, not in the player's face
+    if (ox * fx + oz * fz > 0.2 && Math.random() < 0.75) return;
+    const dist = 28 + Math.random() * 16;
+    const x = player.x + ox * dist;
+    const z = player.z + oz * dist;
     const y = world.getSurfaceY(Math.floor(x), Math.floor(z));
     if (y <= 2) return;
     if (columnHasWaterSurface(world, x, z)) return;
-    // Keep away from other hostiles
     for (const h of this.list) {
-      if (Math.hypot(h.x - x, h.z - z) < 5) return;
+      if (Math.hypot(h.x - x, h.z - z) < 14) return;
     }
 
-    const kind = this.pickKind(dayFactor);
+    const kind = this.pickKind(this.lastDayFactor);
     if (!kind) return;
     if (kind === "slender" && this.slenderCount >= MAX_SLENDER) return;
 

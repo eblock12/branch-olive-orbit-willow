@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { ATLAS_TILES, TILE_SIZE, BLOCKS, Block, isDoor, isLadder } from "./blocks";
+import { ATLAS_TILES, ATLAS_COLS, ATLAS_ROWS, TILE_SIZE, BLOCKS, Block, isDoor, isLadder, isSlab, isStair } from "./blocks";
 
 /** Procedural pixel-art block atlas — nearest-filtered for Minecraft look */
 
@@ -91,23 +91,24 @@ export function createBlockAtlas(): {
   dataUrl: string;
   icons: BlockIconMap;
 } {
-  const atlasPx = ATLAS_TILES * TILE_SIZE;
+  const atlasW = ATLAS_COLS * TILE_SIZE;
+  const atlasH = ATLAS_ROWS * TILE_SIZE;
   const canvas = document.createElement("canvas");
-  canvas.width = atlasPx;
-  canvas.height = atlasPx;
+  canvas.width = atlasW;
+  canvas.height = atlasH;
   const ctx = canvas.getContext("2d")!;
-  const img = ctx.createImageData(atlasPx, atlasPx);
+  const img = ctx.createImageData(atlasW, atlasH);
   const d = img.data;
 
   // Magenta-free base: solid tiles opaque black, plant slots transparent
-  for (let t = 0; t < 16; t++) fillTile(d, t, atlasPx, 0, 0, 0, 255);
-  for (let t = 16; t < ATLAS_TILES * ATLAS_TILES; t++)
-    fillTile(d, t, atlasPx, 0, 0, 0, 0);
+  for (let t = 0; t < 16; t++) fillTile(d, t, atlasW, 0, 0, 0, 255);
+  for (let t = 16; t < ATLAS_COLS * ATLAS_ROWS; t++)
+    fillTile(d, t, atlasW, 0, 0, 0, 0);
 
   // ───────────────────────────────────────────────────────────
   // 0 — grass top: soft clumps, subtle blade noise (greens only)
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 0, atlasPx, (x, y, set) => {
+  drawTile(d, 0, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 1) * 0.5 + hSigned(x >> 1, y >> 1, 2) * 0.5;
     const clump = h01(x >> 2, y >> 2, 3);
     const base = mixRGB([52, 118, 48], [78, 148, 68], 0.45 + clump * 0.4);
@@ -132,7 +133,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 1 — grass side: top grass fringe + dirt body
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 1, atlasPx, (x, y, set) => {
+  drawTile(d, 1, atlasW, (x, y, set) => {
     const fringe = 3 + ((h01(x, 0, 6) * 2) | 0); // 3–4 px
     if (y < fringe) {
       const n = hSigned(x, y, 7);
@@ -173,7 +174,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 2 — dirt: rich soil, pebbles, soft clumps
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 2, atlasPx, (x, y, set) => {
+  drawTile(d, 2, atlasW, (x, y, set) => {
     const n =
       hSigned(x, y, 20) * 0.55 + hSigned(x >> 1, y >> 1, 21) * 0.45;
     const clump = h01(x >> 2, y >> 2, 22);
@@ -209,7 +210,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 3 — stone: layered grey with subtle cracks
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 3, atlasPx, (x, y, set) => {
+  drawTile(d, 3, atlasW, (x, y, set) => {
     const n =
       hSigned(x, y, 30) * 0.5 + hSigned(x >> 1, y >> 1, 31) * 0.5;
     const band = h01(x, y >> 2, 32);
@@ -228,7 +229,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 4 — sand: warm fine grain + soft dunes
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 4, atlasPx, (x, y, set) => {
+  drawTile(d, 4, atlasW, (x, y, set) => {
     const n =
       hSigned(x, y, 40) * 0.45 + hSigned(x >> 1, y >> 1, 41) * 0.35;
     const dune = Math.sin((x + y * 0.6) * 0.55) * 0.5 + 0.5;
@@ -250,7 +251,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 5 — wood top: growth rings + soft center
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 5, atlasPx, (x, y, set) => {
+  drawTile(d, 5, atlasW, (x, y, set) => {
     const cx = x - 7.5;
     const cy = y - 7.5;
     const r0 = Math.sqrt(cx * cx + cy * cy);
@@ -269,7 +270,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 6 — wood side / bark: vertical grain + dark seams
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 6, atlasPx, (x, y, set) => {
+  drawTile(d, 6, atlasW, (x, y, set) => {
     const grain = hSigned(x, y, 60) * 0.4 + hSigned(x, y >> 1, 61) * 0.6;
     const strip = h01(x, 0, 62);
     // bark ridges every few columns
@@ -297,7 +298,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 7 — leaves: leafy clusters, clean alpha (no edge fringing)
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 7, atlasPx, (x, y, set) => {
+  drawTile(d, 7, atlasW, (x, y, set) => {
     // Cluster field — avoid top-row-only holes that cause magenta artifacts
     const c1 = h01(x >> 1, y >> 1, 70);
     const c2 = h01(x, y, 71);
@@ -328,7 +329,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 8 — cobble: irregular stones with mortar
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 8, atlasPx, (x, y, set) => {
+  drawTile(d, 8, atlasW, (x, y, set) => {
     // Voronoi-ish cells via nearest of a few feature points
     let best = 1e9;
     let bestI = 0;
@@ -367,7 +368,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 9 — planks: warm boards + grain + nail dots
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 9, atlasPx, (x, y, set) => {
+  drawTile(d, 9, atlasW, (x, y, set) => {
     const board = Math.floor(y / 4);
     const localY = y % 4;
     const n =
@@ -404,7 +405,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 10 — bedrock: chaotic dark rock
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 10, atlasPx, (x, y, set) => {
+  drawTile(d, 10, atlasW, (x, y, set) => {
     const n =
       hSigned(x, y, 100) * 0.5 +
       hSigned(x >> 1, y >> 1, 101) * 0.3 +
@@ -420,7 +421,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 11 — snow: soft sparkle, cool whites
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 11, atlasPx, (x, y, set) => {
+  drawTile(d, 11, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 110) * 0.5 + hSigned(x >> 1, y >> 1, 111) * 0.5;
     let r = 232 + n * 6;
     let g = 238 + n * 5;
@@ -441,7 +442,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 12 — ice: translucent blue with cracks
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 12, atlasPx, (x, y, set) => {
+  drawTile(d, 12, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 120) * 0.5 + hSigned(x >> 1, y >> 1, 121) * 0.5;
     let r = 150 + n * 10;
     let g = 198 + n * 8;
@@ -467,7 +468,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 13 — water (atlas fallback / icon): deep teal-blue waves
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 13, atlasPx, (x, y, set) => {
+  drawTile(d, 13, atlasW, (x, y, set) => {
     const wave = Math.sin(x * 0.7 + y * 0.35) * 0.5 + 0.5;
     const n = hSigned(x, y, 130);
     let r = 36 + wave * 18 + n * 6;
@@ -484,7 +485,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 14 — cactus: vertical ribs + dark edge
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 14, atlasPx, (x, y, set) => {
+  drawTile(d, 14, atlasW, (x, y, set) => {
     if (x <= 1 || x >= 14) {
       set(28, 68, 32);
       return;
@@ -507,7 +508,7 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   // 15 — snowy grass side
   // ───────────────────────────────────────────────────────────
-  drawTile(d, 15, atlasPx, (x, y, set) => {
+  drawTile(d, 15, atlasW, (x, y, set) => {
     const snowH = 4 + ((h01(x, 0, 150) * 2) | 0);
     if (y < snowH) {
       const n = hSigned(x, y, 151);
@@ -525,31 +526,31 @@ export function createBlockAtlas(): {
   });
 
   // —— Plant tiles 16+ (transparent bg, improved pixel art) ——
-  paintPlant(d, atlasPx, 16, "grass");
-  paintPlant(d, atlasPx, 17, "fern");
-  paintPlant(d, atlasPx, 18, "dead");
-  paintPlant(d, atlasPx, 19, "flower", 220, 48, 52);
-  paintPlant(d, atlasPx, 20, "flower", 242, 208, 48);
-  paintPlant(d, atlasPx, 21, "flower", 72, 118, 228);
-  paintPlant(d, atlasPx, 22, "flower", 196, 96, 214);
-  paintPlant(d, atlasPx, 23, "flower", 232, 236, 242);
-  paintPlant(d, atlasPx, 24, "daisy");
-  paintPlant(d, atlasPx, 25, "tulip", 224, 46, 58);
-  paintPlant(d, atlasPx, 26, "tulip", 234, 142, 48);
-  paintPlant(d, atlasPx, 27, "tulip", 236, 142, 178);
-  paintPlant(d, atlasPx, 28, "tulip", 244, 240, 232);
-  paintPlant(d, atlasPx, 29, "flower", 88, 124, 236);
-  paintPlant(d, atlasPx, 30, "lavender");
-  paintPlant(d, atlasPx, 31, "sunflower");
-  paintPlant(d, atlasPx, 32, "rose");
-  paintPlant(d, atlasPx, 33, "mushR");
-  paintPlant(d, atlasPx, 34, "mushB");
-  paintPlant(d, atlasPx, 35, "cattail");
-  paintPlant(d, atlasPx, 36, "fireweed");
-  paintPlant(d, atlasPx, 37, "torch");
+  paintPlant(d, atlasW, 16, "grass");
+  paintPlant(d, atlasW, 17, "fern");
+  paintPlant(d, atlasW, 18, "dead");
+  paintPlant(d, atlasW, 19, "flower", 220, 48, 52);
+  paintPlant(d, atlasW, 20, "flower", 242, 208, 48);
+  paintPlant(d, atlasW, 21, "flower", 72, 118, 228);
+  paintPlant(d, atlasW, 22, "flower", 196, 96, 214);
+  paintPlant(d, atlasW, 23, "flower", 232, 236, 242);
+  paintPlant(d, atlasW, 24, "daisy");
+  paintPlant(d, atlasW, 25, "tulip", 224, 46, 58);
+  paintPlant(d, atlasW, 26, "tulip", 234, 142, 48);
+  paintPlant(d, atlasW, 27, "tulip", 236, 142, 178);
+  paintPlant(d, atlasW, 28, "tulip", 244, 240, 232);
+  paintPlant(d, atlasW, 29, "flower", 88, 124, 236);
+  paintPlant(d, atlasW, 30, "lavender");
+  paintPlant(d, atlasW, 31, "sunflower");
+  paintPlant(d, atlasW, 32, "rose");
+  paintPlant(d, atlasW, 33, "mushR");
+  paintPlant(d, atlasW, 34, "mushB");
+  paintPlant(d, atlasW, 35, "cattail");
+  paintPlant(d, atlasW, 36, "fireweed");
+  paintPlant(d, atlasW, 37, "torch");
 
   // 38 — coal ore: stone + charcoal flecks
-  drawTile(d, 38, atlasPx, (x, y, set) => {
+  drawTile(d, 38, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 380) * 0.5 + hSigned(x >> 1, y >> 1, 381) * 0.5;
     let v = 118 + n * 14;
     if (h01(x, y, 382) > 0.93) v -= 16;
@@ -564,7 +565,7 @@ export function createBlockAtlas(): {
   });
 
   // 39 — iron ore: stone + rusty-peach specks
-  drawTile(d, 39, atlasPx, (x, y, set) => {
+  drawTile(d, 39, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 390) * 0.5 + hSigned(x >> 1, y >> 1, 391) * 0.5;
     let v = 118 + n * 14;
     const blob =
@@ -582,7 +583,7 @@ export function createBlockAtlas(): {
   });
 
   // 40 — furnace top / bottom: ring of cobble around a dark well
-  drawTile(d, 40, atlasPx, (x, y, set) => {
+  drawTile(d, 40, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 400) * 0.4;
     const edge = x < 2 || y < 2 || x > 13 || y > 13;
     const hole = x >= 5 && x <= 10 && y >= 5 && y <= 10;
@@ -595,51 +596,66 @@ export function createBlockAtlas(): {
   });
 
   // 42 — furnace front (cold)
-  drawTile(d, 42, atlasPx, (x, y, set) => {
+  drawTile(d, 42, atlasW, (x, y, set) => {
     paintFurnaceFront(x, y, set, false);
   });
 
   // 43 — furnace front (lit)
-  drawTile(d, 43, atlasPx, (x, y, set) => {
+  drawTile(d, 43, atlasW, (x, y, set) => {
     paintFurnaceFront(x, y, set, true);
   });
 
   // 44 — chest top / lid
-  drawTile(d, 44, atlasPx, (x, y, set) => {
+  drawTile(d, 44, atlasW, (x, y, set) => {
     paintChestFace(x, y, set, "top");
   });
 
   // 45 — chest front (lock)
-  drawTile(d, 45, atlasPx, (x, y, set) => {
+  drawTile(d, 45, atlasW, (x, y, set) => {
     paintChestFace(x, y, set, "front");
   });
 
   // 46 — chest side / bottom
-  drawTile(d, 46, atlasPx, (x, y, set) => {
+  drawTile(d, 46, atlasW, (x, y, set) => {
     paintChestFace(x, y, set, "side");
   });
 
   // 47 — bed top: pillow + quilt
-  drawTile(d, 47, atlasPx, (x, y, set) => {
+  drawTile(d, 47, atlasW, (x, y, set) => {
     paintBedFace(x, y, set, true);
   });
   // 48 — bed side
-  drawTile(d, 48, atlasPx, (x, y, set) => {
+  drawTile(d, 48, atlasW, (x, y, set) => {
     paintBedFace(x, y, set, false);
   });
 
   // 49 — door lower (planks + handle)
-  drawTile(d, 49, atlasPx, (x, y, set) => {
+  drawTile(d, 49, atlasW, (x, y, set) => {
     paintDoorFace(x, y, set, false);
   });
   // 51 — door upper (window)
-  drawTile(d, 51, atlasPx, (x, y, set) => {
+  drawTile(d, 51, atlasW, (x, y, set) => {
     paintDoorFace(x, y, set, true);
   });
   // 50 — ladder
-  drawTile(d, 50, atlasPx, (x, y, set) => {
+  drawTile(d, 50, atlasW, (x, y, set) => {
     paintLadderFace(x, y, set);
   });
+
+  drawTile(d, 52, atlasW, (x, y, set) => paintBirchEnd(x, y, set));
+  drawTile(d, 53, atlasW, (x, y, set) => paintBirchBark(x, y, set));
+  drawTile(d, 54, atlasW, (x, y, set) => paintBirchLeaves(x, y, set));
+  drawTile(d, 55, atlasW, (x, y, set) => paintSpruceEnd(x, y, set));
+  drawTile(d, 56, atlasW, (x, y, set) => paintSpruceBark(x, y, set));
+  drawTile(d, 57, atlasW, (x, y, set) => paintSpruceLeaves(x, y, set));
+  drawTile(d, 58, atlasW, (x, y, set) => paintPumpkinTop(x, y, set));
+  drawTile(d, 59, atlasW, (x, y, set) => paintPumpkinSide(x, y, set));
+  drawTile(d, 60, atlasW, (x, y, set) => paintLily(x, y, set));
+  drawTile(d, 61, atlasW, (x, y, set) => paintVine(x, y, set));
+  drawTile(d, 62, atlasW, (x, y, set) => paintGravel(x, y, set));
+  drawTile(d, 63, atlasW, (x, y, set) => paintClay(x, y, set));
+  drawTile(d, 64, atlasW, (x, y, set) => paintVoidstone(x, y, set, false));
+  drawTile(d, 65, atlasW, (x, y, set) => paintRift(x, y, set, false));
 
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
@@ -651,6 +667,257 @@ export function createBlockAtlas(): {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
   return { texture: tex, dataUrl: canvas.toDataURL("image/png"), icons };
+}
+
+function paintBirchEnd(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const r0 = Math.hypot(x - 7.5, y - 7.5);
+  const ring = Math.sin(r0 * 1.8 + hSigned(x, y, 520) * 0.3);
+  if (r0 < 1.4) {
+    set(168, 148, 108);
+    return;
+  }
+  const n = hSigned(x, y, 521) * 6;
+  if (ring > 0) set(clamp(228 + n), clamp(220 + n), clamp(198 + n));
+  else set(clamp(206 + n), clamp(196 + n), clamp(172 + n));
+}
+
+function paintBirchBark(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const n = hSigned(x, y, 530) * 8;
+  let r = 226 + n;
+  let g = 220 + n;
+  let b = 204 + n * 0.6;
+  if (x % 5 === 1) {
+    r -= 18;
+    g -= 16;
+    b -= 14;
+  }
+  if (h01(x, y >> 1, 531) > 0.88) {
+    r = 48 + n;
+    g = 42 + n;
+    b = 36 + n;
+  }
+  set(clamp(r), clamp(g), clamp(b));
+}
+
+function paintBirchLeaves(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const edge = x === 0 || y === 0 || x === 15 || y === 15;
+  if (!edge && h01(x >> 1, y >> 1, 540) > 0.8 && h01(x, y, 541) > 0.5) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 542);
+  const tone = h01(x >> 2, y >> 2, 543);
+  const base = mixRGB([120, 168, 48], [168, 196, 62], tone);
+  set(clamp(base[0] + n * 10), clamp(base[1] + n * 12), clamp(base[2] + n * 6));
+}
+
+function paintSpruceEnd(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const r0 = Math.hypot(x - 7.5, y - 7.5);
+  const ring = Math.sin(r0 * 1.7 + hSigned(x, y, 550) * 0.3);
+  if (r0 < 1.5) {
+    set(56, 38, 24);
+    return;
+  }
+  const n = hSigned(x, y, 551) * 5;
+  if (ring > 0) set(clamp(92 + n), clamp(64 + n), clamp(38 + n));
+  else set(clamp(68 + n), clamp(46 + n), clamp(28 + n));
+}
+
+function paintSpruceBark(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const grain = hSigned(x, y, 560) * 0.5;
+  if (x % 3 === 0) {
+    set(clamp(38 + grain * 6), clamp(26 + grain * 4), clamp(16 + grain * 3));
+    return;
+  }
+  set(clamp(72 + grain * 10), clamp(50 + grain * 8), clamp(32 + grain * 5));
+}
+
+function paintSpruceLeaves(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const edge = x === 0 || y === 0 || x === 15 || y === 15;
+  if (!edge && h01(x >> 1, y >> 1, 570) > 0.84 && h01(x, y, 571) > 0.55) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 572);
+  const tone = h01(x >> 2, y >> 2, 573);
+  const base = mixRGB([28, 72, 48], [42, 98, 62], tone);
+  set(clamp(base[0] + n * 6), clamp(base[1] + n * 8), clamp(base[2] + n * 6));
+}
+
+function paintPumpkinTop(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const cx = x - 7.5;
+  const cy = y - 7.5;
+  const r = Math.hypot(cx, cy);
+  if (r < 1.6) {
+    set(48, 92, 32);
+    return;
+  }
+  const rib = Math.abs(Math.sin(Math.atan2(cy, cx) * 4));
+  const n = hSigned(x, y, 580) * 8;
+  set(clamp(200 - rib * 40 + n), clamp(118 - rib * 24 + n * 0.6), clamp(28 + n * 0.3));
+}
+
+function paintPumpkinSide(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const rib = Math.abs(((x + 2) % 5) - 2);
+  const n = hSigned(x, y, 590) * 8;
+  let r = 214 - rib * 18 + n;
+  let g = 124 - rib * 10 + n * 0.5;
+  let b = 32 + n * 0.2;
+  if (y < 2) {
+    r *= 0.85;
+    g *= 0.9;
+  }
+  if (y > 13) {
+    r *= 0.75;
+    g *= 0.7;
+  }
+  set(clamp(r), clamp(g), clamp(b));
+}
+
+function paintLily(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const cx = x - 7.5;
+  const cy = y - 8;
+  const r = Math.hypot(cx, cy);
+  const notch = cy < -1 && Math.abs(cx) < 1.4;
+  if (r > 7.1 || notch) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 600);
+  if (Math.abs(cx) < 0.7 && cy > -1) set(36, 78, 32);
+  else set(clamp(48 + n * 10), clamp(122 + n * 12), clamp(52 + n * 6));
+}
+
+function paintVine(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const stem = Math.abs(x - 7.5 + Math.sin(y * 0.7) * 1.6) < 1.15;
+  const leaf = h01(x >> 1, y >> 1, 610) > 0.55 && Math.abs(x - 8) < 5 && y % 4 !== 0;
+  if (!stem && !leaf) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 611);
+  if (stem) set(clamp(36 + n * 6), clamp(78 + n * 8), clamp(32 + n * 4));
+  else set(clamp(52 + n * 10), clamp(118 + n * 12), clamp(44 + n * 6));
+}
+
+function paintGravel(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const cell = (h01(x >> 1, y >> 1, 620) * 5) | 0;
+  const n = hSigned(x, y, 621) * 10;
+  const tones = [
+    [132, 128, 120],
+    [108, 104, 98],
+    [148, 142, 132],
+    [92, 90, 86],
+    [120, 116, 108],
+  ];
+  const t = tones[cell]!;
+  set(clamp(t[0]! + n), clamp(t[1]! + n), clamp(t[2]! + n * 0.8));
+}
+
+function paintClay(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const n = hSigned(x, y, 630) * 8 + hSigned(x >> 2, y >> 2, 631) * 10;
+  set(clamp(168 + n), clamp(148 + n * 0.85), clamp(136 + n * 0.7));
+}
+
+function voidVeinField(x: number, y: number): number {
+  const a = Math.sin(x * 0.82 + y * 0.21);
+  const b = Math.sin(x * -0.28 + y * 0.94 + 1.3);
+  const c = Math.sin((x * 0.55 + y * 0.55) * 0.9 - 0.6);
+  const wobble = hSigned(x, y, 642) * 0.12;
+  return Math.min(Math.abs(a + wobble), Math.abs(b), Math.abs(c + a * 0.15));
+}
+
+function voidVeinColor(x: number, y: number, glow: number): [number, number, number] {
+  const pick = h01(x >> 2, y >> 2, 643);
+  const hot = Math.min(1, glow * 1.3);
+  if (pick > 0.72) return [clamp(40 + hot * 80), clamp(180 + hot * 70), clamp(210 + hot * 45)];
+  if (pick > 0.42) return [clamp(150 + hot * 90), clamp(40 + hot * 30), clamp(210 + hot * 45)];
+  return [clamp(220 + hot * 35), clamp(110 + hot * 80), clamp(30 + hot * 20)];
+}
+
+function paintVoidstone(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  emissiveOnly: boolean,
+): void {
+  const n = hSigned(x, y, 640) * 6;
+  const field = voidVeinField(x, y);
+  const glow = Math.max(0, 1 - field / 0.16);
+  if (emissiveOnly) {
+    if (glow < 0.08) {
+      set(0, 0, 0, 255);
+      return;
+    }
+    const [er, eg, eb] = voidVeinColor(x, y, glow);
+    set(er, eg, eb, 255);
+    return;
+  }
+  const base = 18 + n * 0.4 + h01(x >> 2, y >> 2, 641) * 8;
+  let r = base * 0.7;
+  let g = base * 0.55;
+  let b = base * 0.95;
+  if (glow > 0.05) {
+    const [vr, vg, vb] = voidVeinColor(x, y, glow);
+    const k = Math.min(1, glow * glow * 1.15);
+    r = r * (1 - k) + vr * k;
+    g = g * (1 - k) + vg * k;
+    b = b * (1 - k) + vb * k;
+  }
+  set(clamp(r), clamp(g), clamp(b));
+}
+
+function paintRift(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  emissiveOnly: boolean,
+): void {
+  const cx = (x - 7.5) / 7.5;
+  const swirl = Math.sin(y * 0.7 + cx * 2.4) * 0.5 + 0.5;
+  const band = 1 - Math.min(1, Math.abs(cx) * 1.05);
+  const n = h01(x, y, 650);
+  const core = Math.pow(band, 1.4) * (0.45 + swirl * 0.55);
+  const spark = n > 0.93 ? 1 : 0;
+  if (emissiveOnly) {
+    const e = Math.max(core, spark);
+    set(clamp(40 + e * 180 + spark * 40), clamp(10 + e * 40), clamp(80 + e * 175));
+    return;
+  }
+  set(
+    clamp(24 + core * 150 + spark * 80),
+    clamp(8 + core * 36 + n * 10),
+    clamp(48 + core * 190 + spark * 40),
+  );
+}
+
+export const ARCANE_TILE = 64;
+export const PORTAL_TILE = 65;
+
+export function blitArcaneEmissive(ctx: CanvasRenderingContext2D, pulse = 1): void {
+  const paint = (
+    tile: number,
+    fn: typeof paintVoidstone,
+  ) => {
+    const col = tile % ATLAS_TILES;
+    const row = Math.floor(tile / ATLAS_TILES);
+    const img = ctx.createImageData(TILE_SIZE, TILE_SIZE);
+    const d = img.data;
+    for (let y = 0; y < TILE_SIZE; y++) {
+      for (let x = 0; x < TILE_SIZE; x++) {
+        fn(x, y, (r, g, b) => {
+          const i = (y * TILE_SIZE + x) * 4;
+          d[i] = clamp(r * pulse);
+          d[i + 1] = clamp(g * pulse);
+          d[i + 2] = clamp(b * pulse);
+          d[i + 3] = 255;
+        }, true);
+      }
+    }
+    ctx.putImageData(img, col * TILE_SIZE, row * TILE_SIZE);
+  };
+  paint(ARCANE_TILE, paintVoidstone);
+  paint(PORTAL_TILE, paintRift);
 }
 
 function paintFurnaceFront(
@@ -1284,13 +1551,12 @@ export function atlasTileStyle(
   backgroundRepeat: string;
   imageRendering: "pixelated";
 } {
-  const col = tile % ATLAS_TILES;
-  const row = Math.floor(tile / ATLAS_TILES);
-  const n = ATLAS_TILES;
+  const col = tile % ATLAS_COLS;
+  const row = Math.floor(tile / ATLAS_COLS);
   return {
     backgroundImage: `url(${atlasUrl})`,
-    backgroundSize: `${n * 100}% ${n * 100}%`,
-    backgroundPosition: `${(col / (n - 1)) * 100}% ${(row / (n - 1)) * 100}%`,
+    backgroundSize: `${ATLAS_COLS * 100}% ${ATLAS_ROWS * 100}%`,
+    backgroundPosition: `${(col / Math.max(1, ATLAS_COLS - 1)) * 100}% ${(row / Math.max(1, ATLAS_ROWS - 1)) * 100}%`,
     backgroundRepeat: "no-repeat",
     imageRendering: "pixelated",
   };
@@ -1310,13 +1576,13 @@ export function tileUVs(tile: number): {
   u1: number;
   v1: number;
 } {
-  const col = tile % ATLAS_TILES;
-  const row = Math.floor(tile / ATLAS_TILES);
-  const u0 = col / ATLAS_TILES;
-  const u1 = (col + 1) / ATLAS_TILES;
-  const v1 = 1 - row / ATLAS_TILES;
-  const v0 = 1 - (row + 1) / ATLAS_TILES;
-  const pad = 0.5 / (ATLAS_TILES * TILE_SIZE);
+  const col = tile % ATLAS_COLS;
+  const row = Math.floor(tile / ATLAS_COLS);
+  const u0 = col / ATLAS_COLS;
+  const u1 = (col + 1) / ATLAS_COLS;
+  const v1 = 1 - row / ATLAS_ROWS;
+  const v0 = 1 - (row + 1) / ATLAS_ROWS;
+  const pad = 0.5 / (ATLAS_COLS * TILE_SIZE);
   return {
     u0: u0 + pad,
     v0: v0 + pad,

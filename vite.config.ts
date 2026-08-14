@@ -119,6 +119,34 @@ function authPopupPlugin(): Plugin {
   };
 }
 
+function isolationHeadersPlugin(): Plugin {
+  const headers: Record<string, string> = {
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Embedder-Policy": "require-corp",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    // Isolates this document even inside a cross-origin preview iframe (Chrome 137+)
+    "Document-Isolation-Policy": "isolate-and-require-corp",
+  };
+  const apply = (res: { setHeader: (k: string, v: string) => void }) => {
+    for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+  };
+  return {
+    name: "coop-coep-isolation",
+    configureServer(server) {
+      server.middlewares.use((_req, res, next) => {
+        apply(res);
+        next();
+      });
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use((_req, res, next) => {
+        apply(res);
+        next();
+      });
+    },
+  };
+}
+
 // `0.0.0.0:8080` is the live-preview contract — don't change host/port.
 // Keep `nitro` gated to `build` (the Vercel deploy target): enabled in dev it
 // opens a second dev-server port, which breaks the single-port preview.
@@ -129,9 +157,16 @@ export default defineConfig(({ command }) => ({
     host: "0.0.0.0",
     port: 8080,
     strictPort: true,
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "Document-Isolation-Policy": "isolate-and-require-corp",
+    },
   },
   resolve: { tsconfigPaths: true },
   plugins: [
+    isolationHeadersPlugin(),
     pgliteBootstrapPlugin(),
     // Before tanstackStart so /auth/popup never falls through to the SPA.
     authPopupPlugin(),

@@ -547,33 +547,35 @@ function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
 
 function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
   const w = 4;
+  const h = 5;
   const floor = siteFloorY(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, {
     maxSlope: 3,
     minAboveSea: 0,
   });
   if (floor === null) return;
   const y = floor;
-  ensureFoundations(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, y, Block.COBBLE);
-  const h = 5;
+  ensureFoundations(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, y, Block.ARCANE);
+  const broken = hash2(ox, oz, ctx.seed + 31);
   for (let dy = 0; dy <= h; dy++) {
-    setBlock(ctx, ox, y + dy, oz, Block.COBBLE);
-    setBlock(ctx, ox + w, y + dy, oz, Block.COBBLE);
+    if (broken < 0.22 && dy === h) continue;
+    setBlock(ctx, ox, y + dy, oz, Block.ARCANE);
+    if (!(broken > 0.82 && dy === 2)) setBlock(ctx, ox + w, y + dy, oz, Block.ARCANE);
   }
   for (let dx = 0; dx <= w; dx++) {
-    setBlock(ctx, ox + dx, y, oz, Block.COBBLE);
-    setBlock(ctx, ox + dx, y + h, oz, Block.COBBLE);
+    setBlock(ctx, ox + dx, y, oz, Block.ARCANE);
+    if (!(broken > 0.7 && dx === 2)) setBlock(ctx, ox + dx, y + h, oz, Block.ARCANE);
   }
-  setBlock(ctx, ox - 1, y + 1, oz + 1, Block.COBBLE);
-  setBlock(ctx, ox + w + 1, y + 2, oz - 1, Block.COBBLE);
-  ensureColumnGrounded(ctx, ox + 1, oz, y, Block.COBBLE);
-  setBlock(ctx, ox + 1, y - 1, oz, Block.COBBLE);
-  for (let dy = 1; dy < h; dy++) {
-    for (let dx = 1; dx < w; dx++) {
-      if (hash2(ox + dx, oz + dy, ctx.seed) > 0.35) {
-        setBlock(ctx, ox + dx, y + dy, oz, Block.ICE);
+  // Intact-enough frames get a living rift
+  if (broken > 0.28) {
+    for (let dy = 1; dy < h; dy++) {
+      for (let dx = 1; dx < w; dx++) {
+        setBlock(ctx, ox + dx, y + dy, oz, Block.PORTAL);
       }
     }
   }
+  setBlock(ctx, ox - 1, y + 1, oz + 1, Block.ARCANE);
+  setBlock(ctx, ox + w + 1, y + 2, oz - 1, Block.ARCANE);
+  ensureColumnGrounded(ctx, ox + 1, oz, y, Block.ARCANE);
   placeLootChest(ctx, ox + 2, y + 1, oz + 2);
 }
 
@@ -735,7 +737,7 @@ const STRUCTURES: Array<{
   { name: "shipwreck", weight: 0.9, place: placeShipwreck, biomes: [Biome.OCEAN, Biome.BEACH, Biome.SWAMP] },
   { name: "well", weight: 0.8, place: placeWell, avoidOcean: true },
   { name: "mushroom", weight: 0.75, place: placeGiantMushroom, biomes: [Biome.FOREST, Biome.SWAMP, Biome.PLAINS] },
-  { name: "portal", weight: 0.55, place: placeRuinedPortal, avoidOcean: true },
+  { name: "portal", weight: 0.85, place: placeRuinedPortal, avoidOcean: true },
   { name: "sky_islet", weight: 0.5, place: placeSkyIslet, avoidOcean: true },
   { name: "dungeon", weight: 0.65, place: placeDungeonMouth, avoidOcean: true },
   { name: "bridge", weight: 0.7, place: placeBridgeRuin },

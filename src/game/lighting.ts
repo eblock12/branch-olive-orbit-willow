@@ -422,17 +422,29 @@ export function estimateColumnSky(
   y: number,
   lz: number,
 ): number {
+  return estimateSkyInBlocks(chunk.blocks, lx, y, lz);
+}
+
+/** Same as estimateColumnSky but for a raw voxel buffer (worker). */
+export function estimateSkyInBlocks(
+  blocks: Uint8Array,
+  lx: number,
+  y: number,
+  lz: number,
+): number {
   if (y >= CHUNK_HEIGHT) return 15;
   if (y < 0) return 0;
+  const at = (yy: number) =>
+    blocks[lx + lz * CHUNK_SIZE + yy * CHUNK_SIZE * CHUNK_SIZE] ?? 0;
   let s = 15;
   for (let yy = CHUNK_HEIGHT - 1; yy >= y; yy--) {
-    const id = chunk.get(lx, yy, lz);
+    const id = at(yy);
     if (blocksLight(id)) {
       s = 0;
     } else if (yy > y && s > 0) {
       s = Math.max(0, s - lightLoss(id));
     }
   }
-  if (blocksLight(chunk.get(lx, y, lz))) return 0;
+  if (blocksLight(at(y))) return 0;
   return s;
 }

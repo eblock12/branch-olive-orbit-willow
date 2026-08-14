@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isPlant, isSolid, isWater, isSourceWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, canSupportTorch, canSupportLadder, torchAttachDir, ladderAttachDir, doorIsUpper, doorMateId, waterLevel, waterIdForLevel, lightEmission, blocksLight } from "./blocks";
+import { Block, isPlant, isSolid, isWater, isSourceWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isLeaves, canSupportTorch, canSupportLadder, torchAttachDir, ladderAttachDir, doorIsUpper, doorMateId, waterLevel, waterIdForLevel, lightEmission, blocksLight } from "./blocks";
 import { computeChunkLighting, applyBlockLightEdit, estimateColumnSky } from "./lighting";
 import {
   Chunk,
@@ -9,6 +9,7 @@ import {
   buildChunkGeometry,
   buildChunkWaterGeometry,
   chunkKey,
+  geometryFromPacked,
   worldToChunk,
   lodFromChunkDist,
   type ChunkKey,
@@ -18,8 +19,31 @@ import { sampleBiome, BIOME_LABEL, type BiomeId } from "./biomes";
 import { generateChunkBlocks } from "./chunkGen";
 import type { ChunkWorkerRequest, ChunkWorkerResponse } from "./chunkWorker";
 import { packEdit, unpackEdit } from "./save";
+import {
+  allocMeshSlot,
+  allocSlot,
+  blkView,
+  createChunkShare,
+  freeMeshSlot,
+  freeSlot,
+  markSlot,
+  meshViews,
+  readMeshHeader,
+  SLOT_BOUND,
+  skyView,
+  voxelView,
+  writeSlotJob,
+  type ChunkShare,
+} from "./chunkShared";
 
 type GenJob = { cx: number; cz: number; key: ChunkKey };
+
+function isAppleTouchDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/iP(hone|ad|od)/.test(ua)) return true;
+  return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+}
 
 export type BlockPop = {
   x: number;
@@ -48,6 +72,27 @@ export class World {
   private genQueue: GenJob[] = [];
   private pendingGen = new Set<ChunkKey>();
   private generating = new Set<ChunkKey>();
+  private readyGen: {
+    cx: number;
+    cz: number;
+    key: ChunkKey;
+    blocks?: Uint8Array;
+    slot?: number;
+  }[] = [];
+  private readyKeys = new Set<ChunkKey>();
+  private ingestPerFrame = 1;
+  private share: ChunkShare | null = null;
+  private pendingMesh = new Set<ChunkKey>();
+  private readyMeshes: {
+    key: ChunkKey;
+    cx: number;
+    cz: number;
+    meshSlot: number;
+    lod: ChunkLod;
+    epoch: number;
+    overflow: boolean;
+    emitters: number[];
+  }[] = [];
   private workers: Worker[] = [];
   private idleWorkers: Worker[] = [];
   private jobId = 1;
@@ -77,14 +122,14 @@ export class World {
     material: THREE.MeshLambertMaterial,
     waterMaterial: THREE.Material,
     viewRadius = 4,
-    maxMeshesPerFrame = 2,
+    maxMeshesPerFrame = 1,
   ) {
     this.seed = seed;
     this.material = material;
     this.waterMaterial = waterMaterial;
     this.viewRadius = viewRadius;
     this.maxMeshesPerFrame = maxMeshesPerFrame;
-    this.meshBudgetMs = 10;
+    this.meshBudgetMs = 2;
 
 
     this.group.add(this.waterGroup);
@@ -97,10 +142,10 @@ export class World {
       return;
     }
     try {
-      const n = Math.min(
-        2,
-        Math.max(1, (navigator.hardwareConcurrency || 2) - 1),
-      );
+      this.share = createChunkShare();
+      const n = isAppleTouchDevice()
+        ? 1
+        : Math.min(2, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
       for (let i = 0; i < n; i++) {
         const w = new Worker(new URL("./chunkWorker.ts", import.meta.url), {
           type: "module",
@@ -109,10 +154,18 @@ export class World {
           this.onWorkerResult(w, ev.data);
         };
         w.onerror = () => {
-          // Fall back to main-thread generation if workers fail
           this.useWorkers = false;
           this.recycleWorker(w);
         };
+        if (this.share) {
+          w.postMessage({
+            type: "init",
+            control: this.share.control,
+            voxels: this.share.voxels,
+            meshControl: this.share.meshControl,
+            mesh: this.share.mesh,
+          } satisfies ChunkWorkerRequest);
+        }
         this.workers.push(w);
         this.idleWorkers.push(w);
       }
@@ -126,34 +179,198 @@ export class World {
       this.idleWorkers.push(w);
     }
     this.pumpGenQueue();
+    this.pumpMeshQueue();
   }
 
   private onWorkerResult(w: Worker, data: ChunkWorkerResponse): void {
     const meta = this.jobMeta.get(data.id);
     this.jobMeta.delete(data.id);
     this.recycleWorker(w);
-    if (!meta) return;
+    if (data.type === "meshed") {
+      this.onMeshResult(data);
+      return;
+    }
+    if (!meta) {
+      if (data.slot != null) this.releaseSlot(data.slot);
+      return;
+    }
     const { cx, cz, key } = meta;
     this.generating.delete(key);
-    this.pendingGen.delete(key);
 
-    // Drop if no longer needed (player left area)
     const dist =
       (cx - this.lastPcx) * (cx - this.lastPcx) +
       (cz - this.lastPcz) * (cz - this.lastPcz);
     if (dist > (this.viewRadius + 1) * (this.viewRadius + 1)) {
+      if (data.slot != null) this.releaseSlot(data.slot);
       return;
     }
-    if (this.chunks.has(key)) return;
+    if (this.chunks.has(key) || this.readyKeys.has(key)) {
+      if (data.slot != null) this.releaseSlot(data.slot);
+      return;
+    }
 
+    this.readyGen.push({
+      cx,
+      cz,
+      key,
+      slot: data.slot,
+      blocks: data.blocks,
+    });
+    this.readyKeys.add(key);
+  }
+
+  private ingestReady(): void {
+    if (this.readyGen.length === 0) return;
+    this.readyGen.sort((a, b) => {
+      const da = (a.cx - this.lastPcx) ** 2 + (a.cz - this.lastPcz) ** 2;
+      const db = (b.cx - this.lastPcx) ** 2 + (b.cz - this.lastPcz) ** 2;
+      return da - db;
+    });
+    let taken = 0;
+    while (this.readyGen.length > 0 && taken < this.ingestPerFrame) {
+      const job = this.readyGen.shift()!;
+      this.readyKeys.delete(job.key);
+      const dist =
+        (job.cx - this.lastPcx) * (job.cx - this.lastPcx) +
+        (job.cz - this.lastPcz) * (job.cz - this.lastPcz);
+      if (dist > (this.viewRadius + 1) * (this.viewRadius + 1)) {
+        if (job.slot != null) this.releaseSlot(job.slot);
+        continue;
+      }
+      if (this.chunks.has(job.key)) {
+        if (job.slot != null) this.releaseSlot(job.slot);
+        continue;
+      }
+      const chunk = new Chunk(job.cx, job.cz);
+      const blocks =
+        job.slot != null && this.share
+          ? voxelView(this.share.voxels, job.slot)
+          : job.blocks;
+      if (!blocks) {
+        if (job.slot != null) this.releaseSlot(job.slot);
+        continue;
+      }
+      chunk.applyBlocks(blocks);
+      if (job.slot != null && this.share) {
+        chunk.sharedSlot = job.slot;
+        markSlot(this.share.ctrl, job.slot, SLOT_BOUND);
+        this.bindSlotViews(chunk, job.slot);
+      }
+      this.applyEditsToChunk(chunk);
+      this.indexChestsInChunk(chunk);
+      chunk.targetLod = lodFromChunkDist(
+        job.cx - this.lastPcx,
+        job.cz - this.lastPcz,
+      );
+      this.chunks.set(job.key, chunk);
+      this.meshQueue.push(chunk);
+      this.invalidateNeighbors(job.cx, job.cz);
+      taken++;
+    }
+  }
+
+  private bindSlotViews(chunk: Chunk, slot: number): void {
+    if (!this.share) return;
+    chunk.skyLight = skyView(this.share.voxels, slot);
+    chunk.blockLight = blkView(this.share.voxels, slot);
+  }
+
+  private releaseSlot(slot: number): void {
+    if (!this.share || slot < 0) return;
+    freeSlot(this.share.ctrl, slot);
+  }
+
+  private releaseMeshSlot(slot: number): void {
+    if (!this.share || slot < 0) return;
+    freeMeshSlot(this.share.meshCtrl, slot);
+  }
+
+  private neighborSlots(
+    cx: number,
+    cz: number,
+  ): {
+    slots: [number, number, number, number];
+    lit: [boolean, boolean, boolean, boolean];
+  } {
+    const pick = (dx: number, dz: number) => {
+      const n = this.chunks.get(chunkKey(cx + dx, cz + dz));
+      return {
+        slot: n?.sharedSlot ?? -1,
+        lit: !!n?.lightReady,
+      };
+    };
+    const px = pick(1, 0);
+    const nx = pick(-1, 0);
+    const pz = pick(0, 1);
+    const nz = pick(0, -1);
+    return {
+      slots: [px.slot, nx.slot, pz.slot, nz.slot],
+      lit: [px.lit, nx.lit, pz.lit, nz.lit],
+    };
+  }
+
+  /** Remesh close neighbors that were baked before this chunk had light. */
+  private dirtyUnlitSeams(chunk: Chunk): void {
+    const dirs: [number, number, number][] = [
+      [1, 0, 2],
+      [-1, 0, 1],
+      [0, 1, 8],
+      [0, -1, 4],
+    ];
+    for (const [dx, dz, theirBit] of dirs) {
+      const n = this.chunks.get(chunkKey(chunk.cx + dx, chunk.cz + dz));
+      if (!n?.mesh) continue;
+      if (lodFromChunkDist(n.cx - this.lastPcx, n.cz - this.lastPcz) !== 0) {
+        continue;
+      }
+      if (n.bakeMask & theirBit) continue;
+      n.dirty = true;
+      n.lightDirty = true;
+    }
+  }
+
+  private onMeshResult(data: ChunkWorkerResponse): void {
+    const key = chunkKey(data.cx, data.cz);
+    this.pendingMesh.delete(key);
+    const meshSlot = data.meshSlot;
+    if (meshSlot == null) return;
+    const chunk = this.chunks.get(key);
+    if (!chunk || data.epoch !== chunk.meshEpoch || data.overflow) {
+      this.releaseMeshSlot(meshSlot);
+      if (chunk && data.overflow) {
+        chunk.dirty = false;
+        this.remeshChunk(chunk);
+      }
+      return;
+    }
+    this.readyMeshes.push({
+      key,
+      cx: data.cx,
+      cz: data.cz,
+      meshSlot,
+      lod: data.lod ?? chunk.targetLod,
+      epoch: data.epoch ?? 0,
+      overflow: !!data.overflow,
+      emitters: data.emitters ?? [],
+    });
+  }
+
+  private bindGenerated(cx: number, cz: number, seed: number): Chunk {
     const chunk = new Chunk(cx, cz);
-    chunk.applyBlocks(data.blocks);
-    this.applyEditsToChunk(chunk);
-    this.indexChestsInChunk(chunk);
-    chunk.targetLod = lodFromChunkDist(cx - this.lastPcx, cz - this.lastPcz);
-    this.chunks.set(key, chunk);
-    this.meshQueue.push(chunk);
-    this.invalidateNeighbors(cx, cz);
+    if (this.share) {
+      const slot = allocSlot(this.share.ctrl, this.share.slotCount);
+      if (slot >= 0) {
+        const view = voxelView(this.share.voxels, slot);
+        generateChunkBlocks(cx, cz, seed, view);
+        chunk.applyBlocks(view);
+        chunk.sharedSlot = slot;
+        markSlot(this.share.ctrl, slot, SLOT_BOUND);
+        this.bindSlotViews(chunk, slot);
+        return chunk;
+      }
+    }
+    chunk.applyBlocks(generateChunkBlocks(cx, cz, seed));
+    return chunk;
   }
 
   private invalidateNeighbors(cx: number, cz: number): void {
@@ -165,9 +382,10 @@ export class World {
     ] as const) {
       const n = this.chunks.get(chunkKey(cx + dx, cz + dz));
       if (n) {
-        n.dirty = true;
         n.lightDirty = true;
-        if (!this.meshQueue.includes(n)) this.meshQueue.push(n);
+        if (lodFromChunkDist(n.cx - this.lastPcx, n.cz - this.lastPcz) === 0) {
+          n.dirty = true;
+        }
       }
     }
   }
@@ -175,13 +393,13 @@ export class World {
   private enqueueGen(cx: number, cz: number): void {
     const key = chunkKey(cx, cz);
     if (this.chunks.has(key)) return;
+    if (this.readyKeys.has(key)) return;
     if (this.pendingGen.has(key) || this.generating.has(key)) return;
     this.pendingGen.add(key);
     this.genQueue.push({ cx, cz, key });
   }
 
   private pumpGenQueue(): void {
-    // Sort queue by distance to player
     this.genQueue.sort((a, b) => {
       const da = (a.cx - this.lastPcx) ** 2 + (a.cz - this.lastPcz) ** 2;
       const db = (b.cx - this.lastPcx) ** 2 + (b.cz - this.lastPcz) ** 2;
@@ -189,13 +407,11 @@ export class World {
     });
 
     if (!this.useWorkers || this.workers.length === 0) {
-      // Main-thread: generate at most 1 chunk per pump to avoid spikes
       const job = this.genQueue.shift();
       if (!job) return;
       this.pendingGen.delete(job.key);
       if (this.chunks.has(job.key)) return;
-      const chunk = new Chunk(job.cx, job.cz);
-      chunk.applyBlocks(generateChunkBlocks(job.cx, job.cz, this.seed));
+      const chunk = this.bindGenerated(job.cx, job.cz, this.seed);
       this.applyEditsToChunk(chunk);
       this.indexChestsInChunk(chunk);
       this.chunks.set(job.key, chunk);
@@ -209,31 +425,54 @@ export class World {
         this.pendingGen.delete(job.key);
         continue;
       }
+      let slot = -1;
+      if (this.share) {
+        slot = allocSlot(this.share.ctrl, this.share.slotCount);
+        if (slot < 0) {
+          this.genQueue.unshift(job);
+          break;
+        }
+      }
       const w = this.idleWorkers.pop()!;
       const id = this.jobId++;
       this.generating.add(job.key);
       this.pendingGen.delete(job.key);
       this.jobMeta.set(id, { cx: job.cx, cz: job.cz, key: job.key });
-      const req: ChunkWorkerRequest = {
-        id,
-        cx: job.cx,
-        cz: job.cz,
-        seed: this.seed,
-      };
-      w.postMessage(req);
+      if (this.share && slot >= 0) {
+        writeSlotJob(this.share.ctrl, slot, id, job.cx, job.cz);
+        w.postMessage({
+          type: "gen",
+          id,
+          cx: job.cx,
+          cz: job.cz,
+          seed: this.seed,
+          slot,
+        } satisfies ChunkWorkerRequest);
+      } else {
+        w.postMessage({
+          id,
+          cx: job.cx,
+          cz: job.cz,
+          seed: this.seed,
+        } satisfies ChunkWorkerRequest);
+      }
     }
   }
 
-  /** Synchronously generate a chunk (spawn / critical path). */
   private generateSync(cx: number, cz: number): Chunk {
     const key = chunkKey(cx, cz);
     let chunk = this.chunks.get(key);
     if (chunk) return chunk;
     this.pendingGen.delete(key);
     this.generating.delete(key);
+    this.readyGen = this.readyGen.filter((j) => {
+      if (j.key !== key) return true;
+      this.readyKeys.delete(j.key);
+      if (j.slot != null) this.releaseSlot(j.slot);
+      return false;
+    });
     this.genQueue = this.genQueue.filter((j) => j.key !== key);
-    chunk = new Chunk(cx, cz);
-    chunk.applyBlocks(generateChunkBlocks(cx, cz, this.seed));
+    chunk = this.bindGenerated(cx, cz, this.seed);
     this.applyEditsToChunk(chunk);
     this.indexChestsInChunk(chunk);
     chunk.targetLod = lodFromChunkDist(cx - this.lastPcx, cz - this.lastPcz);
@@ -268,7 +507,9 @@ export class World {
     if (!chunk) return 15;
     const lx = ((wx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
     const lz = ((wz % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-    if (!chunk.skyLight) return estimateColumnSky(chunk, lx, wy, lz);
+    if (!chunk.skyLight || !chunk.lightReady) {
+      return estimateColumnSky(chunk, lx, wy, lz);
+    }
     return chunk.getSky(lx, wy, lz);
   }
 
@@ -518,22 +759,8 @@ export class World {
     );
   }
 
-  /** Light existing neighbors before we sample their maps onto our faces. */
-  private ensureLitNeighbors(chunk: Chunk): void {
-    const selfUnlit = chunk.lightDirty || !chunk.skyLight;
-    for (const [dx, dz] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ] as const) {
-      const n = this.chunks.get(chunkKey(chunk.cx + dx, chunk.cz + dz));
-      if (!n || (!n.lightDirty && n.skyLight)) continue;
-      this.relightChunk(n);
-      // They used this chunk's old/empty map — relight again once we fill it.
-      if (selfUnlit) n.lightDirty = true;
-    }
-  }
+  /** Lighting of neighbors happens in the worker bake now. */
+  private ensureLitNeighbors(_chunk: Chunk): void {}
 
   private scheduleWaterAround(wx: number, wy: number, wz: number): void {
     this.queueWater(wx, wy, wz);
@@ -811,6 +1038,12 @@ export class World {
       if (isDoorCell(mate)) this.writeBlock(wx, mateY, wz, Block.AIR, false);
       out.push({ x: wx, y: wy, z: wz, id: Block.DOOR });
       return;
+    } else if (id === Block.LILY_PAD) {
+      const below = this.getBlock(wx, wy - 1, wz);
+      if (isWater(below) || (isSolid(below) && !isPlant(below))) return;
+    } else if (id === Block.VINE) {
+      const above = this.getBlock(wx, wy + 1, wz);
+      if (isLeaves(above) || above === Block.VINE) return;
     } else {
       const below = this.getBlock(wx, wy - 1, wz);
       if (isSolid(below) && !isPlant(below)) return;
@@ -827,7 +1060,7 @@ export class World {
   /** Opaque cube sitting on grass — snow / leaves / plants do not count. */
   private smothersGrass(id: number): boolean {
     if (id === Block.AIR || isPlant(id) || isWater(id)) return false;
-    if (id === Block.LEAVES || id === Block.ICE || id === Block.SNOW) return false;
+    if (isLeaves(id) || id === Block.ICE || id === Block.SNOW) return false;
     return isSolid(id);
   }
 
@@ -1080,10 +1313,19 @@ export class World {
     });
 
     this.pumpGenQueue();
+    this.ingestReady();
+    this.pumpMeshQueue();
+    this.installReadyMesh();
 
     this.flushTickRemesh();
 
-    // Time-budgeted meshing (never block a full frame on many remeshes)
+    const useWorkerMesh =
+      !!this.share && this.useWorkers && this.workers.length > 0;
+    if (useWorkerMesh) {
+      // Worker bake owns streaming remesh; don't let this list grow forever
+      this.meshQueue = this.meshQueue.filter((c) => c.sharedSlot < 0);
+    }
+
     this.meshQueue.sort((a, b) => {
       const da = (a.cx - pcx) ** 2 + (a.cz - pcz) ** 2;
       const db = (b.cx - pcx) ** 2 + (b.cz - pcz) ** 2;
@@ -1091,12 +1333,16 @@ export class World {
     });
 
     const t0 = performance.now();
+    const meshCap = 1;
+    const budget = 2;
     let built = 0;
-    while (this.meshQueue.length > 0 && built < this.maxMeshesPerFrame) {
-      if (performance.now() - t0 > this.meshBudgetMs) break;
+    while (this.meshQueue.length > 0 && built < meshCap) {
+      if (performance.now() - t0 > budget) break;
       const chunk = this.meshQueue.shift()!;
       if (!this.chunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
       if (!chunk.dirty && chunk.mesh) continue;
+      if (this.pendingMesh.has(chunkKey(chunk.cx, chunk.cz))) continue;
+      if (useWorkerMesh && chunk.sharedSlot >= 0) continue;
       this.remeshChunk(chunk);
       built++;
     }
@@ -1105,6 +1351,8 @@ export class World {
     for (const [key, chunk] of this.chunks) {
       if (!needed.has(key)) {
         this.dropChestsInChunk(chunk);
+        this.releaseSlot(chunk.sharedSlot);
+        chunk.sharedSlot = -1;
         if (chunk.mesh) this.group.remove(chunk.mesh);
         if (chunk.waterMesh) this.waterGroup.remove(chunk.waterMesh);
         chunk.dispose();
@@ -1142,6 +1390,148 @@ export class World {
     this.meshQueue = [];
   }
 
+  private pumpMeshQueue(): void {
+    if (!this.share || !this.useWorkers || this.workers.length === 0) return;
+    const share = this.share;
+    while (this.idleWorkers.length > 0) {
+      const meshSlot = allocMeshSlot(share.meshCtrl);
+      if (meshSlot < 0) break;
+      let best: Chunk | null = null;
+      let bestD = 1e9;
+      for (const chunk of this.chunks.values()) {
+        if (!chunk.dirty && chunk.mesh) continue;
+        if (chunk.sharedSlot < 0) continue;
+        if (this.pendingMesh.has(chunkKey(chunk.cx, chunk.cz))) continue;
+        const d =
+          (chunk.cx - this.lastPcx) ** 2 + (chunk.cz - this.lastPcz) ** 2;
+        if (d < bestD) {
+          bestD = d;
+          best = chunk;
+        }
+      }
+      if (!best) {
+        this.releaseMeshSlot(meshSlot);
+        break;
+      }
+      const w = this.idleWorkers.pop()!;
+      const id = this.jobId++;
+      const key = chunkKey(best.cx, best.cz);
+      this.pendingMesh.add(key);
+      this.jobMeta.set(id, { cx: best.cx, cz: best.cz, key });
+      let lod = best.targetLod;
+      if (
+        lodFromChunkDist(best.cx - this.lastPcx, best.cz - this.lastPcz) === 0
+      ) {
+        lod = 0;
+        best.targetLod = 0;
+      }
+      const neigh = this.neighborSlots(best.cx, best.cz);
+      best.bakeMask =
+        (neigh.lit[0] ? 1 : 0) |
+        (neigh.lit[1] ? 2 : 0) |
+        (neigh.lit[2] ? 4 : 0) |
+        (neigh.lit[3] ? 8 : 0);
+      w.postMessage({
+        type: "mesh",
+        id,
+        cx: best.cx,
+        cz: best.cz,
+        slot: best.sharedSlot,
+        meshSlot,
+        lod,
+        neigh: neigh.slots,
+        neighLit: neigh.lit,
+        epoch: best.meshEpoch,
+        seed: this.seed,
+      } satisfies ChunkWorkerRequest);
+    }
+  }
+
+  private installReadyMesh(): void {
+    if (this.readyMeshes.length === 0 || !this.share) return;
+    this.readyMeshes.sort((a, b) => {
+      const da = (a.cx - this.lastPcx) ** 2 + (a.cz - this.lastPcz) ** 2;
+      const db = (b.cx - this.lastPcx) ** 2 + (b.cz - this.lastPcz) ** 2;
+      return da - db;
+    });
+    const job = this.readyMeshes.shift()!;
+    const chunk = this.chunks.get(job.key);
+    if (!chunk || chunk.meshEpoch !== job.epoch) {
+      this.releaseMeshSlot(job.meshSlot);
+      return;
+    }
+    const header = readMeshHeader(this.share.meshCtrl, job.meshSlot);
+    if (header.overflow) {
+      this.releaseMeshSlot(job.meshSlot);
+      this.remeshChunk(chunk);
+      return;
+    }
+    const views = meshViews(this.share.mesh, job.meshSlot);
+    const lod = job.lod;
+
+    if (chunk.mesh) {
+      this.group.remove(chunk.mesh);
+      chunk.mesh.geometry.dispose();
+      chunk.mesh = null;
+    }
+    if (header.verts > 0) {
+      const geo = geometryFromPacked({
+        positions: views.pos.slice(0, header.verts * 3),
+        normals: views.nrm.slice(0, header.verts * 3),
+        uvs: views.uv.slice(0, header.verts * 2),
+        colors: views.col.slice(0, header.verts * 3),
+        winds: views.wind.slice(0, header.verts),
+        lights: views.light.slice(0, header.verts * 2),
+        indices: views.idx.slice(0, header.idx),
+      });
+      const mesh = new THREE.Mesh(geo, this.material);
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+      mesh.updateMatrixWorld(true);
+      mesh.frustumCulled = true;
+      mesh.castShadow = lod === 0;
+      mesh.receiveShadow = lod < 2;
+      const depthMat = this.material.userData.windDepthMaterial as
+        | THREE.Material
+        | undefined;
+      if (depthMat && lod === 0) mesh.customDepthMaterial = depthMat;
+      chunk.mesh = mesh;
+      this.group.add(mesh);
+    }
+
+    if (chunk.waterMesh) {
+      this.waterGroup.remove(chunk.waterMesh);
+      chunk.waterMesh.geometry.dispose();
+      chunk.waterMesh = null;
+    }
+    if (header.wverts > 0) {
+      const wgeo = geometryFromPacked({
+        positions: views.wpos.slice(0, header.wverts * 3),
+        normals: views.wnrm.slice(0, header.wverts * 3),
+        colors: views.wcol.slice(0, header.wverts * 3),
+        indices: views.widx.slice(0, header.widx),
+      });
+      const wmesh = new THREE.Mesh(wgeo, this.waterMaterial);
+      wmesh.matrixAutoUpdate = false;
+      wmesh.updateMatrix();
+      wmesh.updateMatrixWorld(true);
+      wmesh.frustumCulled = true;
+      wmesh.castShadow = false;
+      wmesh.receiveShadow = lod < 2;
+      wmesh.renderOrder = 3;
+      chunk.waterMesh = wmesh;
+      this.waterGroup.add(wmesh);
+    }
+
+    chunk.emitters = job.emitters.slice();
+    chunk.lightDirty = false;
+    chunk.lightReady = lod < 2;
+    chunk.meshLod = lod;
+    chunk.dirty = false;
+    this.releaseMeshSlot(job.meshSlot);
+    if (lod === 0) this.dirtyUnlitSeams(chunk);
+  }
+
   applyWindDepthMaterial(depthMat: THREE.Material): void {
     this.material.userData.windDepthMaterial = depthMat;
     for (const chunk of this.chunks.values()) {
@@ -1152,6 +1542,7 @@ export class World {
   }
 
   remeshChunk(chunk: Chunk): void {
+    chunk.meshEpoch++;
     const getBlock = (wx: number, wy: number, wz: number) =>
       this.getBlock(wx, wy, wz);
     const isLoaded = (wx: number, wz: number) => {
@@ -1174,7 +1565,7 @@ export class World {
     }
 
     this.ensureLitNeighbors(chunk);
-    if (chunk.lightDirty || !chunk.skyLight) {
+    if (lod < 2 && (chunk.lightDirty || !chunk.skyLight)) {
       this.relightChunk(chunk);
     }
 
@@ -1183,7 +1574,7 @@ export class World {
       sky: this.getSkyLight(wx, wy, wz),
     });
 
-    const geo = buildChunkGeometry(chunk, getBlock, lod, undefined, getLight);
+    const geo = buildChunkGeometry(chunk, getBlock, lod, undefined, getLight, this.seed);
     if (chunk.mesh) {
       this.group.remove(chunk.mesh);
       chunk.mesh.geometry.dispose();
@@ -1227,6 +1618,14 @@ export class World {
 
     chunk.meshLod = lod;
     chunk.dirty = false;
+    chunk.lightReady = lod < 2;
+    const neigh = this.neighborSlots(chunk.cx, chunk.cz);
+    chunk.bakeMask =
+      (neigh.lit[0] ? 1 : 0) |
+      (neigh.lit[1] ? 2 : 0) |
+      (neigh.lit[2] ? 4 : 0) |
+      (neigh.lit[3] ? 8 : 0);
+    if (lod === 0) this.dirtyUnlitSeams(chunk);
   }
 
   getSurfaceY(wx: number, wz: number): number {
@@ -1281,18 +1680,27 @@ export class World {
   getQueueStats(): {
     queued: number;
     generating: number;
+    ready: number;
     mesh: number;
     loaded: number;
     workers: number;
     idleWorkers: number;
+    shared: boolean;
   } {
+    let waiting = this.pendingMesh.size + this.readyMeshes.length;
+    for (const chunk of this.chunks.values()) {
+      if (this.pendingMesh.has(chunkKey(chunk.cx, chunk.cz))) continue;
+      if (chunk.dirty || !chunk.mesh) waiting++;
+    }
     return {
       queued: this.genQueue.length,
       generating: this.generating.size,
-      mesh: this.meshQueue.length,
+      ready: this.readyGen.length,
+      mesh: waiting,
       loaded: this.chunks.size,
       workers: this.workers.length,
       idleWorkers: this.idleWorkers.length,
+      shared: !!this.share,
     };
   }
   ensureChunkAt(wx: number, wz: number): void {
@@ -1302,6 +1710,8 @@ export class World {
 
   dispose(): void {
     for (const chunk of this.chunks.values()) {
+      this.releaseSlot(chunk.sharedSlot);
+      chunk.sharedSlot = -1;
       if (chunk.mesh) this.group.remove(chunk.mesh);
       if (chunk.waterMesh) this.waterGroup.remove(chunk.waterMesh);
       chunk.dispose();
@@ -1309,6 +1719,11 @@ export class World {
     this.chunks.clear();
     this.meshQueue = [];
     this.genQueue = [];
+    this.readyGen = [];
+    this.readyKeys.clear();
+    for (const m of this.readyMeshes) this.releaseMeshSlot(m.meshSlot);
+    this.readyMeshes = [];
+    this.pendingMesh.clear();
     for (const w of this.workers) w.terminate();
     this.workers = [];
     this.idleWorkers = [];

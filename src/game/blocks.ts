@@ -65,11 +65,35 @@ export const Block = {
   LADDER_PX: 73,
   LADDER_NZ: 74,
   LADDER_PZ: 75,
+  /** Inventory — world uses PLANKS_STAIR_NX…PZ */
+  PLANKS_STAIR: 76,
+  PLANKS_STAIR_NX: 77,
+  PLANKS_STAIR_PX: 78,
+  PLANKS_STAIR_NZ: 79,
+  PLANKS_STAIR_PZ: 80,
+  PLANKS_SLAB: 81,
+  COBBLE_STAIR: 82,
+  COBBLE_STAIR_NX: 83,
+  COBBLE_STAIR_PX: 84,
+  COBBLE_STAIR_NZ: 85,
+  COBBLE_STAIR_PZ: 86,
+  COBBLE_SLAB: 87,
+  BIRCH_WOOD: 88,
+  BIRCH_LEAVES: 89,
+  SPRUCE_WOOD: 90,
+  SPRUCE_LEAVES: 91,
+  PUMPKIN: 92,
+  LILY_PAD: 93,
+  VINE: 94,
+  GRAVEL: 95,
+  CLAY: 96,
+  ARCANE: 97,
+  PORTAL: 98,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
 
-export type BlockShape = "cube" | "cross";
+export type BlockShape = "cube" | "cross" | "slab" | "stair";
 
 export type BlockDef = {
   id: BlockId;
@@ -83,8 +107,11 @@ export type BlockDef = {
   shape?: BlockShape;
 };
 
-/** Atlas is 8×8 grid of 16px tiles (64 slots) */
+/** Atlas is 8 columns × 9 rows of 16px tiles */
 export const TILE_SIZE = 16;
+export const ATLAS_COLS = 8;
+export const ATLAS_ROWS = 9;
+/** Column count — tile index is `col + row * ATLAS_TILES` */
 export const ATLAS_TILES = 8;
 
 function plant(
@@ -409,6 +436,116 @@ export const BLOCKS: Record<number, BlockDef> = {
     tiles: [50, 50, 50],
     color: "#7a5430",
   },
+  [Block.PLANKS_STAIR]: {
+    id: Block.PLANKS_STAIR,
+    name: "Oak Stairs",
+    solid: true,
+    transparent: true,
+    tiles: [9, 9, 9],
+    color: "#b8955a",
+    shape: "stair",
+  },
+  [Block.PLANKS_SLAB]: {
+    id: Block.PLANKS_SLAB,
+    name: "Oak Slab",
+    solid: true,
+    transparent: true,
+    tiles: [9, 9, 9],
+    color: "#b8955a",
+    shape: "slab",
+  },
+  [Block.COBBLE_STAIR]: {
+    id: Block.COBBLE_STAIR,
+    name: "Cobble Stairs",
+    solid: true,
+    transparent: true,
+    tiles: [8, 8, 8],
+    color: "#6a6a6e",
+    shape: "stair",
+  },
+  [Block.COBBLE_SLAB]: {
+    id: Block.COBBLE_SLAB,
+    name: "Cobble Slab",
+    solid: true,
+    transparent: true,
+    tiles: [8, 8, 8],
+    color: "#6a6a6e",
+    shape: "slab",
+  },
+  [Block.BIRCH_WOOD]: {
+    id: Block.BIRCH_WOOD,
+    name: "Birch Log",
+    solid: true,
+    transparent: false,
+    tiles: [52, 52, 53],
+    color: "#d8d0c0",
+  },
+  [Block.BIRCH_LEAVES]: {
+    id: Block.BIRCH_LEAVES,
+    name: "Birch Leaves",
+    solid: true,
+    transparent: true,
+    tiles: [54, 54, 54],
+    color: "#8fbe4a",
+  },
+  [Block.SPRUCE_WOOD]: {
+    id: Block.SPRUCE_WOOD,
+    name: "Spruce Log",
+    solid: true,
+    transparent: false,
+    tiles: [55, 55, 56],
+    color: "#3d2a1c",
+  },
+  [Block.SPRUCE_LEAVES]: {
+    id: Block.SPRUCE_LEAVES,
+    name: "Spruce Leaves",
+    solid: true,
+    transparent: true,
+    tiles: [57, 57, 57],
+    color: "#2a5a3a",
+  },
+  [Block.PUMPKIN]: {
+    id: Block.PUMPKIN,
+    name: "Pumpkin",
+    solid: true,
+    transparent: false,
+    tiles: [58, 58, 59],
+    color: "#d07820",
+  },
+  [Block.LILY_PAD]: plant(Block.LILY_PAD, "Lily Pad", 60, "#3d8a3a"),
+  [Block.VINE]: plant(Block.VINE, "Vine", 61, "#3a7a38"),
+  [Block.GRAVEL]: {
+    id: Block.GRAVEL,
+    name: "Gravel",
+    solid: true,
+    transparent: false,
+    tiles: [62, 62, 62],
+    color: "#8a8680",
+  },
+  [Block.CLAY]: {
+    id: Block.CLAY,
+    name: "Clay",
+    solid: true,
+    transparent: false,
+    tiles: [63, 63, 63],
+    color: "#a09088",
+  },
+  [Block.ARCANE]: {
+    id: Block.ARCANE,
+    name: "Voidstone",
+    solid: true,
+    transparent: false,
+    tiles: [64, 64, 64],
+    color: "#2a1038",
+  },
+  [Block.PORTAL]: {
+    id: Block.PORTAL,
+    name: "Rift",
+    solid: false,
+    transparent: true,
+    tiles: [65, 65, 65],
+    color: "#7a28c8",
+  },
 };
 
 /** Hotbar / creative placeables (includes a selection of flora) */
@@ -418,7 +555,16 @@ export const PLACEABLE: BlockId[] = [
   Block.STONE,
   Block.SAND,
   Block.WOOD,
+  Block.BIRCH_WOOD,
+  Block.SPRUCE_WOOD,
   Block.LEAVES,
+  Block.BIRCH_LEAVES,
+  Block.SPRUCE_LEAVES,
+  Block.PUMPKIN,
+  Block.GRAVEL,
+  Block.CLAY,
+  Block.ARCANE,
+  Block.PORTAL,
   Block.COBBLE,
   Block.PLANKS,
   Block.SNOW,
@@ -448,6 +594,10 @@ export const PLACEABLE: BlockId[] = [
   Block.BED,
   Block.DOOR,
   Block.LADDER,
+  Block.PLANKS_STAIR,
+  Block.PLANKS_SLAB,
+  Block.COBBLE_STAIR,
+  Block.COBBLE_SLAB,
 ];
 
 /** Packed door cells in the world: 55–70 (facing + upper + open). */
@@ -549,7 +699,7 @@ export function ladderIdFromHitFace(
 export function canSupportLadder(id: number): boolean {
   if (isDoor(id) || isLadder(id) || isTorch(id)) return false;
   if (!isSolid(id) || isPlant(id) || isWater(id)) return false;
-  if (id === Block.LEAVES || id === Block.ICE || id === Block.CACTUS) return false;
+  if (isLeaves(id) || id === Block.ICE || id === Block.CACTUS) return false;
   return true;
 }
 
@@ -566,6 +716,150 @@ function registerDoorCells(): void {
   }
 }
 registerDoorCells();
+
+function registerStairCells(): void {
+  const specs: { lo: number; name: string; tiles: [number, number, number]; color: string }[] = [
+    { lo: Block.PLANKS_STAIR_NX, name: "Oak Stairs", tiles: [9, 9, 9], color: "#b8955a" },
+    { lo: Block.COBBLE_STAIR_NX, name: "Cobble Stairs", tiles: [8, 8, 8], color: "#6a6a6e" },
+  ];
+  for (const s of specs) {
+    for (let i = 0; i < 4; i++) {
+      const id = s.lo + i;
+      BLOCKS[id] = {
+        id: id as BlockId,
+        name: s.name,
+        solid: true,
+        transparent: true,
+        tiles: s.tiles,
+        color: s.color,
+        shape: "stair",
+      };
+    }
+  }
+}
+registerStairCells();
+
+export function isSlab(id: number): boolean {
+  return id === Block.PLANKS_SLAB || id === Block.COBBLE_SLAB;
+}
+
+export function isStairItem(id: number): boolean {
+  return id === Block.PLANKS_STAIR || id === Block.COBBLE_STAIR;
+}
+
+export function isStairCell(id: number): boolean {
+  return (
+    (id >= Block.PLANKS_STAIR_NX && id <= Block.PLANKS_STAIR_PZ) ||
+    (id >= Block.COBBLE_STAIR_NX && id <= Block.COBBLE_STAIR_PZ)
+  );
+}
+
+export function isStair(id: number): boolean {
+  return isStairItem(id) || isStairCell(id);
+}
+
+export function stairFacing(id: number): number {
+  if (id >= Block.PLANKS_STAIR_NX && id <= Block.PLANKS_STAIR_PZ) {
+    return id - Block.PLANKS_STAIR_NX;
+  }
+  if (id >= Block.COBBLE_STAIR_NX && id <= Block.COBBLE_STAIR_PZ) {
+    return id - Block.COBBLE_STAIR_NX;
+  }
+  return 3;
+}
+
+export function stairIdFromItem(item: number, facing: number): number {
+  const f = facing & 3;
+  if (item === Block.PLANKS_STAIR) return Block.PLANKS_STAIR_NX + f;
+  if (item === Block.COBBLE_STAIR) return Block.COBBLE_STAIR_NX + f;
+  return item;
+}
+
+export function stairItemFromCell(id: number): number {
+  if (id >= Block.PLANKS_STAIR_NX && id <= Block.PLANKS_STAIR_PZ) {
+    return Block.PLANKS_STAIR;
+  }
+  if (id >= Block.COBBLE_STAIR_NX && id <= Block.COBBLE_STAIR_PZ) {
+    return Block.COBBLE_STAIR;
+  }
+  return id;
+}
+
+export function shapeMaterial(id: number): number {
+  if (
+    id === Block.PLANKS_SLAB ||
+    id === Block.PLANKS_STAIR ||
+    (id >= Block.PLANKS_STAIR_NX && id <= Block.PLANKS_STAIR_PZ)
+  ) {
+    return Block.PLANKS;
+  }
+  if (
+    id === Block.COBBLE_SLAB ||
+    id === Block.COBBLE_STAIR ||
+    (id >= Block.COBBLE_STAIR_NX && id <= Block.COBBLE_STAIR_PZ)
+  ) {
+    return Block.COBBLE;
+  }
+  return id;
+}
+
+export type LocalBox = {
+  x0: number;
+  y0: number;
+  z0: number;
+  x1: number;
+  y1: number;
+  z1: number;
+};
+
+/** Local 0–1 occupancy. `full` = whole cell; empty = no collision. */
+export function collisionBoxes(id: number): LocalBox[] | "full" | null {
+  if (isSlab(id)) {
+    return [{ x0: 0, y0: 0, z0: 0, x1: 1, y1: 0.5, z1: 1 }];
+  }
+  if (isStairCell(id)) {
+    const f = stairFacing(id);
+    const boxes: LocalBox[] = [{ x0: 0, y0: 0, z0: 0, x1: 1, y1: 0.5, z1: 1 }];
+    if (f === 0) boxes.push({ x0: 0, y0: 0.5, z0: 0, x1: 0.5, y1: 1, z1: 1 });
+    else if (f === 1) boxes.push({ x0: 0.5, y0: 0.5, z0: 0, x1: 1, y1: 1, z1: 1 });
+    else if (f === 2) boxes.push({ x0: 0, y0: 0.5, z0: 0, x1: 1, y1: 1, z1: 0.5 });
+    else boxes.push({ x0: 0, y0: 0.5, z0: 0.5, x1: 1, y1: 1, z1: 1 });
+    return boxes;
+  }
+  if (isPlant(id) || isLadder(id) || isTorch(id) || isWater(id)) return null;
+  if (!isSolid(id)) return null;
+  return "full";
+}
+
+export function cellCollidesAABB(
+  id: number,
+  bx: number,
+  by: number,
+  bz: number,
+  minX: number,
+  minY: number,
+  minZ: number,
+  maxX: number,
+  maxY: number,
+  maxZ: number,
+): boolean {
+  const boxes = collisionBoxes(id);
+  if (!boxes) return false;
+  if (boxes === "full") return true;
+  for (const b of boxes) {
+    if (
+      maxX > bx + b.x0 &&
+      minX < bx + b.x1 &&
+      maxY > by + b.y0 &&
+      minY < by + b.y1 &&
+      maxZ > bz + b.z0 &&
+      minZ < bz + b.z1
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function isSolid(id: number): boolean {
   const def = BLOCKS[id];
@@ -608,12 +902,28 @@ export function isCrossBlock(id: number): boolean {
   return isPlant(id);
 }
 
+export function isLog(id: number): boolean {
+  return id === Block.WOOD || id === Block.BIRCH_WOOD || id === Block.SPRUCE_WOOD;
+}
+
+export function isLeaves(id: number): boolean {
+  return (
+    id === Block.LEAVES ||
+    id === Block.BIRCH_LEAVES ||
+    id === Block.SPRUCE_LEAVES
+  );
+}
+
 export function isFurnace(id: number): boolean {
   return id === Block.FURNACE || id === Block.FURNACE_LIT;
 }
 
 export function isChest(id: number): boolean {
   return id === Block.CHEST;
+}
+
+export function isPortal(id: number): boolean {
+  return id === Block.PORTAL;
 }
 
 export function isBed(id: number): boolean {
@@ -624,20 +934,23 @@ export function isBed(id: number): boolean {
 export function lightEmission(id: number): number {
   if (isTorch(id)) return 14;
   if (id === Block.FURNACE_LIT) return 13;
+  if (id === Block.PORTAL) return 12;
+  if (id === Block.ARCANE) return 8;
   return 0;
 }
 
 /** Fully stops light (solid cubes). Leaves / water / plants do not. */
 export function blocksLight(id: number): boolean {
-  if (id === Block.AIR || isWater(id) || isPlant(id)) return false;
-  if (id === Block.LEAVES || id === Block.ICE) return false;
+  if (id === Block.AIR || isWater(id) || isPlant(id) || isPortal(id)) return false;
+  if (isLeaves(id) || id === Block.ICE) return false;
   if (isDoor(id) || isLadder(id)) return false;
   return isSolid(id);
 }
 
 /** Extra light lost when passing through this cell. */
 export function lightLoss(id: number): number {
-  if (id === Block.LEAVES) return 1;
+  if (id === Block.PORTAL) return 1;
+  if (isLeaves(id)) return 1;
   if (isWater(id) || id === Block.ICE) return 2;
   return 0;
 }
@@ -671,7 +984,7 @@ export function torchAttachDir(id: number): [number, number, number] {
 export function canSupportTorch(id: number): boolean {
   if (!isSolid(id) || isPlant(id) || isWater(id) || isTorch(id)) return false;
   if (isDoor(id) || isLadder(id)) return false;
-  if (id === Block.LEAVES || id === Block.ICE || id === Block.CACTUS) return false;
+  if (isLeaves(id) || id === Block.ICE || id === Block.CACTUS) return false;
   return true;
 }
 
@@ -734,6 +1047,6 @@ export function isMineable(id: number): boolean {
   if (id === 0) return false; // air
   if (isWater(id)) return false;
   if (id === Block.BEDROCK) return true; // targetable but unbreakable via mineTime
-  if (isPlant(id) || isDoor(id) || isLadder(id)) return true;
+  if (isPlant(id) || isDoor(id) || isLadder(id) || isPortal(id)) return true;
   return isSolid(id);
 }
