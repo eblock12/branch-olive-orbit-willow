@@ -37,6 +37,19 @@ export const Block = {
   MUSHROOM_BROWN: 33,
   CATTAIL: 34,
   FIREWEED: 35,
+  // Flowing water levels 7→1 (source is WATER=12)
+  WATER7: 36,
+  WATER6: 37,
+  WATER5: 38,
+  WATER4: 39,
+  WATER3: 40,
+  WATER2: 41,
+  WATER1: 42,
+  TORCH: 43,
+  COAL_ORE: 44,
+  IRON_ORE: 45,
+  FURNACE: 46,
+  FURNACE_LIT: 47,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
@@ -181,6 +194,62 @@ export const BLOCKS: Record<number, BlockDef> = {
     tiles: [13, 13, 13],
     color: "#3a7ec8",
   },
+  [Block.WATER7]: {
+    id: Block.WATER7,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
+  [Block.WATER6]: {
+    id: Block.WATER6,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
+  [Block.WATER5]: {
+    id: Block.WATER5,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
+  [Block.WATER4]: {
+    id: Block.WATER4,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
+  [Block.WATER3]: {
+    id: Block.WATER3,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
+  [Block.WATER2]: {
+    id: Block.WATER2,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
+  [Block.WATER1]: {
+    id: Block.WATER1,
+    name: "Water",
+    solid: false,
+    transparent: true,
+    tiles: [13, 13, 13],
+    color: "#3a7ec8",
+  },
   [Block.CACTUS]: {
     id: Block.CACTUS,
     name: "Cactus",
@@ -224,6 +293,39 @@ export const BLOCKS: Record<number, BlockDef> = {
   ),
   [Block.CATTAIL]: plant(Block.CATTAIL, "Cattail", 35, "#6a8a48"),
   [Block.FIREWEED]: plant(Block.FIREWEED, "Fireweed", 36, "#d05090"),
+  [Block.TORCH]: plant(Block.TORCH, "Torch", 37, "#f0a020"),
+  [Block.COAL_ORE]: {
+    id: Block.COAL_ORE,
+    name: "Coal Ore",
+    solid: true,
+    transparent: false,
+    tiles: [38, 38, 38],
+    color: "#3a3a3e",
+  },
+  [Block.IRON_ORE]: {
+    id: Block.IRON_ORE,
+    name: "Iron Ore",
+    solid: true,
+    transparent: false,
+    tiles: [39, 39, 39],
+    color: "#c4a078",
+  },
+  [Block.FURNACE]: {
+    id: Block.FURNACE,
+    name: "Furnace",
+    solid: true,
+    transparent: false,
+    tiles: [40, 40, 42],
+    color: "#6a6460",
+  },
+  [Block.FURNACE_LIT]: {
+    id: Block.FURNACE_LIT,
+    name: "Furnace",
+    solid: true,
+    transparent: false,
+    tiles: [40, 40, 43],
+    color: "#c87830",
+  },
 };
 
 /** Hotbar / creative placeables (includes a selection of flora) */
@@ -255,6 +357,10 @@ export const PLACEABLE: BlockId[] = [
   Block.MUSHROOM_RED,
   Block.MUSHROOM_BROWN,
   Block.CATTAIL,
+  Block.TORCH,
+  Block.COAL_ORE,
+  Block.IRON_ORE,
+  Block.FURNACE,
 ];
 
 export function isSolid(id: number): boolean {
@@ -267,6 +373,28 @@ export function isTransparent(id: number): boolean {
   return def ? def.transparent : true;
 }
 
+export function isWater(id: number): boolean {
+  return id === Block.WATER || (id >= Block.WATER7 && id <= Block.WATER1);
+}
+
+/** 8 = source, 1–7 = flowing, 0 = not water */
+export function waterLevel(id: number): number {
+  if (id === Block.WATER) return 8;
+  if (id >= Block.WATER7 && id <= Block.WATER1) return Block.WATER1 - id + 1;
+  return 0;
+}
+
+/** Level 8 → source, 1–7 → flowing, else air */
+export function waterIdForLevel(level: number): number {
+  if (level >= 8) return Block.WATER;
+  if (level <= 0) return Block.AIR;
+  return Block.WATER1 - level + 1;
+}
+
+export function isSourceWater(id: number): boolean {
+  return id === Block.WATER;
+}
+
 export function isPlant(id: number): boolean {
   const def = BLOCKS[id];
   return def?.shape === "cross";
@@ -276,10 +404,45 @@ export function isCrossBlock(id: number): boolean {
   return isPlant(id);
 }
 
+export function isFurnace(id: number): boolean {
+  return id === Block.FURNACE || id === Block.FURNACE_LIT;
+}
+
+/** How much light this block emits (0–15). */
+export function lightEmission(id: number): number {
+  if (id === Block.TORCH) return 14;
+  if (id === Block.FURNACE_LIT) return 13;
+  return 0;
+}
+
+/** Fully stops light (solid cubes). Leaves / water / plants do not. */
+export function blocksLight(id: number): boolean {
+  if (id === Block.AIR || isWater(id) || isPlant(id)) return false;
+  if (id === Block.LEAVES || id === Block.ICE) return false;
+  return isSolid(id);
+}
+
+/** Extra light lost when passing through this cell. */
+export function lightLoss(id: number): number {
+  if (id === Block.LEAVES) return 1;
+  if (isWater(id) || id === Block.ICE) return 2;
+  return 0;
+}
+
+/** Tight selection box for cross plants (local 0–1). Corners of the cell are empty. */
+export const PLANT_HITBOX = {
+  minX: 0.3,
+  maxX: 0.7,
+  minY: 0,
+  maxY: 0.88,
+  minZ: 0.3,
+  maxZ: 0.7,
+} as const;
+
 /** Blocks the player can mine / target with the crosshair (solids + plants) */
 export function isMineable(id: number): boolean {
   if (id === 0) return false; // air
-  if (id === Block.WATER) return false;
+  if (isWater(id)) return false;
   if (id === Block.BEDROCK) return true; // targetable but unbreakable via mineTime
   if (isPlant(id)) return true;
   return isSolid(id);

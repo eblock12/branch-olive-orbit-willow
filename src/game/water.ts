@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block } from "./blocks";
+import { Block, isWater } from "./blocks";
 import { SEA_LEVEL } from "./chunk";
 import type { World } from "./world";
 
@@ -7,20 +7,19 @@ import type { World } from "./world";
 
 const waterVertex = /* glsl */ `
 uniform float uTime;
+attribute vec3 color;
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 varying vec2 vLocalXZ;
 varying float vIsTop;
+varying float vFaceH;
 
 void main() {
   vec3 pos = position;
   vIsTop = normal.y > 0.5 ? 1.0 : 0.0;
-  // Gentle vertex waves on top faces only
-  if (vIsTop > 0.5) {
-    float w1 = sin(pos.x * 0.55 + uTime * 1.3) * cos(pos.z * 0.48 + uTime * 0.9);
-    float w2 = sin(pos.x * 1.1 - pos.z * 0.7 + uTime * 1.8) * 0.35;
-    pos.y += (w1 * 0.045 + w2 * 0.03);
-  }
+  vFaceH = color.g;
+  // No per-vertex displacement — adjacent blocks share edges and any
+  // Y offset opens a seam. Ripple lives in the fragment shader.
   vec4 world = modelMatrix * vec4(pos, 1.0);
   vWorldPos = world.xyz;
   vNormal = normalize(mat3(modelMatrix) * normal);
@@ -49,8 +48,8 @@ varying vec3 vWorldPos;
 varying vec3 vNormal;
 varying vec2 vLocalXZ;
 varying float vIsTop;
+varying float vFaceH;
 
-// cheap hash noise for surface sparkle / distortion
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
@@ -65,66 +64,132 @@ float noise(vec2 p) {
   return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
 }
 
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    v += a * noise(p);
+    p = p * 2.07 + vec2(11.7, 3.1);
+    a *= 0.5;
+  }
+  return v;
+}
+
 void main() {
   vec3 N = normalize(vNormal);
-  // Animated normal perturbation (surface ripples)
+  if (!gl_FrontFacing) N = -N;
   float t = uTime;
-  float n1 = noise(vLocalXZ * 0.7 + vec2(t * 0.25, t * 0.18));
-  float n2 = noise(vLocalXZ * 1.6 + vec2(-t * 0.22, t * 0.3));
-  vec3 ripple = vec3((n1 - 0.5) * 0.35, 0.0, (n2 - 0.5) * 0.35);
-  if (vIsTop > 0.5) {
-    N = normalize(N + ripple);
-  }
-
   vec3 V = normalize(cameraPosition - vWorldPos);
   float ndv = max(dot(N, V), 0.0);
-  float fresnel = pow(1.0 - ndv, 3.5);
-  fresnel = mix(0.12, 1.0, fresnel);
 
-  // Screen UVs for RT sampling
   vec2 screenUv = gl_FragCoord.xy / uResolution;
-  vec2 distort = ripple.xz * 0.04;
 
-  // --- Refraction: scene behind water (or procedural depth color) ---
-  vec3 refractCol = mix(uDeepColor, uShallowColor, ndv);
-  if (uHasRefraction > 0.5) {
-    vec3 sampled = texture2D(tRefraction, clamp(screenUv + distort, 0.0, 1.0)).rgb;
-    refractCol = mix(refractCol, sampled, 0.72);
-  } else {
-    // Fake depth absorption by view angle
-    refractCol = mix(uDeepColor * 0.65, uShallowColor, pow(ndv, 0.65));
+  if (vIsTop > 0.5) {
+    // ── Surface ──────────────────────────────────────────
+    float n1 = noise(vLocalXZ * 0.7 + vec2(t * 0.25, t * 0.18));
+    float n2 = noise(vLocalXZ * 1.6 + vec2(-t * 0.22, t * 0.3));
+    vec3 ripple = vec3((n1 - 0.5) * 0.35, 0.0, (n2 - 0.5) * 0.35);
+    N = normalize(N + ripple);
+    ndv = max(dot(N, V), 0.0);
+    float fresnel = mix(0.12, 1.0, pow(1.0 - ndv, 3.5));
+    vec2 distort = ripple.xz * 0.04;
+
+    vec3 refractCol = mix(uDeepColor * 0.65, uShallowColor, pow(ndv, 0.65));
+    if (uHasRefraction > 0.5) {
+      vec3 sampled = texture2D(tRefraction, clamp(screenUv + distort, 0.0, 1.0)).rgb;
+      refractCol = mix(refractCol, sampled, 0.72);
+    }
+
+    vec3 R = reflect(-V, N);
+    float skyMix = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 skyCol = mix(uHorizonColor, uSkyColor, skyMix);
+    vec3 reflectCol = skyCol;
+    if (uHasReflection > 0.5) {
+      vec2 ruv = screenUv + distort * 1.4;
+      ruv.y = 1.0 - ruv.y;
+      vec3 mirrored = texture2D(tReflection, clamp(ruv, 0.0, 1.0)).rgb;
+      reflectCol = mix(skyCol, mirrored, 0.88);
+    }
+
+    vec3 H = normalize(V + normalize(-uSunDir));
+    float spec = pow(max(dot(N, H), 0.0), 96.0) * uSunIntensity;
+    float sparkle = pow(noise(vLocalXZ * 8.0 + t * 2.0), 6.0) * fresnel * uSunIntensity;
+
+    vec3 col = mix(refractCol, reflectCol, fresnel * 0.92);
+    col += uSunColor * (spec * 0.55 + sparkle * 0.25);
+    float alpha = mix(0.52, 0.82, fresnel);
+
+    if (uUnderwater > 0.5) {
+      col = mix(uShallowColor * 0.8, reflectCol, fresnel * 0.6);
+      col += uSunColor * spec * 0.3;
+      alpha = mix(0.35, 0.75, fresnel);
+    }
+    gl_FragColor = vec4(col, clamp(alpha, 0.35, 0.92));
+    return;
   }
 
-  // --- Reflection: mirror RT or sky gradient ---
+  // ── Side faces: same water language as the surface, vertical plane ──
+  // NO per-block height gradient (that stacked into striped bands).
+  vec2 faceUv = abs(N.x) > abs(N.z)
+    ? vec2(vWorldPos.z, vWorldPos.y)
+    : vec2(vWorldPos.x, vWorldPos.y);
+
+  vec2 warp = vec2(
+    fbm(faceUv * 0.28 + vec2(t * 0.07, 4.2)),
+    fbm(faceUv * 0.28 + vec2(9.1, -t * 0.06))
+  );
+  vec2 uv = faceUv * 0.42 + (warp - 0.5) * 2.4;
+
+  float n1 = fbm(uv + vec2(t * 0.11, -t * 0.08));
+  float n2 = fbm(uv * 1.85 + vec2(-t * 0.13, t * 0.09));
+  float n3 = noise(uv * 3.4 + vec2(t * 0.2, t * 0.16));
+
+  // Ripple the face so it reads as a water surface, not a painted wall
+  vec3 tanH = abs(N.x) > 0.5 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+  vec3 tanV = vec3(0.0, 1.0, 0.0);
+  N = normalize(N + tanH * (n1 - 0.5) * 0.55 + tanV * (n2 - 0.5) * 0.5);
+  ndv = max(dot(N, V), 0.0);
+
+  float fresnel = mix(0.1, 1.0, pow(1.0 - ndv, 3.0));
+  vec2 distort = vec2(n1 - 0.5, n2 - 0.5) * 0.035;
+
+  // World-space depth only (continuous down a column — not per block)
+  float worldDepth = clamp((62.0 - vWorldPos.y) / 14.0, 0.0, 1.0);
+  vec3 body = mix(uShallowColor, uDeepColor * 0.75, worldDepth * 0.55 + (1.0 - ndv) * 0.25);
+  body = mix(body, body * 1.18 + uSunColor * 0.08, n1 * n2 * 0.55);
+
+  // Soft blotchy caustics, not stripes
+  float caust = pow(clamp(n1 * 0.55 + n2 * 0.35 + n3 * 0.25, 0.0, 1.0), 2.4);
+  body += uSunColor * caust * 0.16 * uSunIntensity;
+
+  vec3 refractCol = body;
+  if (uHasRefraction > 0.5) {
+    vec3 sampled = texture2D(tRefraction, clamp(screenUv + distort, 0.0, 1.0)).rgb;
+    refractCol = mix(body, sampled * vec3(0.55, 0.78, 0.92), 0.4);
+  }
+
   vec3 R = reflect(-V, N);
   float skyMix = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
   vec3 skyCol = mix(uHorizonColor, uSkyColor, skyMix);
-  vec3 reflectCol = skyCol;
-  if (uHasReflection > 0.5 && vIsTop > 0.5) {
-    // Planar reflection map (y-flipped style UV)
-    vec2 ruv = screenUv + distort * 1.4;
-    ruv.y = 1.0 - ruv.y;
-    vec3 mirrored = texture2D(tReflection, clamp(ruv, 0.0, 1.0)).rgb;
-    reflectCol = mix(skyCol, mirrored, 0.88);
-  }
 
-  // Specular sun glitter
-  vec3 H = normalize(V + normalize(-uSunDir));
-  float spec = pow(max(dot(N, H), 0.0), 96.0) * uSunIntensity;
-  float sparkle = pow(noise(vLocalXZ * 8.0 + t * 2.0), 6.0) * fresnel * uSunIntensity;
+  vec3 col = mix(refractCol, skyCol, fresnel * 0.78);
 
-  vec3 col = mix(refractCol, reflectCol, fresnel * 0.92);
-  col += uSunColor * (spec * 0.55 + sparkle * 0.25);
+  vec3 L = normalize(-uSunDir);
+  float spec = pow(max(dot(N, normalize(V + L)), 0.0), 72.0) * uSunIntensity;
+  float sparkle = pow(n3, 8.0) * fresnel * uSunIntensity;
+  col += uSunColor * (spec * 0.4 + sparkle * 0.22);
 
-  // Side faces more opaque / murky
-  float alpha = mix(0.72, 0.52, vIsTop) + fresnel * 0.28;
-  alpha = clamp(alpha, 0.4, 0.92);
+  // Thin noisy lip only at the true surface of this cell
+  float foam = smoothstep(0.93, 0.995, clamp(vFaceH, 0.0, 1.0));
+  foam *= 0.4 + 0.6 * noise(vec2(faceUv.x * 2.8 + t * 0.9, t * 0.3));
+  col = mix(col, mix(uShallowColor, vec3(0.85, 0.94, 1.0), 0.5), foam * 0.45);
 
-  // Underwater looking up at surface: brighter, different blend
+  float alpha = mix(0.9, 0.97, fresnel);
+  alpha = clamp(alpha, 0.86, 0.98);
+
   if (uUnderwater > 0.5) {
-    col = mix(uShallowColor * 0.8, reflectCol, fresnel * 0.6);
-    col += uSunColor * spec * 0.3;
-    alpha = mix(0.35, 0.75, fresnel);
+    col = mix(uDeepColor * 0.65, uShallowColor, 0.4 + n1 * 0.2);
+    alpha = mix(0.22, 0.5, fresnel);
   }
 
   gl_FragColor = vec4(col, alpha);
@@ -152,7 +217,7 @@ export function createWaterMaterial(): THREE.ShaderMaterial {
     vertexShader: waterVertex,
     fragmentShader: waterFragment,
     transparent: true,
-    depthWrite: false,
+    depthWrite: true,
     side: THREE.DoubleSide,
     // Don't fight fog too hard — engine sets underwater fog
     fog: false,
@@ -266,7 +331,7 @@ export class WaterFX {
       Math.floor(eyeY),
       Math.floor(eyeZ),
     );
-    this.underwater = head === Block.WATER;
+    this.underwater = isWater(head);
 
     const u = this.material.uniforms;
     u.uSkyColor!.value.copy(skyColor);

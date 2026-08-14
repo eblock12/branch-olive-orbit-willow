@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import { Block, isSolid } from "./blocks";
+import { Block, isPlant, isSolid, isWater, isSourceWater, waterLevel, waterIdForLevel, lightEmission, blocksLight } from "./blocks";
+import { computeChunkLighting } from "./lighting";
 import {
   Chunk,
   CHUNK_HEIGHT,
@@ -18,6 +19,13 @@ import { generateChunkBlocks } from "./chunkGen";
 import type { ChunkWorkerRequest, ChunkWorkerResponse } from "./chunkWorker";
 
 type GenJob = { cx: number; cz: number; key: ChunkKey };
+
+export type BlockPop = {
+  x: number;
+  y: number;
+  z: number;
+  id: number;
+};
 
 /**
  * Streaming world: voxel generation off main thread (workers),
@@ -49,6 +57,14 @@ export class World {
   private lastPcx = 0;
   private lastPcz = 0;
   private useWorkers = true;
+
+  /** Neighbor / support checks queued by setBlock */
+  private scheduled = new Map<string, { x: number; y: number; z: number }>();
+  private waterQ = new Map<string, { x: number; y: number; z: number }>();
+  private tickAcc = 0;
+  private waterAcc = 0;
+  private tickRng = 1;
+  private remeshLater = new Set<Chunk>();
 
   constructor(
     seed: number,
@@ -142,6 +158,7 @@ export class World {
       const n = this.chunks.get(chunkKey(cx + dx, cz + dz));
       if (n) {
         n.dirty = true;
+        n.lightDirty = true;
         if (!this.meshQueue.includes(n)) this.meshQueue.push(n);
       }
     }
@@ -230,7 +247,66 @@ export class World {
     return chunk.get(lx, wy, lz);
   }
 
+  getSkyLight(wx: number, wy: number, wz: number): number {
+    if (wy >= CHUNK_HEIGHT) return 15;
+    if (wy < 0) return 0;
+    const [cx, cz] = worldToChunk(wx, wz);
+    const chunk = this.chunks.get(chunkKey(cx, cz));
+    if (!chunk || !chunk.skyLight) return 0;
+    const lx = ((wx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    const lz = ((wz % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    return chunk.getSky(lx, wy, lz);
+  }
+
+  getBlockLight(wx: number, wy: number, wz: number): number {
+    if (wy < 0 || wy >= CHUNK_HEIGHT) return 0;
+    const [cx, cz] = worldToChunk(wx, wz);
+    const chunk = this.chunks.get(chunkKey(cx, cz));
+    if (!chunk || !chunk.blockLight) return 0;
+    const lx = ((wx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    const lz = ((wz % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    return chunk.getBlkLight(lx, wy, lz);
+  }
+
+  collectEmitters(
+    px: number,
+    py: number,
+    pz: number,
+    maxDist: number,
+    maxN: number,
+  ): { x: number; y: number; z: number }[] {
+    const out: { x: number; y: number; z: number; d: number }[] = [];
+    const [pcx, pcz] = worldToChunk(Math.floor(px), Math.floor(pz));
+    const ring = 2;
+    for (let dz = -ring; dz <= ring; dz++) {
+      for (let dx = -ring; dx <= ring; dx++) {
+        const chunk = this.chunks.get(chunkKey(pcx + dx, pcz + dz));
+        if (!chunk) continue;
+        const e = chunk.emitters;
+        for (let i = 0; i < e.length; i += 3) {
+          const x = e[i]!;
+          const y = e[i + 1]!;
+          const z = e[i + 2]!;
+          const d = Math.hypot(x + 0.5 - px, y + 0.4 - py, z + 0.5 - pz);
+          if (d <= maxDist) out.push({ x, y, z, d });
+        }
+      }
+    }
+    out.sort((a, b) => a.d - b.d);
+    return out.slice(0, maxN);
+  }
+
   setBlock(wx: number, wy: number, wz: number, id: number): boolean {
+    return this.writeBlock(wx, wy, wz, id, true);
+  }
+
+  private writeBlock(
+    wx: number,
+    wy: number,
+    wz: number,
+    id: number,
+    remeshNow: boolean,
+  ): boolean {
     if (wy < 0 || wy >= CHUNK_HEIGHT) return false;
     const [cx, cz] = worldToChunk(wx, wz);
     const chunk = this.chunks.get(chunkKey(cx, cz));
@@ -238,19 +314,329 @@ export class World {
     const lx = ((wx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
     const lz = ((wz % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
     const existing = chunk.get(lx, wy, lz);
+    if (existing === id) return true;
     if (existing === Block.BEDROCK && id === Block.AIR) return false;
     chunk.set(lx, wy, lz, id);
-    // Edited chunks always full detail
     chunk.targetLod = 0;
-    chunk.meshLod = -1;
 
-    this.remeshChunk(chunk);
+    const lightChange =
+      lightEmission(existing) !== lightEmission(id) ||
+      blocksLight(existing) !== blocksLight(id);
+    if (lightChange) this.markLightDirtyAround(cx, cz);
 
-    if (lx === 0) this.remeshIfLoaded(cx - 1, cz);
-    if (lx === CHUNK_SIZE - 1) this.remeshIfLoaded(cx + 1, cz);
-    if (lz === 0) this.remeshIfLoaded(cx, cz - 1);
-    if (lz === CHUNK_SIZE - 1) this.remeshIfLoaded(cx, cz + 1);
+    if (remeshNow) {
+      chunk.meshLod = -1;
+      this.remeshChunk(chunk);
+      if (lx === 0) this.remeshIfLoaded(cx - 1, cz);
+      if (lx === CHUNK_SIZE - 1) this.remeshIfLoaded(cx + 1, cz);
+      if (lz === 0) this.remeshIfLoaded(cx, cz - 1);
+      if (lz === CHUNK_SIZE - 1) this.remeshIfLoaded(cx, cz + 1);
+      if (lightChange) {
+        for (let dz = -1; dz <= 1; dz++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            this.remeshIfLoaded(cx + dx, cz + dz);
+          }
+        }
+      }
+    } else {
+      this.remeshLater.add(chunk);
+      if (lx === 0) {
+        const n = this.chunks.get(chunkKey(cx - 1, cz));
+        if (n) this.remeshLater.add(n);
+      }
+      if (lx === CHUNK_SIZE - 1) {
+        const n = this.chunks.get(chunkKey(cx + 1, cz));
+        if (n) this.remeshLater.add(n);
+      }
+      if (lz === 0) {
+        const n = this.chunks.get(chunkKey(cx, cz - 1));
+        if (n) this.remeshLater.add(n);
+      }
+      if (lz === CHUNK_SIZE - 1) {
+        const n = this.chunks.get(chunkKey(cx, cz + 1));
+        if (n) this.remeshLater.add(n);
+      }
+    }
+
+    this.scheduleTick(wx, wy, wz);
+    this.scheduleTick(wx, wy + 1, wz);
+    this.scheduleWaterAround(wx, wy, wz);
     return true;
+  }
+
+  private markLightDirtyAround(cx: number, cz: number): void {
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const c = this.chunks.get(chunkKey(cx + dx, cz + dz));
+        if (c) c.lightDirty = true;
+      }
+    }
+  }
+
+  private relightChunk(chunk: Chunk): void {
+    computeChunkLighting(
+      chunk,
+      (wx, wy, wz) => this.getSkyLight(wx, wy, wz),
+      (wx, wy, wz) => this.getBlockLight(wx, wy, wz),
+    );
+  }
+
+  private scheduleWaterAround(wx: number, wy: number, wz: number): void {
+    this.queueWater(wx, wy, wz);
+    this.queueWater(wx + 1, wy, wz);
+    this.queueWater(wx - 1, wy, wz);
+    this.queueWater(wx, wy, wz + 1);
+    this.queueWater(wx, wy, wz - 1);
+    this.queueWater(wx, wy - 1, wz);
+    this.queueWater(wx, wy + 1, wz);
+  }
+
+  private queueWater(wx: number, wy: number, wz: number): void {
+    if (wy < 0 || wy >= CHUNK_HEIGHT) return;
+    if (this.waterQ.size >= 2048) return;
+    const key = `${wx},${wy},${wz}`;
+    if (this.waterQ.has(key)) return;
+    this.waterQ.set(key, { x: wx, y: wy, z: wz });
+  }
+
+  private scheduleTick(wx: number, wy: number, wz: number): void {
+    if (wy < 0 || wy >= CHUNK_HEIGHT) return;
+    if (this.scheduled.size >= 768) return;
+    const key = `${wx},${wy},${wz}`;
+    if (this.scheduled.has(key)) return;
+    this.scheduled.set(key, { x: wx, y: wy, z: wz });
+  }
+
+  /**
+   * Occasional chunk ticks + drain scheduled support checks + water flow.
+   * Plants with no solid block underneath pop and are returned as drops.
+   */
+  tick(dt: number, px: number, pz: number): BlockPop[] {
+    const popped: BlockPop[] = [];
+
+    // Immediate scheduled (player broke dirt under a flower, etc.)
+    if (this.scheduled.size > 0) {
+      const batch = this.scheduled;
+      this.scheduled = new Map();
+      let n = 0;
+      for (const pos of batch.values()) {
+        if (n++ > 64) {
+          this.scheduleTick(pos.x, pos.y, pos.z);
+          continue;
+        }
+        this.tryPopUnsupported(pos.x, pos.y, pos.z, popped);
+      }
+    }
+
+    this.tickAcc += dt;
+    if (this.tickAcc >= 0.22) {
+      this.tickAcc = 0;
+      this.randomChunkTicks(px, pz, popped);
+    }
+
+    this.waterAcc += dt;
+    if (this.waterAcc >= 0.16) {
+      this.waterAcc = 0;
+      this.tickWater(popped);
+      this.flushTickRemesh();
+    }
+    return popped;
+  }
+
+  private tickWater(popped: BlockPop[]): void {
+    if (this.waterQ.size === 0) return;
+    const batch = this.waterQ;
+    this.waterQ = new Map();
+    let n = 0;
+    for (const pos of batch.values()) {
+      if (n++ > 56) {
+        this.queueWater(pos.x, pos.y, pos.z);
+        continue;
+      }
+      this.tickWaterCell(pos.x, pos.y, pos.z, popped);
+    }
+  }
+
+  private flushTickRemesh(): void {
+    if (this.remeshLater.size === 0) return;
+    for (const chunk of this.remeshLater) {
+      if (!this.chunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
+      chunk.meshLod = -1;
+      this.remeshChunk(chunk);
+    }
+    this.remeshLater.clear();
+  }
+
+  /**
+   * Minecraft-like: sources stay; flowing decays by 1 per step, falls first,
+   * two horizontal sources create a new source. Plants in the way wash out.
+   */
+  private tickWaterCell(
+    wx: number,
+    wy: number,
+    wz: number,
+    popped: BlockPop[],
+  ): void {
+    const id = this.getBlock(wx, wy, wz);
+    if (isSolid(id) && !isPlant(id)) return;
+
+    const below = this.getBlock(wx, wy - 1, wz);
+    const above = this.getBlock(wx, wy + 1, wz);
+
+    let incoming = 0;
+    let sources = 0;
+    const dirs: [number, number][] = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    for (const [dx, dz] of dirs) {
+      const n = this.getBlock(wx + dx, wy, wz + dz);
+      if (isSourceWater(n)) {
+        sources++;
+        incoming = Math.max(incoming, 8);
+      } else if (isWater(n)) {
+        incoming = Math.max(incoming, waterLevel(n));
+      }
+    }
+    if (isWater(above)) incoming = Math.max(incoming, 8);
+    if (sources >= 2) incoming = 8;
+
+    const newLevel = incoming >= 8 ? 8 : incoming - 1;
+    const isSrc = isSourceWater(id);
+
+    // Source never evaporates or weakens
+    if (isSrc) {
+      this.tryFloodDown(wx, wy, wz, 7, popped);
+      this.tryFloodSides(wx, wy, wz, 7, popped);
+      return;
+    }
+
+    if (newLevel < 1) {
+      if (isWater(id)) this.writeBlock(wx, wy, wz, Block.AIR, false);
+      return;
+    }
+
+    if (isPlant(id)) {
+      if (!this.writeBlock(wx, wy, wz, Block.AIR, false)) return;
+      popped.push({ x: wx, y: wy, z: wz, id });
+    }
+
+    const desired = waterIdForLevel(newLevel);
+    if (this.getBlock(wx, wy, wz) !== desired) {
+      this.writeBlock(wx, wy, wz, desired, false);
+    }
+
+    // Fall first
+    if (this.canWaterEnter(below)) {
+      this.placeFlow(wx, wy - 1, wz, Math.max(newLevel, 7), popped);
+    }
+    if (newLevel > 1) {
+      this.tryFloodSides(wx, wy, wz, newLevel - 1, popped);
+    }
+    void below;
+  }
+
+  private canWaterEnter(id: number): boolean {
+    return id === Block.AIR || isPlant(id) || (isWater(id) && !isSourceWater(id));
+  }
+
+  private tryFloodDown(
+    wx: number,
+    wy: number,
+    wz: number,
+    level: number,
+    popped: BlockPop[],
+  ): void {
+    this.placeFlow(wx, wy - 1, wz, level, popped);
+  }
+
+  private tryFloodSides(
+    wx: number,
+    wy: number,
+    wz: number,
+    level: number,
+    popped: BlockPop[],
+  ): void {
+    if (level < 1) return;
+    this.placeFlow(wx + 1, wy, wz, level, popped);
+    this.placeFlow(wx - 1, wy, wz, level, popped);
+    this.placeFlow(wx, wy, wz + 1, level, popped);
+    this.placeFlow(wx, wy, wz - 1, level, popped);
+  }
+
+  private placeFlow(
+    wx: number,
+    wy: number,
+    wz: number,
+    level: number,
+    popped: BlockPop[],
+  ): void {
+    if (wy < 0 || wy >= CHUNK_HEIGHT) return;
+    const cur = this.getBlock(wx, wy, wz);
+    if (!this.canWaterEnter(cur)) return;
+    if (isPlant(cur)) {
+      if (!this.writeBlock(wx, wy, wz, Block.AIR, false)) return;
+      popped.push({ x: wx, y: wy, z: wz, id: cur });
+    }
+    const next = waterIdForLevel(level);
+    if (waterLevel(cur) >= waterLevel(next) && isWater(cur)) return;
+    this.writeBlock(wx, wy, wz, next, false);
+  }
+
+  private randomChunkTicks(px: number, pz: number, out: BlockPop[]): void {
+    const [pcx, pcz] = worldToChunk(Math.floor(px), Math.floor(pz));
+    const ring = 2; // ~5×5 chunks, nearby only
+    let checks = 0;
+    const budget = 28;
+    for (let dz = -ring; dz <= ring && checks < budget; dz++) {
+      for (let dx = -ring; dx <= ring && checks < budget; dx++) {
+        const chunk = this.chunks.get(chunkKey(pcx + dx, pcz + dz));
+        if (!chunk || chunk.meshLod > 0) continue;
+        // A few random columns per nearby chunk
+        const samples = 2;
+        for (let s = 0; s < samples && checks < budget; s++) {
+          this.tickRng = (this.tickRng * 1664525 + 1013904223) >>> 0;
+          const lx = this.tickRng % CHUNK_SIZE;
+          this.tickRng = (this.tickRng * 1664525 + 1013904223) >>> 0;
+          const lz = this.tickRng % CHUNK_SIZE;
+          const wx = chunk.cx * CHUNK_SIZE + lx;
+          const wz = chunk.cz * CHUNK_SIZE + lz;
+          // Scan a short vertical band around the surface (plants live here)
+          let top = -1;
+          for (let y = CHUNK_HEIGHT - 1; y >= 1; y--) {
+            if (chunk.get(lx, y, lz) !== Block.AIR) {
+              top = y;
+              break;
+            }
+          }
+          if (top < 1) continue;
+          const y0 = Math.max(1, top - 2);
+          for (let y = y0; y <= top; y++) {
+            this.tryPopUnsupported(wx, y, wz, out);
+            const id = this.getBlock(wx, y, wz);
+            if (isWater(id)) this.queueWater(wx, y, wz);
+          }
+          checks++;
+        }
+      }
+    }
+  }
+
+  private tryPopUnsupported(
+    wx: number,
+    wy: number,
+    wz: number,
+    out: BlockPop[],
+  ): void {
+    const id = this.getBlock(wx, wy, wz);
+    if (!isPlant(id)) return;
+    const below = this.getBlock(wx, wy - 1, wz);
+    if (isSolid(below) && !isPlant(below)) return;
+    if (!this.setBlock(wx, wy, wz, Block.AIR)) return;
+    out.push({ x: wx, y: wy, z: wz, id });
   }
 
   private remeshIfLoaded(cx: number, cz: number): void {
@@ -389,7 +775,26 @@ export class World {
       chunk.targetLod = 0;
     }
 
-    const geo = buildChunkGeometry(chunk, getBlock, lod);
+    if (chunk.lightDirty || !chunk.skyLight) {
+      this.relightChunk(chunk);
+      // Neighbors may have been waiting on our emitters
+      if (lod === 0) {
+        for (let dz = -1; dz <= 1; dz++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dz === 0) continue;
+            const n = this.chunks.get(chunkKey(chunk.cx + dx, chunk.cz + dz));
+            if (n && n.lightDirty) this.relightChunk(n);
+          }
+        }
+      }
+    }
+
+    const getLight = (wx: number, wy: number, wz: number) => ({
+      block: this.getBlockLight(wx, wy, wz),
+      sky: this.getSkyLight(wx, wy, wz),
+    });
+
+    const geo = buildChunkGeometry(chunk, getBlock, lod, undefined, getLight);
     if (chunk.mesh) {
       this.group.remove(chunk.mesh);
       chunk.mesh.geometry.dispose();
@@ -442,6 +847,16 @@ export class World {
     return SEA_LEVEL + 2;
   }
 
+  /** First water surface or solid top — rain should stop here, not the seafloor. */
+  getRainHitY(wx: number, wz: number): number {
+    for (let y = CHUNK_HEIGHT - 1; y >= 0; y--) {
+      const id = this.getBlock(wx, y, wz);
+      if (isWater(id)) return y + (id === Block.WATER ? 0.92 : 0.4);
+      if (isSolid(id) && !isPlant(id)) return y + 1;
+    }
+    return 0;
+  }
+
   /**
    * Feet Y for a dry land spawn, or null if column is ocean/underwater/blocked.
    * Requires the top solid block to be above sea level with air for the player body.
@@ -464,7 +879,7 @@ export class World {
     // Feet + body + head must be free of water and solids
     for (let y = feet; y <= feet + 2; y++) {
       const id = this.getBlock(wx, y, wz);
-      if (id === Block.WATER || id === Block.ICE) return null;
+      if (isWater(id) || id === Block.ICE) return null;
       if (isSolid(id)) return null;
     }
 
@@ -473,7 +888,24 @@ export class World {
     return feet;
   }
 
-  /** Ensure chunk data exists at world XZ (sync generate). */
+  /** Snapshot of async gen / mesh queues for the debug HUD. */
+  getQueueStats(): {
+    queued: number;
+    generating: number;
+    mesh: number;
+    loaded: number;
+    workers: number;
+    idleWorkers: number;
+  } {
+    return {
+      queued: this.genQueue.length,
+      generating: this.generating.size,
+      mesh: this.meshQueue.length,
+      loaded: this.chunks.size,
+      workers: this.workers.length,
+      idleWorkers: this.idleWorkers.length,
+    };
+  }
   ensureChunkAt(wx: number, wz: number): void {
     const [cx, cz] = worldToChunk(Math.floor(wx), Math.floor(wz));
     this.generateSync(cx, cz);

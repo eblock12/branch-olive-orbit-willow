@@ -546,6 +546,63 @@ export function createBlockAtlas(): {
   paintPlant(d, atlasPx, 34, "mushB");
   paintPlant(d, atlasPx, 35, "cattail");
   paintPlant(d, atlasPx, 36, "fireweed");
+  paintPlant(d, atlasPx, 37, "torch");
+
+  // 38 — coal ore: stone + charcoal flecks
+  drawTile(d, 38, atlasPx, (x, y, set) => {
+    const n = hSigned(x, y, 380) * 0.5 + hSigned(x >> 1, y >> 1, 381) * 0.5;
+    let v = 118 + n * 14;
+    if (h01(x, y, 382) > 0.93) v -= 16;
+    const blob =
+      h01(x >> 1, y >> 1, 383) > 0.62 && h01(x, y, 384) > 0.35;
+    if (blob) {
+      const c = 28 + h01(x, y, 385) * 18;
+      set(clamp(c), clamp(c), clamp(c + 4));
+      return;
+    }
+    set(clamp(v), clamp(v), clamp(v + 3));
+  });
+
+  // 39 — iron ore: stone + rusty-peach specks
+  drawTile(d, 39, atlasPx, (x, y, set) => {
+    const n = hSigned(x, y, 390) * 0.5 + hSigned(x >> 1, y >> 1, 391) * 0.5;
+    let v = 118 + n * 14;
+    const blob =
+      h01(x >> 1, y >> 1, 392) > 0.58 && h01(x, y, 393) > 0.32;
+    if (blob) {
+      const t = h01(x, y, 394);
+      set(
+        clamp(176 + t * 40),
+        clamp(132 + t * 24),
+        clamp(88 + t * 16),
+      );
+      return;
+    }
+    set(clamp(v), clamp(v), clamp(v + 3));
+  });
+
+  // 40 — furnace top / bottom: ring of cobble around a dark well
+  drawTile(d, 40, atlasPx, (x, y, set) => {
+    const n = hSigned(x, y, 400) * 0.4;
+    const edge = x < 2 || y < 2 || x > 13 || y > 13;
+    const hole = x >= 5 && x <= 10 && y >= 5 && y <= 10;
+    if (hole) {
+      set(clamp(36 + n * 8), clamp(32 + n * 6), clamp(30 + n * 6));
+      return;
+    }
+    const v = (edge ? 88 : 108) + n * 16;
+    set(clamp(v), clamp(v - 4), clamp(v - 8));
+  });
+
+  // 42 — furnace front (cold)
+  drawTile(d, 42, atlasPx, (x, y, set) => {
+    paintFurnaceFront(x, y, set, false);
+  });
+
+  // 43 — furnace front (lit)
+  drawTile(d, 43, atlasPx, (x, y, set) => {
+    paintFurnaceFront(x, y, set, true);
+  });
 
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
@@ -557,6 +614,49 @@ export function createBlockAtlas(): {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
   return { texture: tex, dataUrl: canvas.toDataURL("image/png"), icons };
+}
+
+function paintFurnaceFront(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  lit: boolean,
+): void {
+  const n = hSigned(x, y, 420) * 0.35;
+  // Stone brick frame
+  const frame = x < 2 || x > 13 || y < 1 || y > 14;
+  if (frame) {
+    const v = 104 + n * 14;
+    set(clamp(v), clamp(v - 4), clamp(v - 8));
+    return;
+  }
+  // Mouth
+  const mouth = x >= 4 && x <= 11 && y >= 3 && y <= 8;
+  if (mouth) {
+    if (lit) {
+      const glow = 1 - Math.abs(x - 7.5) / 5 - (8 - y) * 0.06;
+      const t = Math.max(0, glow) + h01(x, y, 421) * 0.15;
+      set(
+        clamp(80 + t * 180),
+        clamp(28 + t * 90),
+        clamp(10 + t * 20),
+      );
+    } else {
+      set(clamp(22 + n * 6), clamp(20 + n * 5), clamp(18 + n * 4));
+    }
+    return;
+  }
+  // Ash tray
+  if (x >= 5 && x <= 10 && y >= 11 && y <= 13) {
+    if (lit) {
+      set(clamp(90 + n * 20), clamp(40 + n * 10), clamp(18));
+    } else {
+      set(clamp(40 + n * 8), clamp(36 + n * 6), clamp(32 + n * 6));
+    }
+    return;
+  }
+  const v = 112 + n * 12;
+  set(clamp(v), clamp(v - 6), clamp(v - 10));
 }
 
 function paintPlant(
@@ -766,6 +866,25 @@ function paintPlant(
         if ((x === 5 || x === 10) && y === yy && yy % 3 === 0)
           px(236, 120, 170);
       }
+    } else if (kind === "torch") {
+      // stick
+      if ((x === 7 || x === 8) && y >= 6 && y <= 14) {
+        const n = hSigned(x, y, 240);
+        px(clamp(118 + n * 8), clamp(78 + n * 6), clamp(42 + n * 4));
+      }
+      if (x === 6 && y >= 7 && y <= 13) px(88, 56, 28);
+      // wrap / coal head
+      if (x >= 6 && x <= 9 && y >= 5 && y <= 7) px(52, 40, 32);
+      // flame
+      const fx = x - 7.5;
+      const fy = y - 3.2;
+      const fr = fx * fx + fy * fy * 0.7;
+      if (y >= 1 && y <= 6 && Math.abs(fx) < 2.6 - (6 - y) * 0.15) {
+        if (fr < 8) px(255, 210, 70);
+        if (fr < 4.2) px(255, 140, 32);
+        if (fr < 1.6) px(255, 248, 210);
+      }
+      if ((x === 7 || x === 8) && y === 1) px(255, 230, 120);
     }
   });
 }

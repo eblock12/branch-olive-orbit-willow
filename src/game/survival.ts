@@ -2,9 +2,11 @@ import { Block, BLOCKS, isPlant, type BlockId } from "./blocks";
 import {
   CRAFTABLE_RECIPES,
   ITEM_DEFS,
+  Item,
   type ItemId,
   type ItemStack,
   type Recipe,
+  canHarvest,
   getTool,
   itemMaxStack,
   mineTimeWithTool,
@@ -24,14 +26,23 @@ export function mineTime(id: number, toolId?: ItemId | null): number {
 }
 
 /** Item dropped when block is broken (null = nothing) */
-export function blockDrop(id: number): BlockId | null {
-  if (isPlant(id)) return id as BlockId;
+export function blockDrop(id: number): ItemId | null {
+  if (isPlant(id) && id !== Block.TORCH) return id as BlockId;
   switch (id) {
     case Block.GRASS:
     case Block.SNOW_GRASS:
       return Block.DIRT;
     case Block.STONE:
       return Block.COBBLE;
+    case Block.COAL_ORE:
+      return Item.COAL;
+    case Block.IRON_ORE:
+      return Block.IRON_ORE;
+    case Block.FURNACE:
+    case Block.FURNACE_LIT:
+      return Block.FURNACE;
+    case Block.TORCH:
+      return Block.TORCH;
     case Block.DIRT:
     case Block.SAND:
     case Block.WOOD:
@@ -63,6 +74,8 @@ export class SurvivalState {
 
   slots: HotbarSlot[] = Array.from({ length: HOTBAR_SIZE }, () => null);
   selected = 0;
+  /** Stack held on the inventory cursor (furnace / craft). */
+  cursor: ItemStack | null = null;
 
   miningTarget: { x: number; y: number; z: number; id: number } | null = null;
   mineProgress = 0;
@@ -70,11 +83,16 @@ export class SurvivalState {
   /** Simple progression flags for tips */
   craftedFirst = false;
   madePick = false;
+  madeFurnace = false;
+  smeltedIron = false;
+  /** Debug: craft without consuming / requiring inputs */
+  freeCraft = false;
 
   constructor() {
     // Soft start: dirt + wood so early crafting is possible
     this.addItem(Block.DIRT, 8);
     this.addItem(Block.WOOD, 3);
+    this.addItem(Block.TORCH, 6);
   }
 
   get selectedSlot(): HotbarSlot {
@@ -147,10 +165,11 @@ export class SurvivalState {
 
   canCraft(recipe: Recipe): boolean {
     if (recipe.output.count <= 0) return false;
-    for (const inp of recipe.inputs) {
-      if (this.countOf(inp.id) < inp.count) return false;
+    if (!this.freeCraft) {
+      for (const inp of recipe.inputs) {
+        if (this.countOf(inp.id) < inp.count) return false;
+      }
     }
-    // Need room for output (simplified: at least one empty or stackable slot)
     return this.canFit(recipe.output.id, recipe.output.count);
   }
 
@@ -166,24 +185,57 @@ export class SurvivalState {
 
   craft(recipe: Recipe): boolean {
     if (!this.canCraft(recipe)) return false;
-    for (const inp of recipe.inputs) {
-      this.removeItem(inp.id, inp.count);
+    if (!this.freeCraft) {
+      for (const inp of recipe.inputs) {
+        this.removeItem(inp.id, inp.count);
+      }
     }
     const out = recipe.output;
     const maxD = ITEM_DEFS[out.id]?.maxDurability;
     this.addItem(out.id, out.count, maxD);
     this.craftedFirst = true;
-    if (
-      out.id === 101 ||
-      out.id === 105 ||
-      ITEM_DEFS[out.id]?.tool === "pickaxe"
-    ) {
-      this.madePick = true;
-    }
+    if (out.id === Block.FURNACE) this.madeFurnace = true;
+    if (ITEM_DEFS[out.id]?.tool === "pickaxe") this.madePick = true;
     return true;
   }
 
-  /** Consume 1 placeable block from selected; tools not consumable this way */
+  /** Remove 1 (or the whole stack) from the selected slot. */
+  dropSelected(all = false): ItemId | null {
+    const s = this.slots[this.selected];
+    if (!s || s.count <= 0) return null;
+    const id = s.id;
+    if (all) {
+      this.slots[this.selected] = null;
+    } else {
+      s.count--;
+      if (s.count <= 0) this.slots[this.selected] = null;
+    }
+    return id;
+  }
+
+  /** Left-click a hotbar slot: pick up, place, merge, or swap. */
+  clickHotbar(i: number): void {
+    if (i < 0 || i >= HOTBAR_SIZE) return;
+    const r = clickStacks(this.slots[i], this.cursor);
+    this.slots[i] = r.slot;
+    this.cursor = r.cursor;
+    this.select(i);
+  }
+
+  /** Put as much of `stack` as will fit into the hotbar. Returns leftover. */
+  insertStack(stack: ItemStack): ItemStack | null {
+    const added = this.addItem(stack.id, stack.count, stack.durability);
+    const left = stack.count - added;
+    if (left <= 0) return null;
+    return { ...stack, count: left };
+  }
+
+  /** Return cursor into inventory. Leftover stays on the cursor. */
+  parkCursor(): void {
+    if (!this.cursor) return;
+    this.cursor = this.insertStack(this.cursor);
+  }
+
   consumeSelected(): ItemId | null {
     const s = this.slots[this.selected];
     if (!s || s.count <= 0) return null;
@@ -351,5 +403,29 @@ export class SurvivalState {
   }
 }
 
-export { CRAFTABLE_RECIPES, getTool, placeableBlock };
+/** Minecraft-style left click between a slot and the cursor. */
+export function clickStacks(
+  slot: ItemStack | null,
+  cursor: ItemStack | null,
+): { slot: ItemStack | null; cursor: ItemStack | null } {
+  if (!cursor) {
+    if (!slot) return { slot, cursor };
+    return { slot: null, cursor: { ...slot } };
+  }
+  if (!slot) {
+    return { slot: { ...cursor }, cursor: null };
+  }
+  if (slot.id === cursor.id && itemMaxStack(slot.id) > 1) {
+    const max = itemMaxStack(slot.id);
+    const n = Math.min(cursor.count, max - slot.count);
+    if (n > 0) {
+      slot = { ...slot, count: slot.count + n };
+      const left = cursor.count - n;
+      return { slot, cursor: left > 0 ? { ...cursor, count: left } : null };
+    }
+  }
+  return { slot: { ...cursor }, cursor: { ...slot } };
+}
+
+export { CRAFTABLE_RECIPES, getTool, placeableBlock, canHarvest };
 export type { Recipe, ItemId, ItemStack };

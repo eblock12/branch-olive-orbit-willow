@@ -1,5 +1,5 @@
 import { World } from "./world";
-import { Block, isSolid } from "./blocks";
+import { isSolid, isWater } from "./blocks";
 
 export const PLAYER_HEIGHT = 1.8;
 export const PLAYER_WIDTH = 0.6;
@@ -27,9 +27,10 @@ const STEP_HEIGHT = 0.6;
 /** Ground probe distance under feet */
 const GROUND_PROBE = 0.08;
 
-// ——— Swimming ———
-const SWIM_SPEED = 3.6;
-const SWIM_SPRINT = 4.8;
+// ——— Swimming (slower than walk — water should feel heavy) ———
+const SWIM_SPEED = 2.15;
+const SWIM_SPRINT = 2.85;
+const SWIM_ACCEL = 16;
 const WATER_GRAVITY = 6;
 const WATER_BUOYANCY = 8;
 const WATER_DRAG = 5;
@@ -52,6 +53,8 @@ export class Player {
   private readonly halfW = PLAYER_WIDTH / 2;
   private readonly height = PLAYER_HEIGHT;
   private wasInWater = false;
+  /** Consumed on a surface hop so holding jump doesn't rocket every frame. */
+  private surfaceJumped = false;
 
   get eyeY(): number {
     return this.y + EYE_HEIGHT;
@@ -85,7 +88,7 @@ export class Player {
   // ─── Water sampling ───────────────────────────────────────────
 
   private isWaterAt(world: World, x: number, y: number, z: number): boolean {
-    return world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) === Block.WATER;
+    return isWater(world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)));
   }
 
   sampleWater(world: World): { any: boolean; head: boolean; feet: boolean } {
@@ -124,6 +127,12 @@ export class Player {
       this.vy = -WATER_ENTER_MAX_SINK;
       this.vx *= 0.6;
       this.vz *= 0.6;
+    }
+
+    // Just left water with jump held — keep the hop so gravity doesn't
+    // slam you back in before you clear the bank.
+    if (this.wasInWater && !this.inWater && jump && this.vy < JUMP_VELOCITY * 0.75) {
+      this.vy = JUMP_VELOCITY * 0.85;
     }
     this.wasInWater = this.inWater;
 
@@ -286,6 +295,20 @@ export class Player {
     if (jump) wy += 1;
     if (sprint) wy -= 0.85;
 
+    const atSurface = !this.submerged;
+    if (!jump || this.submerged) this.surfaceJumped = false;
+
+    // Head above water + jump: one land-like hop so you can climb a bank.
+    if (atSurface && jump && !this.surfaceJumped) {
+      this.vy = Math.max(this.vy, JUMP_VELOCITY);
+      if (moveF > 0.2) {
+        const [fx, fz] = this.forwardXZ();
+        this.vx += fx * 2.1;
+        this.vz += fz * 2.1;
+      }
+      this.surfaceJumped = true;
+    }
+
     const len = Math.hypot(wx, wy, wz);
     if (len > 1e-6) {
       wx /= len;
@@ -295,18 +318,19 @@ export class Player {
         sprint && (Math.abs(moveF) > 0 || Math.abs(moveR) > 0)
           ? SWIM_SPRINT
           : SWIM_SPEED;
-      const acc = 20 * dt;
-      this.vx += wx * speed * acc;
-      this.vy += wy * speed * acc;
-      this.vz += wz * speed * acc;
+      this.vx = this.approach(this.vx, wx * speed, SWIM_ACCEL * dt);
+      this.vz = this.approach(this.vz, wz * speed, SWIM_ACCEL * dt);
+      // Vertical: gentle swim-up/down, don't overwrite a surface hop
+      if (!this.surfaceJumped || this.vy < speed) {
+        this.vy = this.approach(this.vy, wy * speed, SWIM_ACCEL * dt);
+      }
     }
 
-    const sp = Math.hypot(this.vx, this.vy, this.vz);
-    const maxSp = SWIM_SPRINT * 1.25;
-    if (sp > maxSp) {
-      const s = maxSp / sp;
+    // Cap horizontal only — a surface jump needs its vertical intact
+    const hsp = Math.hypot(this.vx, this.vz);
+    if (hsp > SWIM_SPRINT) {
+      const s = SWIM_SPRINT / hsp;
       this.vx *= s;
-      this.vy *= s;
       this.vz *= s;
     }
 
@@ -378,11 +402,11 @@ export class Player {
       return;
     }
 
-    // Step up if grounded / near ground and path above is free
-    if (
-      (this.onGround || this.collides(world, this.x, this.y - GROUND_PROBE, this.z)) &&
-      this.vy <= 0.01
-    ) {
+    // Step up if grounded / swimming at a bank and path above is free
+    const nearFloor = this.collides(world, this.x, this.y - GROUND_PROBE, this.z);
+    const canStep =
+      this.onGround || this.inWater || nearFloor;
+    if (canStep && (this.vy <= 0.45 || this.inWater)) {
       const stepY = this.y + STEP_HEIGHT;
       if (
         !this.collides(world, this.x, stepY, this.z) &&

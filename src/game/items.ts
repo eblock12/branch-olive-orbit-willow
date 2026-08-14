@@ -11,12 +11,18 @@ export const Item = {
   STONE_AXE: 106,
   STONE_SHOVEL: 107,
   STONE_SWORD: 108,
+  COAL: 109,
+  IRON_INGOT: 110,
+  IRON_PICK: 111,
+  IRON_AXE: 112,
+  IRON_SHOVEL: 113,
+  IRON_SWORD: 114,
 } as const;
 
 export type ItemId = number;
 
 export type ToolKind = "pickaxe" | "axe" | "shovel" | "sword" | "none";
-export type ToolTier = "none" | "wood" | "stone";
+export type ToolTier = "none" | "wood" | "stone" | "iron";
 
 export type ItemDef = {
   id: ItemId;
@@ -127,6 +133,58 @@ const TOOLS: ItemDef[] = [
     attack: 5,
     color: "#7a7a80",
   },
+  {
+    id: Item.COAL,
+    name: "Coal",
+    maxStack: 64,
+    color: "#2a2a2e",
+  },
+  {
+    id: Item.IRON_INGOT,
+    name: "Iron Ingot",
+    maxStack: 64,
+    color: "#d0d4dc",
+  },
+  {
+    id: Item.IRON_PICK,
+    name: "Iron Pickaxe",
+    maxStack: 1,
+    tool: "pickaxe",
+    tier: "iron",
+    maxDurability: 250,
+    attack: 4,
+    color: "#c8ccd4",
+  },
+  {
+    id: Item.IRON_AXE,
+    name: "Iron Axe",
+    maxStack: 1,
+    tool: "axe",
+    tier: "iron",
+    maxDurability: 250,
+    attack: 5,
+    color: "#c8ccd4",
+  },
+  {
+    id: Item.IRON_SHOVEL,
+    name: "Iron Shovel",
+    maxStack: 1,
+    tool: "shovel",
+    tier: "iron",
+    maxDurability: 250,
+    attack: 4,
+    color: "#c8ccd4",
+  },
+  {
+    id: Item.IRON_SWORD,
+    name: "Iron Sword",
+    maxStack: 1,
+    tool: "sword",
+    tier: "iron",
+    maxDurability: 250,
+    attack: 7,
+    color: "#c8ccd4",
+  },
 ];
 
 /** All non-block items */
@@ -200,7 +258,12 @@ export function baseMineTime(blockId: number): number {
       return 1.0;
     case Block.COBBLE:
     case Block.STONE:
+    case Block.COAL_ORE:
+    case Block.FURNACE:
+    case Block.FURNACE_LIT:
       return 2.2;
+    case Block.IRON_ORE:
+      return 2.8;
     case Block.WATER:
       return Infinity;
     default:
@@ -213,7 +276,11 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.STONE ||
     blockId === Block.COBBLE ||
     blockId === Block.ICE ||
-    blockId === Block.BEDROCK
+    blockId === Block.BEDROCK ||
+    blockId === Block.COAL_ORE ||
+    blockId === Block.IRON_ORE ||
+    blockId === Block.FURNACE ||
+    blockId === Block.FURNACE_LIT
   ) {
     return "pickaxe";
   }
@@ -240,7 +307,38 @@ const TIER_MULT: Record<ToolTier, number> = {
   none: 1,
   wood: 2.2,
   stone: 4.0,
+  iron: 6.4,
 };
+
+const TIER_RANK: Record<ToolTier, number> = {
+  none: 0,
+  wood: 1,
+  stone: 2,
+  iron: 3,
+};
+
+/** Minimum pick tier to drop this block (none = anyone). */
+export function harvestTier(blockId: number): ToolTier {
+  if (blockId === Block.IRON_ORE) return "stone";
+  if (
+    blockId === Block.COAL_ORE ||
+    blockId === Block.STONE ||
+    blockId === Block.COBBLE ||
+    blockId === Block.FURNACE ||
+    blockId === Block.FURNACE_LIT
+  ) {
+    return "wood";
+  }
+  return "none";
+}
+
+export function canHarvest(blockId: number, toolItemId?: ItemId | null): boolean {
+  const need = harvestTier(blockId);
+  if (need === "none") return true;
+  const tool = getTool(toolItemId);
+  if (tool.kind !== "pickaxe") return false;
+  return TIER_RANK[tool.tier] >= TIER_RANK[need];
+}
 
 /**
  * Effective mine time with held tool.
@@ -254,12 +352,21 @@ export function mineTimeWithTool(blockId: number, toolItemId?: ItemId | null): n
   const tool = getTool(toolItemId);
   const prefer = preferredTool(blockId);
 
-  // Stone/cobble requires at least wood pick
+  // Stone-likes without a pick are painfully slow
   if (
-    (blockId === Block.STONE || blockId === Block.COBBLE) &&
+    (blockId === Block.STONE ||
+      blockId === Block.COBBLE ||
+      blockId === Block.COAL_ORE ||
+      blockId === Block.IRON_ORE ||
+      blockId === Block.FURNACE ||
+      blockId === Block.FURNACE_LIT) &&
     tool.kind !== "pickaxe"
   ) {
-    return base * 3.5; // agonizingly slow without pick
+    return base * 3.5;
+  }
+  // Weak pick on iron still mines, just slowly — no drop (see canHarvest)
+  if (blockId === Block.IRON_ORE && TIER_RANK[tool.tier] < TIER_RANK.stone) {
+    return base * 2.2;
   }
 
   if (tool.kind === "none" || prefer === "none") {
@@ -374,6 +481,71 @@ export const RECIPES: Recipe[] = [
     output: { id: Item.STONE_SWORD, count: 1 },
   },
   {
+    id: "torch",
+    name: "Torch",
+    inputs: [
+      { id: Item.STICK, count: 1 },
+      { id: Block.PLANKS, count: 1 },
+    ],
+    output: { id: Block.TORCH, count: 4 },
+    hint: "Light caves and the night",
+  },
+  {
+    id: "torch_coal",
+    name: "Torch",
+    inputs: [
+      { id: Item.STICK, count: 1 },
+      { id: Item.COAL, count: 1 },
+    ],
+    output: { id: Block.TORCH, count: 4 },
+    hint: "Coal burns brighter — 4 torches",
+  },
+  {
+    id: "furnace",
+    name: "Furnace",
+    inputs: [{ id: Block.COBBLE, count: 8 }],
+    output: { id: Block.FURNACE, count: 1 },
+    hint: "Right-click to smelt ore",
+  },
+  {
+    id: "iron_pick",
+    name: "Iron Pickaxe",
+    inputs: [
+      { id: Item.IRON_INGOT, count: 3 },
+      { id: Item.STICK, count: 2 },
+    ],
+    output: { id: Item.IRON_PICK, count: 1 },
+    hint: "The midgame pick",
+  },
+  {
+    id: "iron_axe",
+    name: "Iron Axe",
+    inputs: [
+      { id: Item.IRON_INGOT, count: 3 },
+      { id: Item.STICK, count: 2 },
+    ],
+    output: { id: Item.IRON_AXE, count: 1 },
+  },
+  {
+    id: "iron_shovel",
+    name: "Iron Shovel",
+    inputs: [
+      { id: Item.IRON_INGOT, count: 1 },
+      { id: Item.STICK, count: 2 },
+    ],
+    output: { id: Item.IRON_SHOVEL, count: 1 },
+  },
+  {
+    id: "iron_sword",
+    name: "Iron Sword",
+    inputs: [
+      { id: Item.IRON_INGOT, count: 2 },
+      { id: Item.STICK, count: 1 },
+    ],
+    output: { id: Item.IRON_SWORD, count: 1 },
+    hint: "Serious reach and damage",
+  },
+  {
     id: "crafting_cobble",
     name: "Cobblestone (hint)",
     inputs: [],
@@ -407,9 +579,11 @@ function paintItemIcon(id: ItemId): string {
   const woodDark = "#6b4a28";
   const stone = "#8a8a90";
   const stoneDark = "#5a5a60";
+  const iron = "#d4d8e0";
+  const ironDark = "#8a909a";
   const tier = def?.tier ?? "wood";
-  const head = tier === "stone" ? stone : wood;
-  const headDark = tier === "stone" ? stoneDark : woodDark;
+  const head = tier === "iron" ? iron : tier === "stone" ? stone : wood;
+  const headDark = tier === "iron" ? ironDark : tier === "stone" ? stoneDark : woodDark;
   const stick = "#6b4a28";
 
   const stickLine = (x0: number, y0: number, x1: number, y1: number) => {
@@ -424,6 +598,36 @@ function paintItemIcon(id: ItemId): string {
 
   if (id === Item.STICK) {
     stickLine(10, 26, 22, 6);
+    return c.toDataURL("image/png");
+  }
+
+  if (id === Item.COAL) {
+    ctx.fillStyle = "#2c2c30";
+    ctx.beginPath();
+    ctx.moveTo(10, 24);
+    ctx.lineTo(7, 16);
+    ctx.lineTo(12, 8);
+    ctx.lineTo(22, 10);
+    ctx.lineTo(25, 20);
+    ctx.lineTo(18, 26);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#1a1a1c";
+    ctx.fillRect(12, 14, 3, 3);
+    ctx.fillStyle = "#5a5a62";
+    ctx.fillRect(16, 12, 2, 2);
+    return c.toDataURL("image/png");
+  }
+
+  if (id === Item.IRON_INGOT) {
+    ctx.fillStyle = "#b8bcc4";
+    ctx.fillRect(6, 12, 20, 10);
+    ctx.fillStyle = "#e8ecf2";
+    ctx.fillRect(6, 12, 20, 3);
+    ctx.fillStyle = "#7a8088";
+    ctx.fillRect(6, 20, 20, 2);
+    ctx.fillStyle = "#d0d4dc";
+    ctx.fillRect(8, 15, 6, 3);
     return c.toDataURL("image/png");
   }
 
@@ -459,7 +663,7 @@ function paintItemIcon(id: ItemId): string {
     ctx.stroke();
   } else if (kind === "sword") {
     // blade
-    ctx.fillStyle = tier === "stone" ? "#b0b4bc" : "#d4c4a0";
+    ctx.fillStyle = tier === "iron" ? "#e8ecf4" : tier === "stone" ? "#b0b4bc" : "#d4c4a0";
     ctx.beginPath();
     ctx.moveTo(10, 20);
     ctx.lineTo(14, 6);

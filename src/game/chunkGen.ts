@@ -4,6 +4,7 @@ import { sampleBiome, Biome, type BiomeId } from "./biomes";
 import { shouldCarveCave, shouldFloodCave } from "./caves";
 import { placeStructuresInChunk } from "./structures";
 import { placePlantsInChunk } from "./plants";
+import { placeOresInChunk } from "./ores";
 import { CHUNK_SIZE, CHUNK_HEIGHT, SEA_LEVEL } from "./chunkConstants";
 
 function index(x: number, y: number, z: number): number {
@@ -367,6 +368,9 @@ export function generateChunkBlocks(
 
   // Pass 1c: enforce flat water planes — no towers / floating water columns
   normalizeWater(blocks, surfH);
+
+  // Pass 1d: coal + iron in stone (after caves so walls get bonus veins)
+  placeOresInChunk(blocks, cx, cz, seed);
 
   // Pass 2: trees / cactus — sample outside chunk for canopy wrap
   const CANOPY = 2;

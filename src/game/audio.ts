@@ -168,9 +168,10 @@ export class GameAudio {
       opts.playing ? 0.02 + opts.windSpeed * 0.06 + opts.rain * 0.02 : 0,
       now,
     );
-    this.ramp(this.rainGain, opts.playing ? opts.rain * 0.5 : 0, now);
-    this.grainRain = opts.playing ? opts.rain : 0;
-    if (opts.playing && this.rainWashGain && this.rainRumbleGain) {
+    const rainVol = opts.playing && !opts.submerged ? opts.rain : 0;
+    this.ramp(this.rainGain, rainVol * 0.5, now);
+    this.grainRain = rainVol;
+    if (opts.playing && !opts.submerged && this.rainWashGain && this.rainRumbleGain) {
       const r = opts.rain;
       this.rainWashGain.gain.setTargetAtTime(0.3 + r * 0.35, now, 0.4);
       this.rainRumbleGain.gain.setTargetAtTime(r * 0.4, now, 0.5);
@@ -1539,6 +1540,10 @@ export function surfaceFromBlock(id: number): AudioSurface {
     case Block.STONE:
     case Block.COBBLE:
     case Block.BEDROCK:
+    case Block.COAL_ORE:
+    case Block.IRON_ORE:
+    case Block.FURNACE:
+    case Block.FURNACE_LIT:
       return "stone";
     case Block.SAND:
     case Block.SNOW:

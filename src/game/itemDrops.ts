@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { BLOCKS, isPlant, type BlockId } from "./blocks";
+import { isBlockItem, itemColor, type ItemId } from "./items";
 import { tileUVs } from "./textures";
 import type { World } from "./world";
 import type { Player } from "./player";
@@ -16,7 +17,7 @@ const MAX_DROPS = 96;
 const MAX_LIFE = 120; // seconds before despawn
 
 type Drop = {
-  id: BlockId;
+  id: ItemId;
   mesh: THREE.Mesh;
   x: number;
   y: number;
@@ -109,6 +110,8 @@ export class ItemDropSystem {
   private drops: Drop[] = [];
   private material: THREE.MeshLambertMaterial;
   private geoCache = new Map<number, THREE.BufferGeometry>();
+  private itemMatCache = new Map<number, THREE.MeshLambertMaterial>();
+  private nuggetGeo = new THREE.BoxGeometry(0.2, 0.14, 0.2);
 
   constructor(atlas: THREE.Texture) {
     this.material = new THREE.MeshLambertMaterial({
@@ -128,13 +131,26 @@ export class ItemDropSystem {
     return g;
   }
 
-  spawn(id: BlockId, x: number, y: number, z: number): void {
-    if (!BLOCKS[id] || id === 0) return;
+  spawn(id: ItemId, x: number, y: number, z: number): void {
+    if (!id) return;
+    if (isBlockItem(id) && !BLOCKS[id]) return;
     // Cap: remove oldest
     while (this.drops.length >= MAX_DROPS) {
       this.removeAt(0);
     }
-    const mesh = new THREE.Mesh(this.geoFor(id), this.material);
+    let mesh: THREE.Mesh;
+    if (isBlockItem(id)) {
+      mesh = new THREE.Mesh(this.geoFor(id as BlockId), this.material);
+    } else {
+      let mat = this.itemMatCache.get(id);
+      if (!mat) {
+        mat = new THREE.MeshLambertMaterial({
+          color: new THREE.Color(itemColor(id)),
+        });
+        this.itemMatCache.set(id, mat);
+      }
+      mesh = new THREE.Mesh(this.nuggetGeo, mat);
+    }
     mesh.castShadow = true;
     mesh.receiveShadow = false;
     // Slight random pop
@@ -163,6 +179,57 @@ export class ItemDropSystem {
     this.drops.push(drop);
   }
 
+  /** Toss from the player — world-space origin + velocity, longer pickup delay. */
+  throwFrom(
+    id: ItemId,
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vy: number,
+    vz: number,
+  ): void {
+    if (!id) return;
+    if (isBlockItem(id) && !BLOCKS[id]) return;
+    while (this.drops.length >= MAX_DROPS) this.removeAt(0);
+    let mesh: THREE.Mesh;
+    if (isBlockItem(id)) {
+      mesh = new THREE.Mesh(this.geoFor(id as BlockId), this.material);
+    } else {
+      let mat = this.itemMatCache.get(id);
+      if (!mat) {
+        mat = new THREE.MeshLambertMaterial({
+          color: new THREE.Color(itemColor(id)),
+        });
+        this.itemMatCache.set(id, mat);
+      }
+      mesh = new THREE.Mesh(this.nuggetGeo, mat);
+    }
+    mesh.castShadow = true;
+    mesh.receiveShadow = false;
+    const drop: Drop = {
+      id,
+      mesh,
+      x,
+      y,
+      z,
+      vx,
+      vy,
+      vz,
+      age: -0.45,
+      spin: (Math.random() - 0.5) * 5,
+      bob: Math.random() * Math.PI * 2,
+    };
+    mesh.position.set(x, y, z);
+    mesh.rotation.set(
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+    );
+    this.group.add(mesh);
+    this.drops.push(drop);
+  }
+
   private removeAt(i: number): void {
     const d = this.drops[i];
     if (!d) return;
@@ -178,9 +245,9 @@ export class ItemDropSystem {
     dt: number,
     world: World,
     player: Player,
-    tryPickup: (id: BlockId) => boolean,
-  ): BlockId[] {
-    const picked: BlockId[] = [];
+    tryPickup: (id: ItemId) => boolean,
+  ): ItemId[] {
+    const picked: ItemId[] = [];
     const px = player.x;
     const py = player.y + 0.9;
     const pz = player.z;
@@ -280,6 +347,9 @@ export class ItemDropSystem {
     this.drops = [];
     for (const g of this.geoCache.values()) g.dispose();
     this.geoCache.clear();
+    this.nuggetGeo.dispose();
+    for (const m of this.itemMatCache.values()) m.dispose();
+    this.itemMatCache.clear();
     this.material.dispose();
   }
 }

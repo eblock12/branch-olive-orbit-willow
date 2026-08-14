@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ClientOnly } from "@tanstack/react-router";
 import { BLOCKS, isPlant } from "../game/blocks";
 import type { GameEngine, HudSnapshot } from "../game/engine";
+import type { HotbarSlot } from "../game/survival";
 import {
   isBlockItem,
   itemColor,
   itemIconDataUrl,
   itemName,
+  ITEM_DEFS,
   type ItemId,
 } from "../game/items";
 
@@ -17,6 +19,14 @@ const DEFAULT_HUD: HudSnapshot = {
   selectedName: "Dirt",
   placeable: [],
   pos: { x: 0, y: 0, z: 0 },
+  chunkGen: {
+    queued: 0,
+    generating: 0,
+    mesh: 0,
+    loaded: 0,
+    workers: 0,
+    idleWorkers: 0,
+  },
   target: null,
   isTouch: false,
   caterpillars: 0,
@@ -41,7 +51,10 @@ const DEFAULT_HUD: HudSnapshot = {
   atlasUrl: "",
   blockIcons: {},
   craftingOpen: false,
+  furnaceOpen: false,
+  furnace: null,
   recipes: [],
+  freeCraft: false,
   tip: "Press E to craft",
 };
 
@@ -116,6 +129,48 @@ function ItemIcon({
   );
 }
 
+function FurnaceSlot({
+  label,
+  slot,
+  atlasUrl,
+  blockIcons,
+  onClick,
+}: {
+  label: string;
+  slot: HotbarSlot;
+  atlasUrl: string;
+  blockIcons: Record<number, string>;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex flex-col items-center gap-1"
+    >
+      <span className="text-[10px] uppercase tracking-wide text-subtle">
+        {label}
+      </span>
+      <span className="relative flex h-12 w-12 items-center justify-center rounded-lg border border-border bg-bg/70">
+        {slot ? (
+          <>
+            <ItemIcon
+              id={slot.id}
+              atlasUrl={atlasUrl}
+              blockIcons={blockIcons}
+              className="h-8 w-8"
+            />
+            {slot.count > 1 ? (
+              <span className="absolute bottom-0.5 right-1 font-mono text-[10px] font-semibold text-fg">
+                {slot.count}
+              </span>
+            ) : null}
+          </>
+        ) : null}
+      </span>
+    </button>
+  );
+}
 
 const WEATHER_LABEL: Record<string, string> = {
   clear: "Clear",
@@ -183,8 +238,11 @@ function GameShell() {
   }, []);
 
   const onSelect = useCallback((i: number) => {
-    engineRef.current?.selectHotbar(i);
-  }, []);
+    const eng = engineRef.current;
+    if (!eng) return;
+    eng.selectHotbar(i);
+    if (hud.furnaceOpen) eng.furnaceFromHotbar(i);
+  }, [hud.furnaceOpen]);
 
   const onCraft = useCallback((recipeId: string) => {
     engineRef.current?.craftRecipe(recipeId);
@@ -194,8 +252,20 @@ function GameShell() {
     engineRef.current?.setCraftingOpen(false);
   }, []);
 
+  const onCloseFurnace = useCallback(() => {
+    engineRef.current?.closeFurnace();
+  }, []);
+
+  const onFurnaceSlot = useCallback((slot: "input" | "fuel" | "output") => {
+    engineRef.current?.furnaceClickSlot(slot);
+  }, []);
+
   const onToggleDayNight = useCallback(() => {
     engineRef.current?.toggleDayNightDebug();
+  }, []);
+
+  const onToggleFreeCraft = useCallback(() => {
+    engineRef.current?.toggleFreeCraft();
   }, []);
 
 
@@ -292,6 +362,17 @@ function GameShell() {
               {Math.floor(hud.pos.x)}, {Math.floor(hud.pos.y)},{" "}
               {Math.floor(hud.pos.z)}
             </p>
+            <p
+              className={`mt-0.5 font-mono tabular-nums text-subtle ${
+                lsTouch ? "text-[9px]" : "text-[10px]"
+              }`}
+            >
+              gen {hud.chunkGen.queued}q {hud.chunkGen.generating}run · mesh{" "}
+              {hud.chunkGen.mesh} · {hud.chunkGen.loaded} loaded
+              {hud.chunkGen.workers > 0
+                ? ` · ${hud.chunkGen.workers - hud.chunkGen.idleWorkers}/${hud.chunkGen.workers} wrk`
+                : " · sync"}
+            </p>
           </div>
           <div
             className={`flex items-end gap-1.5 ${
@@ -333,21 +414,21 @@ function GameShell() {
             </div>
 
             <div
-              className={`rounded-xl border border-border bg-surface/85 text-right backdrop-blur-sm ${
-                lsTouch ? "px-2 py-1" : "px-3 py-2"
+              className={`w-[7.5rem] rounded-xl border border-border bg-surface/85 text-right backdrop-blur-sm ${
+                lsTouch ? "px-2 py-1" : "px-2.5 py-1.5"
               }`}
             >
-              {!lsTouch && <p className="text-xs text-muted">Weather</p>}
+              {!lsTouch && <p className="text-[10px] text-muted">Weather</p>}
               <p
                 className={`font-medium text-fg ${
-                  lsTouch ? "text-xs" : "text-sm"
+                  lsTouch ? "text-xs" : "text-xs"
                 }`}
               >
                 {WEATHER_LABEL[hud.weather] ?? hud.weather}
                 {hud.rain > 0.15 ? (
                   <span className="font-mono text-[10px] text-subtle">
                     {" "}
-                    · {Math.round(hud.rain * 100)}%
+                    {Math.round(hud.rain * 100)}%
                   </span>
                 ) : null}
               </p>
@@ -360,10 +441,24 @@ function GameShell() {
                 <button
                   type="button"
                   onClick={onToggleDayNight}
-                  className="pointer-events-auto mt-2 w-full rounded-lg border border-border bg-bg/70 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted transition-colors hover:bg-bg hover:text-fg"
+                  className="pointer-events-auto mt-1.5 w-full rounded-md border border-border bg-bg/70 px-1.5 py-0.5 text-[9px] font-medium text-muted transition-colors hover:bg-bg hover:text-fg"
                   title="Or press F3 while playing (keeps mouse look)"
                 >
-                  Debug: {hud.isDay ? "→ Night" : "→ Day"} · F3
+                  {hud.isDay ? "Night" : "Day"} F3
+                </button>
+              )}
+              {!lsTouch && (
+                <button
+                  type="button"
+                  onClick={onToggleFreeCraft}
+                  className={`pointer-events-auto mt-1 w-full rounded-md border px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                    hud.freeCraft
+                      ? "border-accent bg-accent/20 text-fg"
+                      : "border-border bg-bg/70 text-muted hover:bg-bg hover:text-fg"
+                  }`}
+                  title="Craft without ingredients (F4)"
+                >
+                  Craft {hud.freeCraft ? "ON" : "OFF"} F4
                 </button>
               )}
             </div>
@@ -373,7 +468,7 @@ function GameShell() {
 
       {ready && (
         <div
-          className={`absolute bottom-0 left-0 right-0 z-20 flex flex-col items-center ${
+          className={`absolute bottom-0 left-0 right-0 z-50 flex flex-col items-center ${
             lsTouch
               ? "gap-1 px-2 py-1 pb-[max(0.35rem,env(safe-area-inset-bottom))] pl-[max(6.75rem,env(safe-area-inset-left))] pr-[max(6.75rem,env(safe-area-inset-right))]"
               : "gap-3 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
@@ -527,7 +622,7 @@ function GameShell() {
                       <span
                         className="block h-full bg-emerald-400"
                         style={{
-                          width: `${Math.max(0, Math.min(1, dur / 140)) * 100}%`,
+                          width: `${Math.max(0, Math.min(1, dur / (ITEM_DEFS[slot.id]?.maxDurability ?? 140))) * 100}%`,
                         }}
                       />
                     </span>
@@ -548,22 +643,37 @@ function GameShell() {
 
       {/* Crafting panel */}
       {ready && hud.craftingOpen && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-bg/70 p-4 backdrop-blur-sm">
-          <div className="max-h-[min(90vh,640px)] w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
+          <div className="pointer-events-auto max-h-[min(70vh,560px)] w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <div>
                 <h2 className="text-sm font-semibold text-fg">Crafting</h2>
                 <p className="text-xs text-muted">
-                  Wood → planks → sticks → tools → mine stone
+                  {hud.freeCraft
+                    ? "Free craft ON — recipes ignore ingredients"
+                    : "Wood → planks → sticks → tools · cobble → furnace → iron"}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={onCloseCraft}
-                className="rounded-lg border border-border bg-elevated px-3 py-1.5 text-xs font-medium text-fg hover:bg-bg"
-              >
-                Close (E)
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onToggleFreeCraft}
+                  className={`rounded-lg border px-3 py-1.5 text-xs font-medium ${
+                    hud.freeCraft
+                      ? "border-accent bg-accent/20 text-fg"
+                      : "border-border bg-elevated text-muted hover:bg-bg hover:text-fg"
+                  }`}
+                >
+                  Free craft {hud.freeCraft ? "ON" : "OFF"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onCloseCraft}
+                  className="rounded-lg border border-border bg-elevated px-3 py-1.5 text-xs font-medium text-fg hover:bg-bg"
+                >
+                  Close (E)
+                </button>
+              </div>
             </div>
             <div className="max-h-[min(70vh,520px)] space-y-2 overflow-y-auto p-3">
               {hud.recipes.map((r) => (
@@ -605,6 +715,85 @@ function GameShell() {
                   </button>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {ready && hud.furnaceOpen && hud.furnace && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4 pb-36">
+          <div className="pointer-events-auto w-full max-w-md overflow-hidden rounded-2xl border border-border bg-surface shadow-xl">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold text-fg">Furnace</h2>
+                <p className="text-xs text-muted">
+                  Click a hotbar stack to load · click a slot to take out
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onCloseFurnace}
+                className="rounded-lg border border-border bg-elevated px-3 py-1.5 text-xs font-medium text-fg hover:bg-bg"
+              >
+                Close (E)
+              </button>
+            </div>
+            <div className="flex flex-col items-center gap-4 p-5">
+              <div className="flex items-center gap-3">
+                <FurnaceSlot
+                  label="Ore"
+                  slot={hud.furnace.input}
+                  atlasUrl={hud.atlasUrl}
+                  blockIcons={hud.blockIcons}
+                  onClick={() => onFurnaceSlot("input")}
+                />
+                <div className="flex w-16 flex-col items-center gap-1">
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg ring-1 ring-border">
+                    <div
+                      className="h-full bg-accent transition-[width] duration-150"
+                      style={{
+                        width: `${Math.max(0, Math.min(1, hud.furnace.cook)) * 100}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-[10px] uppercase tracking-wide text-subtle">
+                    smelt
+                  </span>
+                </div>
+                <FurnaceSlot
+                  label="Result"
+                  slot={hud.furnace.output}
+                  atlasUrl={hud.atlasUrl}
+                  blockIcons={hud.blockIcons}
+                  onClick={() => onFurnaceSlot("output")}
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <FurnaceSlot
+                  label="Fuel"
+                  slot={hud.furnace.fuel}
+                  atlasUrl={hud.atlasUrl}
+                  blockIcons={hud.blockIcons}
+                  onClick={() => onFurnaceSlot("fuel")}
+                />
+                <div className="flex w-16 flex-col items-center gap-1">
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg ring-1 ring-border">
+                    <div
+                      className="h-full bg-amber-500 transition-[width] duration-150"
+                      style={{
+                        width: `${Math.max(0, Math.min(1, hud.furnace.burn)) * 100}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-[10px] uppercase tracking-wide text-subtle">
+                    burn
+                  </span>
+                </div>
+                <div className="w-11" />
+              </div>
+              <p className="text-center text-xs text-muted">
+                Coal smelts 10 items. Wood and sticks work in a pinch.
+              </p>
             </div>
           </div>
         </div>
@@ -720,7 +909,7 @@ function GameShell() {
         </div>
       )}
 
-      {ready && !hud.playing && !hud.craftingOpen && (
+      {ready && !hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.dead && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-bg/55 p-6 backdrop-blur-[2px]">
           <div className="w-full max-w-md rounded-3xl border border-border bg-surface p-8 shadow-2xl shadow-black/40">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-subtle">

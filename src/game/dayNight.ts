@@ -213,17 +213,19 @@ export function rayleighSkyColor(sunElevation: number, out: THREE.Color): void {
 }
 
 export class DayNightCycle {
-  private time = CYCLE_LENGTH_SEC * 0.25; // start at noon
+  // High noon is phase 0.25; start ~10° of sky-arc past that (afternoon slant)
+  private time = CYCLE_LENGTH_SEC * (0.25 + 10 / 360);
 
   /**
-   * Single key SpotLight used for BOTH day and night (reliable shadows).
-   * One light = one shadow map path that always works (moon used to work,
-   * reused engine sun did not during daytime).
+   * Key DirectionalLight used for BOTH day and night.
+   * Parallel rays → shadow *angle* is fixed in world space (only the
+   * coverage window follows the player). SpotLight previously followed
+   * the player as a point source, so walking changed every shadow angle.
    */
-  private readonly keyLight: THREE.SpotLight;
+  private readonly keyLight: THREE.DirectionalLight;
   /**
-   * Unshadowed global fill (Directional) — keeps terrain outside the spot
-   * cone / shadow map from going pitch-dark. Color/dir match the key light.
+   * Unshadowed global fill (Directional) — keeps terrain outside the
+   * shadow map from going pitch-dark. Color/dir match the key light.
    */
   private readonly fillLight: THREE.DirectionalLight;
   private readonly sunBillboard: THREE.Mesh;
@@ -232,6 +234,10 @@ export class DayNightCycle {
   private readonly tmpSun = new THREE.Vector3();
   private readonly tmpMoon = new THREE.Vector3();
   private readonly tmpShadowDir = new THREE.Vector3();
+  private readonly tmpLook = new THREE.Vector3();
+  private readonly tmpRight = new THREE.Vector3();
+  private readonly tmpUp = new THREE.Vector3();
+  private readonly tmpCenter = new THREE.Vector3();
   private readonly tmpFog = new THREE.Color();
 
   private readonly tmpSunCol = new THREE.Color();
@@ -251,21 +257,26 @@ export class DayNightCycle {
       existingSun.visible = false;
     }
 
-    // SpotLight shadows are more reliable than Directional in this stack.
-    // Keep the cone/shadow frustum TIGHT so 2048² has usable texels-per-block.
-    // Far terrain brightness is handled by the unshadowed fill light, not by
-    // stretching the shadow map.
-    this.keyLight = new THREE.SpotLight(0xfff4e0, 2.6, 0, Math.PI / 4.2, 0.4, 1);
+    // Directional shadows: parallel sun/moon rays, ortho window around player.
+    // Tight frustum so 2048² has usable texels-per-block; fill lights the rest.
+    this.keyLight = new THREE.DirectionalLight(0xfff4e0, 2.6);
     this.keyLight.castShadow = true;
     this.keyLight.shadow.mapSize.set(2048, 2048);
-    this.keyLight.shadow.bias = -0.00004;
-    this.keyLight.shadow.normalBias = 0.008;
-    this.keyLight.shadow.intensity = 0.42;
+    this.keyLight.shadow.bias = -0.00035;
+    this.keyLight.shadow.normalBias = 0.045;
+    this.keyLight.shadow.intensity = 0.68;
     this.keyLight.shadow.radius = 1;
-    this.keyLight.shadow.camera.near = 6;
-    this.keyLight.shadow.camera.far = 120;
-    this.keyLight.shadow.camera.fov = 46;
-    this.keyLight.shadow.focus = 1;
+    {
+      const cam = this.keyLight.shadow.camera;
+      cam.near = 2;
+      cam.far = 170;
+      const half = 44;
+      cam.left = -half;
+      cam.right = half;
+      cam.top = half;
+      cam.bottom = -half;
+      cam.updateProjectionMatrix();
+    }
     scene.add(this.keyLight);
     scene.add(this.keyLight.target);
 
@@ -350,7 +361,7 @@ export class DayNightCycle {
 
 
   /** Key directional light (day sun / night moon) — weather binds to this */
-  get light(): THREE.SpotLight {
+  get light(): THREE.DirectionalLight {
     return this.keyLight;
   }
 
@@ -549,7 +560,7 @@ export class DayNightCycle {
     }
 
     this._aimX = px;
-    this._aimY = py + 4;
+    this._aimY = py; // feet — do not follow eye/bob or shadows swim
     this._aimZ = pz;
     this.finalizeKeyLight();
 
@@ -588,40 +599,28 @@ export class DayNightCycle {
   /**
    * Apply key directional light + shadow map.
    * Call after weather so nothing stomps castShadow/intensity.
-   * Fixed Minecraft-style angle (never vertical) for stable shadow camera.
+   * Parallel rays (DirectionalLight) so walking does not change shadow angle.
    */
   finalizeKeyLight(): void {
     const s = this.sample;
     const px = this._aimX;
     const py = this._aimY;
     const pz = this._aimZ;
-    // Tight range → more shadow-map texels per block (readable edges)
-    const dist = 56;
 
     const isDay = s.sunElevation >= 0;
-    if (isDay) {
-      const az = Math.atan2(s.sunDir.x, s.sunDir.z);
-      const trueElev = Math.asin(THREE.MathUtils.clamp(s.sunDir.y, -1, 1));
-      const elev = Math.min(trueElev, 1.05);
-      const e = Math.max(0.35, elev);
-      this.tmpShadowDir
-        .set(
-          Math.sin(az) * Math.cos(e * 0.75),
-          Math.sin(e * 0.75) + 0.15,
-          Math.cos(az) * Math.cos(e * 0.75),
-        )
-        .normalize();
-    } else {
-      const az = Math.atan2(s.moonDir.x, s.moonDir.z);
-      const elev = 0.55;
-      this.tmpShadowDir
-        .set(
-          Math.sin(az) * Math.cos(elev),
-          Math.sin(elev) + 0.2,
-          Math.cos(az) * Math.cos(elev),
-        )
-        .normalize();
-    }
+    // Actual celestial direction with a minimum slant so the shadow camera
+    // never looks straight down (unstable / vanishing shadows).
+    const src = isDay ? s.sunDir : s.moonDir;
+    const az = Math.atan2(src.x, src.z);
+    const trueElev = Math.asin(THREE.MathUtils.clamp(src.y, -1, 1));
+    const elev = THREE.MathUtils.clamp(trueElev, 0.32, 1.12);
+    this.tmpShadowDir
+      .set(
+        Math.sin(az) * Math.cos(elev),
+        Math.sin(elev),
+        Math.cos(az) * Math.cos(elev),
+      )
+      .normalize();
 
     const weatherDim = s.weatherDim > 0 ? s.weatherDim : 1;
     const flash = s.weatherFlash ?? 0;
@@ -629,36 +628,76 @@ export class DayNightCycle {
       ? Math.max(1.75, s.sunIntensity * 1.35)
       : Math.max(0.7, s.moonIntensity * 1.55);
     const totalI = baseI * weatherDim + flash * 0.4;
-    // Key: local high-res shadows. Fill: world brightness beyond the map.
-    // Keep fill lower than key so nearby shadows stay readable.
-    const keyI = totalI * 0.95;
-    const fillI = totalI * 0.48;
+    // Stronger key / slightly weaker fill → darker, readable shadows
+    const keyI = totalI * 1.05;
+    const fillI = totalI * 0.38;
     const color = isDay ? s.sunColor : s.moonColor;
 
-    const ox = this.tmpShadowDir.x * dist;
-    const oy = Math.max(30, Math.abs(this.tmpShadowDir.y) * dist);
-    const oz = this.tmpShadowDir.z * dist;
+    // --- World-locked shadow window ---
+    // Following the player 1:1 makes the ortho frustum slide, so shadow
+    // texels crawl across the ground when you strafe. Snap the aim point
+    // to the light-space texel grid (same basis Three.js lookAt uses) so
+    // a tree's umbra stays planted until you've moved a whole texel.
+    const dist = 78;
+    const half = 48;
+    const mapSize = this.keyLight.shadow.mapSize.x;
+    const texel = (half * 2) / mapSize;
 
-    this.keyLight.position.set(px + ox, py + oy, pz + oz);
-    this.keyLight.target.position.set(px, py, pz);
+    // Hold the window on a block so strafing inside a cell doesn't move it
+    const gx = Math.floor(px) + 0.5;
+    const gy = Math.floor(py / 4) * 4 + 2;
+    const gz = Math.floor(pz) + 0.5;
+
+    // Shadow camera sits at aim+dir*dist, looks at aim.
+    // lookAt: zAxis = normalize(eye - target) = dir
+    const dir = this.tmpShadowDir;
+    if (Math.abs(dir.y) > 0.94) this.tmpLook.set(1, 0, 0);
+    else this.tmpLook.set(0, 1, 0);
+    this.tmpRight.crossVectors(this.tmpLook, dir).normalize();
+    this.tmpUp.crossVectors(dir, this.tmpRight).normalize();
+
+    const lsX = gx * this.tmpRight.x + gy * this.tmpRight.y + gz * this.tmpRight.z;
+    const lsY = gx * this.tmpUp.x + gy * this.tmpUp.y + gz * this.tmpUp.z;
+    const lsZ = gx * dir.x + gy * dir.y + gz * dir.z;
+    const sx = Math.floor(lsX / texel) * texel;
+    const sy = Math.floor(lsY / texel) * texel;
+    const sz = Math.floor(lsZ / texel) * texel;
+
+    this.tmpCenter.set(
+      this.tmpRight.x * sx + this.tmpUp.x * sy + dir.x * sz,
+      this.tmpRight.y * sx + this.tmpUp.y * sy + dir.y * sz,
+      this.tmpRight.z * sx + this.tmpUp.z * sy + dir.z * sz,
+    );
+    // Raise the look-at a bit so nearby terrain is centered in the frustum
+    this.tmpCenter.y += 4;
+
+    this.keyLight.position.set(
+      this.tmpCenter.x + dir.x * dist,
+      this.tmpCenter.y + dir.y * dist,
+      this.tmpCenter.z + dir.z * dist,
+    );
+    this.keyLight.target.position.copy(this.tmpCenter);
     this.keyLight.target.updateMatrixWorld();
     this.keyLight.color.copy(color);
     this.keyLight.intensity = keyI;
-    this.keyLight.distance = 0;
-    this.keyLight.decay = 0;
-    // Moderate cone — not the huge frustum that crushed shadow resolution
-    this.keyLight.angle = Math.PI / 4.1;
-    this.keyLight.penumbra = 0.45;
     this.keyLight.visible = true;
     this.keyLight.castShadow = true;
-    this.keyLight.shadow.intensity = isDay ? 0.4 : 0.75;
-    this.keyLight.shadow.bias = -0.00004;
-    this.keyLight.shadow.normalBias = 0.008;
+    this.keyLight.shadow.intensity = isDay ? 0.72 : 0.88;
+    this.keyLight.shadow.bias = -0.00035;
+    this.keyLight.shadow.normalBias = 0.045;
     this.keyLight.shadow.radius = 1;
-    this.keyLight.shadow.camera.near = 6;
-    this.keyLight.shadow.camera.far = 115;
-    this.keyLight.shadow.camera.fov = 46;
-    this.keyLight.shadow.camera.updateProjectionMatrix();
+    {
+      const cam = this.keyLight.shadow.camera;
+      cam.near = 4;
+      cam.far = 160;
+      cam.left = -half;
+      cam.right = half;
+      cam.top = half;
+      cam.bottom = -half;
+      cam.up.set(0, 1, 0);
+      if (Math.abs(dir.y) > 0.94) cam.up.set(1, 0, 0);
+      cam.updateProjectionMatrix();
+    }
     this.keyLight.updateMatrixWorld(true);
     this.keyLight.shadow.camera.updateMatrixWorld();
     this.keyLight.shadow.needsUpdate = true;
@@ -667,22 +706,15 @@ export class DayNightCycle {
     this.fillLight.color.copy(color);
     this.fillLight.intensity = fillI;
     this.fillLight.position.set(
-      px + this.tmpShadowDir.x * 100,
-      py + Math.max(50, this.tmpShadowDir.y * 100 + 30),
-      pz + this.tmpShadowDir.z * 100,
-    );
-    this.fillLight.target.position.set(px, py, pz);
+      px + dir.x * 100,
+      py + Math.max(50, dir.y * 100 + 30),
+      pz + dir.z * 100,
+    );    this.fillLight.target.position.set(px, py, pz);
     this.fillLight.target.updateMatrixWorld();
     this.fillLight.visible = true;
     this.fillLight.castShadow = false;
     this.fillLight.updateMatrixWorld(true);
   }
-
-
-
-
-
-
 
   dispose(scene: THREE.Scene): void {
     scene.remove(this.group);

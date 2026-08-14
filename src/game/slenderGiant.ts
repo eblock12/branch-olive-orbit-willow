@@ -11,7 +11,7 @@ import { RaggedCloth, type ClothCollider } from "./raggedCloth";
 /**
  * Slender Giant — rare tall entity with 2-bone leg IK.
  * Alternating plant steps on block tops; torso chain sways to stay upright.
- * TEST: spawns near player on load (including daytime).
+ * Spawns far from the player and only stalks if they wander close.
  */
 
 const THIGH_LEN = 2.4;
@@ -22,6 +22,9 @@ const STEP_DURATION = 1.15;
 const STRIDE = 2.0;
 const TORSO_SEGMENTS = 3;
 const TORSO_SEG_H = 1.15;
+const CHASE_RANGE = 32;
+/** Max vertical climb/drop per foot plant (blocks) */
+const MAX_STEP = 4;
 
 type FootState = {
   planted: THREE.Vector3;
@@ -212,14 +215,15 @@ export class SlenderGiant {
   private hipL = new THREE.Vector3();
   private hipR = new THREE.Vector3();
   alive = true;
-  readonly isTestSpawn: boolean;
+  private wanderT = 4 + Math.random() * 8;
+  private wandering = false;
+  private stepCool = 0;
 
-  constructor(x: number, y: number, z: number, mats: Mats, test = false) {
+  constructor(x: number, y: number, z: number, mats: Mats) {
     this.x = x;
     this.y = y;
     this.z = z;
     this.mats = mats;
-    this.isTestSpawn = test;
     this.shadow = createEntityShadow();
     this.group.frustumCulled = false;
 
@@ -407,37 +411,61 @@ export class SlenderGiant {
   ): void {
     if (!this.alive) return;
     this.age += dt;
+    if (this.stepCool > 0) this.stepCool -= dt;
 
     const pdx = player.x - this.x;
     const pdz = player.z - this.z;
     const pDist = Math.hypot(pdx, pdz);
-    const desiredYaw = pDist > 0.5 ? Math.atan2(pdx, pdz) : this.yaw;
-    let dyaw = desiredYaw - this.yaw;
-    while (dyaw > Math.PI) dyaw -= Math.PI * 2;
-    while (dyaw < -Math.PI) dyaw += Math.PI * 2;
-    this.yaw += dyaw * Math.min(1, 1.15 * dt);
+    const chasing = pDist <= CHASE_RANGE;
+
+    this.wanderT -= dt;
+    if (!chasing && this.wanderT <= 0) {
+      this.wandering = Math.random() < 0.35;
+      this.wanderT = this.wandering
+        ? 6 + Math.random() * 8
+        : 8 + Math.random() * 14;
+      if (this.wandering) this.yaw += (Math.random() - 0.5) * 1.4;
+    }
+
+    if (chasing) {
+      const desiredYaw = pDist > 0.5 ? Math.atan2(pdx, pdz) : this.yaw;
+      let dyaw = desiredYaw - this.yaw;
+      while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+      while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+      this.yaw += dyaw * Math.min(1, 1.15 * dt);
+    }
+
+    const walking = chasing || this.wandering;
 
     const fwdX = Math.sin(this.yaw);
     const fwdZ = Math.cos(this.yaw);
     const rgtX = Math.cos(this.yaw);
     const rgtZ = -Math.sin(this.yaw);
 
-    if (this.swingLeg < 0) {
-      this.beginStep(world, fwdX, fwdZ, rgtX, rgtZ, 0);
-    }
-
-    if (this.swingLeg === 0) {
-      this.advanceSwing(this.leftFoot, dt, world);
-      if (!this.leftFoot.swinging) {
-        this.swingLeg = -1;
-        this.beginStep(world, fwdX, fwdZ, rgtX, rgtZ, 1);
-      }
-    } else if (this.swingLeg === 1) {
-      this.advanceSwing(this.rightFoot, dt, world);
-      if (!this.rightFoot.swinging) {
-        this.swingLeg = -1;
+    if (walking) {
+      if (this.swingLeg < 0 && this.stepCool <= 0) {
         this.beginStep(world, fwdX, fwdZ, rgtX, rgtZ, 0);
       }
+
+      if (this.swingLeg === 0) {
+        this.advanceSwing(this.leftFoot, dt, world);
+        if (!this.leftFoot.swinging) {
+          this.swingLeg = -1;
+          this.beginStep(world, fwdX, fwdZ, rgtX, rgtZ, 1);
+        }
+      } else if (this.swingLeg === 1) {
+        this.advanceSwing(this.rightFoot, dt, world);
+        if (!this.rightFoot.swinging) {
+          this.swingLeg = -1;
+          this.beginStep(world, fwdX, fwdZ, rgtX, rgtZ, 0);
+        }
+      }
+    } else if (this.swingLeg === 0) {
+      this.advanceSwing(this.leftFoot, dt, world);
+      if (!this.leftFoot.swinging) this.swingLeg = -1;
+    } else if (this.swingLeg === 1) {
+      this.advanceSwing(this.rightFoot, dt, world);
+      if (!this.rightFoot.swinging) this.swingLeg = -1;
     }
 
     this.writeFoot(this.leftFoot, this.footLCur);
@@ -627,27 +655,40 @@ export class SlenderGiant {
     const foot = leg === 0 ? this.leftFoot : this.rightFoot;
     const side = leg === 0 ? -1 : 1;
     const base = foot.planted;
-    let bestX = base.x + fwdX * STRIDE + rgtX * side * HIP_WIDTH * 0.15;
-    let bestZ = base.z + fwdZ * STRIDE + rgtZ * side * HIP_WIDTH * 0.15;
-    let bestY = surfaceY(world, bestX, bestZ);
+    let bestX = base.x;
+    let bestZ = base.z;
+    let bestY = base.y;
     let bestScore = -Infinity;
+    let found = false;
 
     for (let i = 0; i < 7; i++) {
-      const dist = STRIDE * (0.55 + i * 0.14);
+      const dist = STRIDE * (0.45 + i * 0.12);
       const sideJ = (i - 3) * 0.08;
       const cx =
         this.x + fwdX * dist + rgtX * (side * HIP_WIDTH * 0.5 + sideJ);
       const cz =
         this.z + fwdZ * dist + rgtZ * (side * HIP_WIDTH * 0.5 + sideJ);
       const cy = surfaceY(world, cx, cz);
-      const dh = Math.abs(cy - base.y);
-      const score = dist * 2 - dh * 3.2 - Math.abs(sideJ) * 0.5;
-      if (score > bestScore && dh < 2.4) {
+      const rise = cy - base.y;
+      if (rise > MAX_STEP || rise < -MAX_STEP) continue;
+      // Don't plant into a wall column (solid at shin/hip)
+      if (world.isSolidAt(cx, base.y + 1.2, cz)) continue;
+      if (world.isSolidAt(cx, base.y + 2.2, cz)) continue;
+      const score = dist * 2 - Math.abs(rise) * 2.4 - Math.abs(sideJ) * 0.5;
+      if (score > bestScore) {
         bestScore = score;
         bestX = cx;
         bestZ = cz;
         bestY = cy;
+        found = true;
       }
+    }
+
+    if (!found || (Math.hypot(bestX - base.x, bestZ - base.z) < 0.35)) {
+      // Sheer wall / no legal foothold — stop and turn
+      this.stepCool = 0.55;
+      this.yaw += (Math.random() > 0.5 ? 1 : -1) * (0.55 + Math.random() * 0.5);
+      return;
     }
 
     foot.swingFrom.copy(foot.planted);
@@ -662,8 +703,15 @@ export class SlenderGiant {
     foot.t += dt / STEP_DURATION;
     if (foot.t >= 1) {
       foot.t = 1;
-      foot.planted.copy(foot.swingTo);
-      foot.planted.y = surfaceY(world, foot.planted.x, foot.planted.z);
+      const y = surfaceY(world, foot.swingTo.x, foot.swingTo.z);
+      const rise = y - foot.swingFrom.y;
+      if (rise > MAX_STEP || rise < -MAX_STEP) {
+        // Surface disappeared into a cliff mid-step — stay put
+        foot.planted.copy(foot.swingFrom);
+      } else {
+        foot.planted.copy(foot.swingTo);
+        foot.planted.y = y;
+      }
       foot.swinging = false;
       foot.t = 0;
     }
@@ -796,8 +844,7 @@ export class SlenderGiantSystem {
   readonly group = new THREE.Group();
   private mats: Mats;
   private giants: SlenderGiant[] = [];
-  private spawnTimer = 50;
-  private testSpawned = false;
+  private spawnTimer = 70 + Math.random() * 80;
 
   constructor() {
     this.mats = createMats();
@@ -808,39 +855,13 @@ export class SlenderGiantSystem {
     return this.giants.filter((g) => g.alive).length;
   }
 
-  spawnTestNear(world: World, px: number, pz: number): void {
-    if (this.testSpawned) return;
-    this.testSpawned = true;
-    const ang = 0.4 + Math.random() * 0.6;
-    const dist = 12 + Math.random() * 5;
-    const x = px + Math.cos(ang) * dist;
-    const z = pz + Math.sin(ang) * dist;
-    const ground = surfaceY(world, x, z);
-    const g = new SlenderGiant(
-      x,
-      ground + LEG_LEN * 0.9,
-      z,
-      this.mats,
-      true,
-    );
-    g.yaw = Math.atan2(px - x, pz - z);
-    g.plantFeet(world);
-    this.giants.push(g);
-    this.group.add(g.group);
-    this.group.add(g.shadow);
-  }
-
   update(
     dt: number,
     world: World,
     player: Player,
-    _dayFactor: number,
+    dayFactor: number,
     windAt?: (x: number, z: number) => { windX: number; windZ: number },
   ): void {
-    if (!this.testSpawned) {
-      this.spawnTestNear(world, player.x, player.z);
-    }
-
     for (let i = this.giants.length - 1; i >= 0; i--) {
       const g = this.giants[i]!;
       if (!g.alive) {
@@ -853,27 +874,22 @@ export class SlenderGiantSystem {
       const w = windAt?.(g.x, g.z) ?? { windX: 0, windZ: 0 };
       g.update(dt, world, player, w.windX, w.windZ);
       const d = Math.hypot(g.x - player.x, g.z - player.z);
-      if (d > 100 && !g.isTestSpawn) g.alive = false;
+      if (d > 160) g.alive = false;
     }
 
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0) {
-      this.spawnTimer = 90 + Math.random() * 150;
-      if (_dayFactor < 0.18 && this.count < 2 && Math.random() < 0.3) {
+      this.spawnTimer = 140 + Math.random() * 220;
+      const nightBonus = dayFactor < 0.2 ? 0.22 : 0.04;
+      if (this.count < 1 && Math.random() < nightBonus) {
         const ang = Math.random() * Math.PI * 2;
-        const dist = 30 + Math.random() * 20;
+        const dist = 56 + Math.random() * 36;
         const x = player.x + Math.cos(ang) * dist;
         const z = player.z + Math.sin(ang) * dist;
         const ground = surfaceY(world, x, z);
         if (ground > 3) {
-          const g = new SlenderGiant(
-            x,
-            ground + LEG_LEN * 0.9,
-            z,
-            this.mats,
-            false,
-          );
-          g.yaw = Math.atan2(player.x - x, player.z - z);
+          const g = new SlenderGiant(x, ground + LEG_LEN * 0.9, z, this.mats);
+          g.yaw = Math.random() * Math.PI * 2;
           g.plantFeet(world);
           this.giants.push(g);
           this.group.add(g.group);

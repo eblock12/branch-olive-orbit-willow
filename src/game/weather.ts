@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { World } from "./world";
 import { CHUNK_HEIGHT } from "./chunk";
 import type { DayNightSample } from "./dayNight";
+import { CloudLayer } from "./clouds";
 
 export type WeatherKind = "clear" | "overcast" | "rain" | "storm";
 
@@ -15,9 +16,19 @@ export type WeatherCell = {
   intensity: number;
   vx: number;
   vz: number;
+  /** Motion heading (rad) — smoothed; vx/vz derived from this */
+  heading: number;
+  /** Target heading (rad) — wander retargets this slowly */
+  targetHeading: number;
+  /** Seconds until next gentle heading retarget */
+  retargetIn: number;
+  /** Ground speed (blocks/s) */
+  speed: number;
   age: number;
   life: number;
   nextStrike: number;
+  /** Bumped on long-range recycle so clouds can fade out/in instead of teleport */
+  generation: number;
 };
 
 export type WeatherSample = {
@@ -96,15 +107,19 @@ function stormWindFalloff(dist: number, radius: number): number {
 const windUniforms = {
   uTime: { value: 0 },
   uWind: { value: new THREE.Vector2(0, 0) },
+  uSkyMul: { value: 1 },
 };
 
 const WIND_VERT_DECL = /* glsl */ `
 attribute float wind;
+attribute vec2 light;
+varying vec2 vLight;
 uniform float uTime;
 uniform vec2 uWind;
 `;
 
 const WIND_VERT_DISPLACE = /* glsl */ `
+vLight = light;
 if (wind > 0.001) {
   float wLen = length(uWind);
   float amp = min(0.42, 0.022 + wLen * 0.085 + wLen * wLen * 0.004);
@@ -127,9 +142,11 @@ if (wind > 0.001) {
 function injectWindIntoShader(shader: {
   uniforms: Record<string, { value: unknown }>;
   vertexShader: string;
+  fragmentShader?: string;
 }): void {
   shader.uniforms.uTime = windUniforms.uTime;
   shader.uniforms.uWind = windUniforms.uWind;
+  shader.uniforms.uSkyMul = windUniforms.uSkyMul;
   if (!shader.vertexShader.includes("attribute float wind")) {
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
@@ -137,11 +154,28 @@ function injectWindIntoShader(shader: {
 ${WIND_VERT_DECL}`,
     );
   }
-  if (!shader.vertexShader.includes("sway2 * amp")) {
+  if (!shader.vertexShader.includes("vLight = light")) {
     shader.vertexShader = shader.vertexShader.replace(
       "#include <begin_vertex>",
       `#include <begin_vertex>
 ${WIND_VERT_DISPLACE}`,
+    );
+  }
+  if (shader.fragmentShader && !shader.fragmentShader.includes("varying vec2 vLight")) {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>
+varying vec2 vLight;
+uniform float uSkyMul;
+`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <opaque_fragment>",
+      `float cover = max(vLight.x, vLight.y * mix(0.72, 1.0, uSkyMul));
+float att = 0.055 + cover * cover * 0.945;
+outgoingLight *= att;
+outgoingLight += outgoingLight * vec3(0.28, 0.1, 0.0) * vLight.x * (1.0 - vLight.y * uSkyMul);
+#include <opaque_fragment>`,
     );
   }
 }
@@ -153,8 +187,9 @@ ${WIND_VERT_DISPLACE}`,
  */
 export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
   update: (time: number, windX: number, windZ: number) => void;
+  setSkyMul: (v: number) => void;
 } {
-  material.customProgramCacheKey = () => "block-leaf-wind-v7-plant-shear";
+  material.customProgramCacheKey = () => "block-leaf-wind-v8-skylight";
   material.onBeforeCompile = (shader) => {
     injectWindIntoShader(shader);
   };
@@ -164,7 +199,7 @@ export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
     depthPacking: THREE.RGBADepthPacking,
     alphaTest: material.alphaTest > 0 ? material.alphaTest : 0.5,
   });
-  depthMat.customProgramCacheKey = () => "block-leaf-wind-depth-v7-plant-shear";
+  depthMat.customProgramCacheKey = () => "block-leaf-wind-depth-v8-skylight";
   depthMat.onBeforeCompile = (shader) => {
     injectWindIntoShader(shader);
   };
@@ -176,6 +211,9 @@ export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
     update(time: number, windX: number, windZ: number) {
       windUniforms.uTime.value = time;
       windUniforms.uWind.value.set(windX, windZ);
+    },
+    setSkyMul(v: number) {
+      windUniforms.uSkyMul.value = v;
     },
   };
 }
@@ -189,27 +227,7 @@ export class WeatherSystem {
   private baseWindX = 0.25;
   private baseWindZ = 0.12;
 
-  private cloudMesh: THREE.Mesh;
-  private cloudMat: THREE.MeshLambertMaterial;
-  private cloudGeom: THREE.BufferGeometry;
-  private cloudScrollX = 0;
-  private cloudScrollZ = 0;
-  private readonly cloudY = 118;
-
-  private readonly cloudDeckGap = 3.4;
-  private readonly cloudLayerStep = 1.15;
-  private readonly cloudCell = 4;
-  /** Half-extent in cloud cells — 10+ chunks (chunk=16 → need ≥40 cells at cell size 4) */
-  private readonly cloudHalf = 42;
-  private readonly maxCloudVoxels = 10000;
-
-  private cloudColor = new THREE.Color();
-  private cloudOcc = new Set<string>();
-  private cloudVoxels: {
-    x: number; y: number; z: number;
-    qx: number; qy: number; qz: number;
-    r: number; g: number; b: number;
-  }[] = [];
+  private cloudLayer: CloudLayer;
 
   private rain: RainDrop[] = [];
   private splashes: Splash[] = [];
@@ -248,7 +266,10 @@ export class WeatherSystem {
     kind: "clear", intensity: 0, rain: 0, storm: 0, cloud: 0.2,
     windX: 0.25, windZ: 0.12, windSpeed: 0.28, gloom: 0, stormProximity: 0,
   };
-  private windHook: { update: (t: number, x: number, z: number) => void };
+  private windHook: {
+    update: (t: number, x: number, z: number) => void;
+    setSkyMul: (v: number) => void;
+  };
   /** Fired when lightning hits (distance in blocks from player) */
   onLightning: ((info: {
     dist: number;
@@ -283,20 +304,8 @@ export class WeatherSystem {
     this.scene.background = SKY_CLEAR.clone();
     this.fog.color.copy(FOG_CLEAR);
 
-    this.cloudMat = new THREE.MeshLambertMaterial({
-      color: 0xffffff,
-      fog: true,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: true,
-      side: THREE.FrontSide,
-      vertexColors: true,
-    });
-    this.cloudGeom = new THREE.BufferGeometry();
-    this.cloudMesh = new THREE.Mesh(this.cloudGeom, this.cloudMat);
-    this.cloudMesh.frustumCulled = false;
-    this.cloudMesh.renderOrder = -1;
-    this.group.add(this.cloudMesh);
+    this.cloudLayer = new CloudLayer(seed);
+    this.group.add(this.cloudLayer.group);
 
     // Rain as line streaks (head → tail along velocity)
     this.rainPositions = new Float32Array(this.maxRain * 6);
@@ -380,42 +389,8 @@ export class WeatherSystem {
     this.baseHemiIntensity = dn.hemiIntensity;
   }
 
-  private fairCloudNoise(gx: number, gz: number): number {
-    return hash2(gx * 0.31, gz * 0.31, this.seed) * 0.65 +
-      hash2(gx * 0.09 + 40, gz * 0.09, this.seed + 9) * 0.35;
-  }
-
-  /** Stable altitude plane — unique lane per active system to avoid z-fight. */
-  private cloudDeckY(cell: WeatherCell): number {
-    const kindBias =
-      cell.kind === "storm"
-        ? 6
-        : cell.kind === "rain"
-          ? 1.2
-          : cell.kind === "overcast"
-            ? -2.8
-            : 0;
-    // Deterministic lane from id; also offset by rank among living cells
-    const peers = this.cells
-      .filter((c) => c.kind !== "clear")
-      .sort((a, b) => a.id - b.id);
-    const rank = Math.max(
-      0,
-      peers.findIndex((c) => c.id === cell.id),
-    );
-    const lane = rank - (peers.length - 1) * 0.5;
-    // Extra hash-ish spread so same-rank never shares a plane
-    const idLane = ((cell.id * 7 + 3) % 5) - 2;
-    return (
-      this.cloudY +
-      kindBias +
-      lane * this.cloudDeckGap * 1.35 +
-      idLane * 0.55
-    );
-  }
-
   private fairCloudDeckY(): number {
-    return this.cloudY - 3.5;
+    return this.cloudLayer.ceilingY + 8;
   }
 
   private evaluateCell(cell: WeatherCell, wx: number, wz: number) {
@@ -462,32 +437,6 @@ export class WeatherSystem {
     return { d, dx, dz, approach, inCell, core, rainBand, front, trailing };
   }
 
-  private weatherCloudAt(wx: number, wz: number) {
-    let cover = 0, dark = 0, layers = 1, front = 0;
-    for (const cell of this.cells) {
-      if (cell.kind === "clear") continue;
-      const z = this.evaluateCell(cell, wx, wz);
-      const bankR = cell.radius * (cell.kind === "storm" ? 1.5 : cell.kind === "rain" ? 1.22 : 1.12);
-      if (z.d > bankR) continue;
-      const t = 1 - z.d / bankR;
-      const fall = t * t * (3 - 2 * t);
-      const coreCover = z.core * (cell.kind === "storm" ? 1.05 : cell.kind === "rain" ? 0.75 : 0.4);
-      const bandCover = z.rainBand * 0.55 * (cell.kind === "storm" ? 0.9 : 0.7);
-      const localCover = Math.min(1.25, coreCover + bandCover + z.front * 1.1 + fall * cell.intensity * 0.25 * (1 - z.trailing));
-      cover = Math.max(cover, localCover);
-      front = Math.max(front, z.front);
-      const localDark = cell.kind === "storm"
-        ? 0.35 + z.core * 0.5 + z.front * 0.25 + z.rainBand * 0.15
-        : cell.kind === "rain" ? 0.2 + z.rainBand * 0.3 + z.front * 0.1 : 0.1 + z.inCell * 0.15;
-      dark = Math.max(dark, Math.min(1, localDark));
-      let localLayers = 1;
-      if (cell.kind === "storm") localLayers = 1 + Math.floor(z.core * 2 + z.front * 2);
-      else if (cell.kind === "rain" && z.rainBand > 0.55) localLayers = 2;
-      layers = Math.max(layers, localLayers);
-    }
-    return { cover: Math.min(1, cover), dark: Math.min(1, dark), layers: Math.min(3, layers), front: Math.min(1, front) };
-  }
-
   /**
    * Minimum center distance so cloud banks / rain sheets don't interpenetrate.
    * Storms get extra padding — they're the worst z-fighters.
@@ -505,7 +454,8 @@ export class WeatherSystem {
 
   /** Typical exclusion radius used for Poisson min-distance (kind-aware). */
   private poissonMinDistFor(kind: WeatherKind, radius: number): number {
-    if (kind === "storm") return radius * 1.85 + 70;
+    // Keep large storm decks from overlapping (radius ~64–96)
+    if (kind === "storm") return radius * 2.1 + 80;
     if (kind === "rain") return radius * 1.7 + 40;
     if (kind === "overcast") return radius * 1.55 + 32;
     return radius + 20;
@@ -621,12 +571,15 @@ export class WeatherSystem {
     radius: number;
     intensity: number;
   } {
+    // Storm radius: world units. Chunk = 16 → diameter 8 chunks ≈ radius 64.
+    // Target avg ~8–10 chunks across (radius 64–80), min solid 8 chunks (64).
+    const stormRadius = () => 64 + Math.random() * 32; // 64–96 → ~8–12 chunks ø
     // Prefer a couple of storms first, then mix rain / overcast
     if (slot < 2 && stormCount < 2) {
       return {
         kind: "storm",
-        radius: 95 + Math.random() * 55,
-        intensity: 0.75 + Math.random() * 0.25,
+        radius: stormRadius(),
+        intensity: 0.82 + Math.random() * 0.18,
       };
     }
     const roll = Math.random();
@@ -647,8 +600,8 @@ export class WeatherSystem {
     if (stormCount < 2 && roll < 0.85) {
       return {
         kind: "storm",
-        radius: 95 + Math.random() * 50,
-        intensity: 0.7 + Math.random() * 0.28,
+        radius: stormRadius(),
+        intensity: 0.78 + Math.random() * 0.22,
       };
     }
     return {
@@ -691,7 +644,7 @@ export class WeatherSystem {
       const p = extra[0];
       if (p) {
         this.cells.push(
-          this.makeCell(p.x, p.z, "storm", 0.9, 110 + Math.random() * 30),
+          this.makeCell(p.x, p.z, "storm", 0.9, 72 + Math.random() * 24),
         );
       }
     }
@@ -723,9 +676,14 @@ export class WeatherSystem {
       intensity: 1,
       vx: 0,
       vz: 0,
+      heading: 0,
+      targetHeading: 0,
+      retargetIn: 999,
+      speed: 0,
       age: 0,
       life: 1,
       nextStrike: 999,
+      generation: 0,
     };
     for (const c of this.cells) {
       if (c.id === ignoreId || !this.occupiesSpace(c)) continue;
@@ -787,22 +745,47 @@ export class WeatherSystem {
         const overlap = (need - d) / need;
         const nx = dx / d;
         const nz = dz / d;
-        const posPush = overlap * overlap * 18 * dt;
+        // Prefer positional push — velocity kicks look like hard turns on big decks
+        const posPush = overlap * overlap * 14 * dt;
         a.x -= nx * posPush;
         a.z -= nz * posPush;
         b.x += nx * posPush;
         b.z += nz * posPush;
-        const vPush =
-          (0.35 + (a.kind === "storm" || b.kind === "storm" ? 0.25 : 0)) *
+        // Tiny heading nudge only (storms: almost none)
+        const hNudge =
+          (a.kind === "storm" || b.kind === "storm" ? 0.04 : 0.12) *
           overlap *
-          dt *
-          2.5;
-        a.vx -= nx * vPush;
-        a.vz -= nz * vPush;
-        b.vx += nx * vPush;
-        b.vz += nz * vPush;
+          dt;
+        const awayA = Math.atan2(-nz, -nx);
+        const awayB = Math.atan2(nz, nx);
+        a.targetHeading = this.lerpAngle(a.targetHeading, awayA, hNudge);
+        b.targetHeading = this.lerpAngle(b.targetHeading, awayB, hNudge);
       }
     }
+  }
+
+  /** Shortest-path angle lerp (t is blend 0..1, not rate). */
+  private lerpAngle(from: number, to: number, t: number): number {
+    let d = to - from;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return from + d * Math.max(0, Math.min(1, t));
+  }
+
+  /** Turn `heading` toward `target` by at most maxRadPerSec * dt. */
+  private turnToward(
+    heading: number,
+    target: number,
+    maxRadPerSec: number,
+    dt: number,
+  ): number {
+    let d = target - heading;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const maxStep = maxRadPerSec * dt;
+    if (d > maxStep) d = maxStep;
+    if (d < -maxStep) d = -maxStep;
+    return heading + d;
   }
 
   /**
@@ -865,11 +848,14 @@ export class WeatherSystem {
     intensity: number,
     radius: number,
   ): WeatherCell {
-    const ang = Math.random() * Math.PI * 2;
+    // Prefer large-scale base wind so systems share a prevailing drift
+    const baseAng = Math.atan2(this.baseWindZ, this.baseWindX);
+    const ang =
+      baseAng + (Math.random() - 0.5) * (kind === "storm" ? 0.55 : 1.1);
     // Storms drift slowly so a large system can sit over the player for minutes
-    const spd =
+    const speed =
       kind === "storm"
-        ? 0.22 + Math.random() * 0.2
+        ? 0.2 + Math.random() * 0.16
         : kind === "rain"
           ? 0.35 + Math.random() * 0.25
           : 0.4 + Math.random() * 0.35;
@@ -887,11 +873,16 @@ export class WeatherSystem {
       core: kind === "storm" ? 0.28 : kind === "rain" ? 0.48 : 0.5,
       kind,
       intensity,
-      vx: Math.cos(ang) * spd,
-      vz: Math.sin(ang) * spd,
+      heading: ang,
+      targetHeading: ang,
+      retargetIn: 25 + Math.random() * 50,
+      speed,
+      vx: Math.cos(ang) * speed,
+      vz: Math.sin(ang) * speed,
       age: 0,
       life,
       nextStrike: kind === "storm" ? 1 + Math.random() * 3 : 9999,
+      generation: 0,
     };
   }
 
@@ -1002,27 +993,74 @@ export class WeatherSystem {
     };
   }
 
-  update(dt: number, world: World, px: number, py: number, pz: number): void {
+  update(
+    dt: number,
+    world: World,
+    px: number,
+    py: number,
+    pz: number,
+    underwater = false,
+  ): void {
     this.time += dt;
     this.baseWindX = 0.22 + Math.sin(this.time * 0.05) * 0.12;
     this.baseWindZ = 0.1 + Math.cos(this.time * 0.04) * 0.14;
 
     for (const cell of this.cells) {
       cell.age += dt;
+
+      // --- Smooth heading / speed (no hard vector flips) ---
+      cell.retargetIn -= dt;
+      if (cell.retargetIn <= 0) {
+        // Rare, gentle wander toward a new target (storms: very infrequent)
+        const interval =
+          cell.kind === "storm"
+            ? 40 + Math.random() * 70
+            : cell.kind === "rain"
+              ? 22 + Math.random() * 35
+              : 14 + Math.random() * 22;
+        cell.retargetIn = interval;
+        const windAng = Math.atan2(this.baseWindZ, this.baseWindX);
+        const wander =
+          cell.kind === "storm"
+            ? 0.35 // ±~20°
+            : cell.kind === "rain"
+              ? 0.7
+              : 1.0;
+        cell.targetHeading = windAng + (Math.random() - 0.5) * wander;
+      }
+
+      // Max turn rate (rad/s) — storms turn like freighters
+      const maxTurn =
+        cell.kind === "storm"
+          ? 0.035 // ~2°/s
+          : cell.kind === "rain"
+            ? 0.08
+            : 0.12;
+      cell.heading = this.turnToward(
+        cell.heading,
+        cell.targetHeading,
+        maxTurn,
+        dt,
+      );
+
+      // Soft speed toward cruise
+      const cruise =
+        cell.kind === "storm"
+          ? 0.28
+          : cell.kind === "rain"
+            ? 0.5
+            : 0.55;
+      const maxSpd =
+        cell.kind === "storm" ? 0.42 : cell.kind === "rain" ? 0.75 : 1.0;
+      const minSpd = cell.kind === "storm" ? 0.14 : 0.2;
+      cell.speed += (cruise - cell.speed) * Math.min(1, 0.15 * dt);
+      cell.speed = Math.max(minSpd, Math.min(maxSpd, cell.speed));
+
+      cell.vx = Math.cos(cell.heading) * cell.speed;
+      cell.vz = Math.sin(cell.heading) * cell.speed;
       cell.x += cell.vx * dt;
       cell.z += cell.vz * dt;
-      // Gentle steering — keep storms slow
-      const steer =
-        cell.kind === "storm" ? 0.018 : cell.kind === "rain" ? 0.035 : 0.05;
-      cell.vx += Math.sin(this.time * 0.12 + cell.id) * steer * dt;
-      cell.vz += Math.cos(this.time * 0.1 + cell.id * 2) * steer * dt;
-      const spd = Math.hypot(cell.vx, cell.vz);
-      const maxSpd =
-        cell.kind === "storm" ? 0.48 : cell.kind === "rain" ? 0.75 : 1.0;
-      if (spd > maxSpd) {
-        cell.vx = (cell.vx / spd) * maxSpd;
-        cell.vz = (cell.vz / spd) * maxSpd;
-      }
+
       const dx = cell.x - px,
         dz = cell.z - pz,
         dist = Math.hypot(dx, dz);
@@ -1044,6 +1082,8 @@ export class WeatherSystem {
           cell.x = px - (dx / (dist || 1)) * place;
           cell.z = pz - (dz / (dist || 1)) * place;
         }
+        // New generation → cloud layer fades old bank and soft-spawns a new one
+        cell.generation++;
       }
       if (cell.kind === "storm") {
         cell.nextStrike -= dt;
@@ -1089,9 +1129,20 @@ export class WeatherSystem {
     this.lastSample = local;
     this.updateFlashLights(dt, px, py, pz);
     this.windHook.update(this.time, local.windX, local.windZ);
+    const day = this.lastDayNight?.dayFactor ?? 1;
+    this.windHook.setSkyMul(Math.max(0, Math.min(1, day)));
     this.applyAtmosphere(local);
-    this.updateClouds(px, pz);
-    this.updateRain(dt, world, px, py, pz, local);
+    this.cloudLayer.update(
+      dt,
+      px,
+      pz,
+      local.windX,
+      local.windZ,
+      this.cells,
+      this.flashAmount,
+      this.lastDayNight?.dayFactor ?? 1,
+    );
+    this.updateRain(dt, world, px, py, pz, local, underwater);
     this.updateBolts(dt);
   }
 
@@ -1386,155 +1437,23 @@ export class WeatherSystem {
     }
   }
 
-  private cloudKey(qx: number, qy: number, qz: number): string {
-    return `${qx},${qy},${qz}`;
-  }
-
-  private queueCloudVoxel(
-    wx: number, y: number, wz: number,
-    qx: number, qy: number, qz: number,
-    color: THREE.Color,
+  private updateRain(
+    dt: number,
+    world: World,
+    px: number,
+    py: number,
+    pz: number,
+    local: WeatherSample,
+    underwater: boolean,
   ): void {
-    if (this.cloudVoxels.length >= this.maxCloudVoxels) return;
-    const key = this.cloudKey(qx, qy, qz);
-    if (this.cloudOcc.has(key)) return;
-    this.cloudOcc.add(key);
-    this.cloudVoxels.push({ x: wx, y, z: wz, qx, qy, qz, r: color.r, g: color.g, b: color.b });
-  }
-
-  private rebuildCloudMesh(): void {
-    const hs = this.cloudCell * 0.5;
-    const vs = this.cloudLayerStep * 0.5;
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const colors: number[] = [];
-    const indices: number[] = [];
-    let base = 0;
-    const faces: { dq: [number, number, number]; n: [number, number, number]; corners: [number, number, number][] }[] = [
-      { dq: [1,0,0], n: [1,0,0], corners: [[hs,-vs,hs],[hs,-vs,-hs],[hs,vs,-hs],[hs,vs,hs]] },
-      { dq: [-1,0,0], n: [-1,0,0], corners: [[-hs,-vs,-hs],[-hs,-vs,hs],[-hs,vs,hs],[-hs,vs,-hs]] },
-      { dq: [0,1,0], n: [0,1,0], corners: [[-hs,vs,hs],[hs,vs,hs],[hs,vs,-hs],[-hs,vs,-hs]] },
-      { dq: [0,-1,0], n: [0,-1,0], corners: [[-hs,-vs,-hs],[hs,-vs,-hs],[hs,-vs,hs],[-hs,-vs,hs]] },
-      { dq: [0,0,1], n: [0,0,1], corners: [[-hs,-vs,hs],[hs,-vs,hs],[hs,vs,hs],[-hs,vs,hs]] },
-      { dq: [0,0,-1], n: [0,0,-1], corners: [[hs,-vs,-hs],[-hs,-vs,-hs],[-hs,vs,-hs],[hs,vs,-hs]] },
-    ];
-    for (const v of this.cloudVoxels) {
-      for (const face of faces) {
-        if (this.cloudOcc.has(this.cloudKey(v.qx + face.dq[0], v.qy + face.dq[1], v.qz + face.dq[2]))) continue;
-        for (const c of face.corners) {
-          positions.push(v.x + c[0], v.y + c[1], v.z + c[2]);
-          normals.push(face.n[0], face.n[1], face.n[2]);
-          colors.push(v.r, v.g, v.b);
-        }
-        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-        base += 4;
-      }
-    }
-    this.cloudGeom.dispose();
-    this.cloudGeom = new THREE.BufferGeometry();
-    if (positions.length > 0) {
-      this.cloudGeom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-      this.cloudGeom.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-      this.cloudGeom.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-      this.cloudGeom.setIndex(indices);
-    }
-    this.cloudMesh.geometry = this.cloudGeom;
-    this.cloudMesh.visible = positions.length > 0;
-    this.cloudMat.color.setRGB(1, 1, 1);
-  }
-
-  private updateClouds(px: number, pz: number): void {
-    const cell = this.cloudCell;
-    const half = this.cloudHalf;
-    const fairY = this.fairCloudDeckY();
-    const flash = this.flashAmount;
-    const driftX = this.time * (0.35 + this.lastSample.windX * 0.12) + this.lastSample.windX * 0.15;
-    const driftZ = this.time * (0.22 + this.lastSample.windZ * 0.1) + this.lastSample.windZ * 0.12;
-    this.cloudScrollX = driftX; this.cloudScrollZ = driftZ;
-    const fracX = ((driftX % cell) + cell) % cell;
-    const fracZ = ((driftZ % cell) + cell) % cell;
-    const floorDriftX = Math.floor(driftX / cell);
-    const floorDriftZ = Math.floor(driftZ / cell);
-    const baseIx = Math.floor(px / cell);
-    const baseIz = Math.floor(pz / cell);
-    const viewR = half * cell + cell * 2;
-    this.cloudOcc.clear();
-    this.cloudVoxels.length = 0;
-
-    for (let iz = -half; iz <= half; iz++) {
-      for (let ix = -half; ix <= half; ix++) {
-        if (this.cloudVoxels.length >= this.maxCloudVoxels - 8) break;
-        const gx = baseIx + ix, gz = baseIz + iz;
-        const wx = gx * cell + cell * 0.5 - fracX;
-        const wz = gz * cell + cell * 0.5 - fracZ;
-        if (this.weatherCloudAt(wx, wz).cover > 0.2) continue;
-        const nx = gx + floorDriftX, nz = gz + floorDriftZ;
-        if (this.fairCloudNoise(nx, nz) <= 0.72) continue;
-        if (hash2(nx, nz, this.seed + 2) <= 0.28) continue;
-        this.cloudColor.setRGB(
-          Math.min(1.15, (0.55 + 0.96 * 0.42) * (1 + flash * 0.35)),
-          Math.min(1.15, (0.58 + 0.96 * 0.4) * (1 + flash * 0.35)),
-          Math.min(1.2, (0.62 + 0.96 * 0.38) * (1 + flash * 0.4)),
-        );
-        this.queueCloudVoxel(wx, fairY, wz, nx, 0, nz, this.cloudColor);
-      }
+    if (underwater) {
+      this.rainLines.visible = false;
+      this.splashPoints.visible = false;
+      for (const d of this.rain) d.active = false;
+      for (const s of this.splashes) s.active = false;
+      return;
     }
 
-    for (const wcell of this.cells) {
-      if (wcell.kind === "clear") continue;
-      if (Math.hypot(wcell.x - px, wcell.z - pz) > viewR + wcell.radius * 1.6) continue;
-      const deckY = this.cloudDeckY(wcell);
-      const bankR = wcell.radius * (wcell.kind === "storm" ? 1.5 : wcell.kind === "rain" ? 1.22 : 1.12);
-      const iMax = Math.ceil(bankR / cell) + 1;
-      for (let jz = -iMax; jz <= iMax; jz++) {
-        for (let jx = -iMax; jx <= iMax; jx++) {
-          if (this.cloudVoxels.length >= this.maxCloudVoxels - 3) break;
-          const lx = jx * cell, lz = jz * cell;
-          if (Math.hypot(lx, lz) > bankR) continue;
-          const wx = wcell.x + lx, wz = wcell.z + lz;
-          if (Math.hypot(wx - px, wz - pz) > viewR) continue;
-          const zone = this.evaluateCell(wcell, wx, wz);
-          const cover = Math.min(1.25,
-            zone.core * (wcell.kind === "storm" ? 1.05 : wcell.kind === "rain" ? 0.75 : 0.4)
-            + zone.rainBand * 0.55 * (wcell.kind === "storm" ? 0.9 : 0.7)
-            + zone.front * 1.1
-            + zone.inCell * 0.3 * (1 - zone.trailing) * 0.45);
-          if (cover < 0.16) continue;
-          const thresh = 0.55 - cover * 0.4 - zone.front * 0.2 - zone.core * 0.15;
-          const n2 = hash2(jx + wcell.id * 17, jz - wcell.id * 3, this.seed + 11);
-          let place = n2 > thresh;
-          if (zone.front > 0.3 && cover > 0.35) place = n2 > 0.1;
-          if (zone.core > 0.45) place = n2 > 0.14;
-          if (zone.trailing > 0.2 && zone.front < 0.1) place = n2 > 0.45;
-          if (!place) continue;
-          const dark = wcell.kind === "storm"
-            ? 0.35 + zone.core * 0.5 + zone.front * 0.25 + zone.rainBand * 0.15
-            : wcell.kind === "rain" ? 0.2 + zone.rainBand * 0.3 + zone.front * 0.1
-            : 0.1 + zone.inCell * 0.15;
-          let layers = 1;
-          if (wcell.kind === "storm") layers = 1 + Math.floor(zone.core * 2 + zone.front * 2);
-          else if (wcell.kind === "rain" && zone.rainBand > 0.55) layers = 2;
-          if (zone.core > 0.5) layers = Math.max(layers, 2);
-          if (zone.front > 0.35) layers = Math.max(layers, 2);
-          layers = Math.min(3, layers);
-          const whiteness = 1 - Math.min(1, dark) * 0.85;
-          this.cloudColor.setRGB(
-            Math.min(1.15, (0.55 + whiteness * 0.42) * (1 + flash * 0.35)),
-            Math.min(1.15, (0.58 + whiteness * 0.4) * (1 + flash * 0.35)),
-            Math.min(1.2, (0.62 + whiteness * 0.38) * (1 + flash * 0.4)),
-          );
-          const idOff = wcell.id * 4096;
-          for (let layer = 0; layer < layers; layer++) {
-            this.queueCloudVoxel(wx, deckY + layer * this.cloudLayerStep, wz,
-              idOff + jx, 100 + wcell.id * 8 + layer, idOff + jz, this.cloudColor);
-          }
-        }
-      }
-    }
-    this.rebuildCloudMesh();
-  }
-
-  private updateRain(dt: number, world: World, px: number, py: number, pz: number, local: WeatherSample): void {
     const rainAmt = local.rain;
     const storm = local.storm;
     // Core of a storm: near-max particles; light rain stays sparse
@@ -1597,7 +1516,7 @@ export class WeatherSystem {
         d.x += d.vx * dt;
         d.y += d.vy * dt;
         d.z += d.vz * dt;
-        const surface = world.getSurfaceY(Math.floor(d.x), Math.floor(d.z));
+        const surface = world.getRainHitY(Math.floor(d.x), Math.floor(d.z));
         if (d.y <= surface + 0.05) {
           d.y = surface + 0.02;
           this.spawnSplash(d.x, surface + 0.05, d.z, d.vx, d.vz, storm);
@@ -1624,7 +1543,7 @@ export class WeatherSystem {
         d.x += d.vx * dt;
         d.y += d.vy * dt;
         d.z += d.vz * dt;
-        const surface = world.getSurfaceY(Math.floor(d.x), Math.floor(d.z));
+        const surface = world.getRainHitY(Math.floor(d.x), Math.floor(d.z));
         if (d.y <= surface) {
           this.spawnSplash(d.x, surface + 0.04, d.z, d.vx * 0.5, d.vz * 0.5, storm);
           d.active = false;
@@ -1805,9 +1724,8 @@ export class WeatherSystem {
     this.flashMain.dispose(); this.flashFill.dispose(); this.flashAmbient.dispose();
     for (const pl of this.flashPoints) { this.scene.remove(pl); pl.dispose(); }
     this.flashPoints = [];
-    this.group.remove(this.cloudMesh);
-    this.cloudGeom.dispose();
-    this.cloudMat.dispose();
+    this.group.remove(this.cloudLayer.group);
+    this.cloudLayer.dispose();
     this.rainGeom.dispose(); (this.rainLines.material as THREE.Material).dispose();
     this.splashGeom.dispose(); (this.splashPoints.material as THREE.Material).dispose();
     this.scene.remove(this.group);
