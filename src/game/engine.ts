@@ -43,6 +43,7 @@ import { ChestSystem } from "./chest";
 import { ChestVisuals } from "./chestVisuals";
 import { mobLoot } from "./loot";
 import { TorchFlame } from "./torchFlame";
+import { PortalSystem } from "./portals";
 import { ProjectileSystem } from "./projectiles";
 import { PlayerRig } from "./playerRig";
 import {
@@ -258,6 +259,7 @@ export class GameEngine {
   /** Subtle grounded walk bob (phase + smoothed strength) */
   private viewBobPhase = 0;
   private viewBobAmt = 0;
+  private portals!: PortalSystem;
 
   constructor(opts: EngineOptions) {
     this.canvas = opts.canvas;
@@ -286,6 +288,7 @@ export class GameEngine {
 
     this.camera = new THREE.PerspectiveCamera(75, 1, 0.08, 360);
     this.camera.rotation.order = "YXZ";
+    this.camera.layers.enable(1);
     // Camera must be in the scene so first-person hand (child) renders
     this.scene.add(this.camera);
 
@@ -380,7 +383,7 @@ export class GameEngine {
     this.viewHand = new ViewHand(this.atlas, this.torchFlame.emissiveMap);
     this.viewHand.attachTo(this.camera);
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
-
+    this.portals = new PortalSystem(this.scene);
 
     const startX = loaded?.player?.x ?? 0;
     const startZ = loaded?.player?.z ?? 0;
@@ -391,6 +394,8 @@ export class GameEngine {
     } else {
       this.spawnPlayer();
     }
+    this.world.prepareAround(this.player.x, this.player.z, 3);
+    this.portals.preloadVisibleExits(this.world, this.player.x, this.player.z);
     this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 3);
     this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
 
@@ -634,7 +639,7 @@ export class GameEngine {
       // Final water check at feet / eyes
       if (this.player.sampleWater(this.world).any) return false;
 
-      this.player.yaw = 0;
+      this.player.yaw = Math.atan2(-(26 - this.player.x), -(10 - this.player.z));
       this.player.pitch = 0;
       this.player.onGround = true;
       this.player.inWater = false;
@@ -807,6 +812,7 @@ export class GameEngine {
     this.waterFX.dispose();
     this.world.dispose?.();
     this.torchFlame.dispose();
+    this.portals.dispose();
     for (const pl of this.torchLights) {
       this.scene.remove(pl);
       pl.dispose();
@@ -879,6 +885,8 @@ export class GameEngine {
     this._air = 5;
     this.lastAirPips = 10;
     this.spawnPlayer();
+    this.world.prepareAround(this.player.x, this.player.z, 3);
+    this.portals.preloadVisibleExits(this.world, this.player.x, this.player.z);
     this.emitHud();
     if (this.isTouch) {
       this.playing = true;
@@ -2014,10 +2022,10 @@ export class GameEngine {
     }
 
     if (this.playing || this.caterpillars.count > 0) {
-      this.caterpillars.update(dt, this.world, this.player);
+      this.caterpillars.update(dt, this.world, this.player, this.portals);
     }
     if (this.playing || this.animals.count > 0) {
-      this.animals.update(dt, this.world, this.player);
+      this.animals.update(dt, this.world, this.player, this.portals);
     }
 
     // Day/night first so hostiles know sun state
@@ -2035,6 +2043,7 @@ export class GameEngine {
         this.world,
         this.player,
         dn.dayFactor,
+        this.portals,
       );
       if (hits.length > 0 && !this.survival.dead && this.playing) {
         for (const h of hits) {
@@ -2080,6 +2089,7 @@ export class GameEngine {
         this.world,
         this.player,
         (id, count, dur) => this.survival.addItem(id, count, dur),
+        this.portals,
       );
       if (collected.length > 0) {
         this.audio.pickup();
@@ -2136,6 +2146,7 @@ export class GameEngine {
           const s = this.weather.sampleAt(x, z);
           return { windX: s.windX, windZ: s.windZ };
         },
+        this.portals,
       );
     }
 
@@ -2400,6 +2411,15 @@ export class GameEngine {
       this.world.waterGroup,
     );
 
+    this.viewHand.setVisible(false);
+    this.portals.renderView(
+      this.renderer,
+      this.scene,
+      this.camera,
+      this.player,
+      this.world,
+    );
+    this.viewHand.setVisible(this.playing && !this.survival.dead);
     this.renderer.render(this.scene, this.camera);
     this.waterFX.renderUnderwaterOverlay(this.renderer);
     this.renderPlayerPreview(dt);
@@ -2490,6 +2510,10 @@ export class GameEngine {
       this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
     const wasGround = this.player.onGround;
     this.player.update(dt, this.world, moveF, moveR, jump, sprint);
+    this.portals.update(dt, this.world, this.player);
+    if (this.portals.tryTeleport(this.player, this.world)) {
+      this.audio.ui();
+    }
     if (jump && wasGround && !this.player.onGround) {
       this.audio.jump();
     }

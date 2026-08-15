@@ -411,6 +411,7 @@ export function baseMineTime(blockId: number): number {
     case Block.LEAVES:
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
+    case Block.JACARANDA_LEAVES:
       return 0.28;
     case Block.SNOW:
     case Block.SNOW_GRASS:
@@ -478,6 +479,7 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.LEAVES ||
     blockId === Block.BIRCH_LEAVES ||
     blockId === Block.SPRUCE_LEAVES ||
+    blockId === Block.JACARANDA_LEAVES ||
     blockId === Block.CHEST ||
     blockId === Block.BED ||
     isDoor(blockId) ||

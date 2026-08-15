@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { World } from "./world";
 import type { Player } from "./player";
+import { warpMobIfNeeded, type PortalSystem } from "./portals";
 import {
   createEntityShadow,
   disposeEntityShadow,
@@ -242,6 +243,7 @@ class Hostile {
   y: number;
   z: number;
   yaw = 0;
+  portalCd = 0;
   vy = 0;
   onGround = false;
   hp: number;
@@ -707,6 +709,7 @@ export class HostileSystem {
     world: World,
     player: Player,
     dayFactor: number,
+    portals?: PortalSystem | null,
   ): { damage: number; kind: HostileKind }[] {
     this.lastDayFactor = dayFactor;
     const hits: { damage: number; kind: HostileKind }[] = [];
@@ -729,14 +732,21 @@ export class HostileSystem {
         continue;
       }
       const d = Math.hypot(h.x - player.x, h.z - player.z);
-      if (d > DESPAWN_DIST) {
+      if (d > DESPAWN_DIST && h.portalCd <= 0) {
         this.group.remove(h.mesh);
         this.group.remove(h.shadow);
         h.dispose();
         this.list.splice(i, 1);
         continue;
       }
+      const px = h.x;
+      const py = h.y;
+      const pz = h.z;
       const hit = h.update(dt, world, player, dayFactor);
+      if (h.portalCd > 0) h.portalCd -= dt;
+      if (portals && warpMobIfNeeded(portals, world, h, px, py, pz)) {
+        h.mesh.position.set(h.x, h.y, h.z);
+      }
       if (hit) hits.push({ damage: hit.damage, kind: h.kind });
     }
     this.separate();
@@ -751,6 +761,7 @@ export class HostileSystem {
         // Daytime: slowly cull remaining hostiles far away
         for (let i = this.list.length - 1; i >= 0; i--) {
           const h = this.list[i]!;
+          if (h.portalCd > 0) continue;
           const d = Math.hypot(h.x - player.x, h.z - player.z);
           if (d > 28 || h.hp < h.def.hp * 0.5) {
             h.alive = false;

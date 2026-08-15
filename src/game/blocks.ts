@@ -89,6 +89,8 @@ export const Block = {
   CLAY: 96,
   ARCANE: 97,
   PORTAL: 98,
+  JACARANDA_LEAVES: 99,
+  LAVENDER_TALL: 100,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
@@ -546,6 +548,15 @@ export const BLOCKS: Record<number, BlockDef> = {
     tiles: [65, 65, 65],
     color: "#7a28c8",
   },
+  [Block.JACARANDA_LEAVES]: {
+    id: Block.JACARANDA_LEAVES,
+    name: "Jacaranda Leaves",
+    solid: true,
+    transparent: true,
+    tiles: [66, 66, 66],
+    color: "#b878d0",
+  },
+  [Block.LAVENDER_TALL]: plant(Block.LAVENDER_TALL, "Tall Lavender", 67, "#b080d8"),
 };
 
 /** Hotbar / creative placeables (includes a selection of flora) */
@@ -581,6 +592,8 @@ export const PLACEABLE: BlockId[] = [
   Block.TULIP_RED,
   Block.TULIP_PINK,
   Block.LAVENDER,
+  Block.LAVENDER_TALL,
+  Block.JACARANDA_LEAVES,
   Block.SUNFLOWER,
   Block.ROSE,
   Block.MUSHROOM_RED,
@@ -910,7 +923,8 @@ export function isLeaves(id: number): boolean {
   return (
     id === Block.LEAVES ||
     id === Block.BIRCH_LEAVES ||
-    id === Block.SPRUCE_LEAVES
+    id === Block.SPRUCE_LEAVES ||
+    id === Block.JACARANDA_LEAVES
   );
 }
 

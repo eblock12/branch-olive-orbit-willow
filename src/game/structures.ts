@@ -3,7 +3,61 @@ import { Biome, type BiomeId } from "./biomes";
 import { hash2, fbm2 } from "./noise";
 import { CHUNK_SIZE, CHUNK_HEIGHT, SEA_LEVEL } from "./chunkConstants";
 
-const STRUCT_CELL = 52;
+export const STRUCT_CELL = 52;
+
+/** Structure-cell buddy — involution so both ends always generate. */
+export function portalPartnerCell(cx: number, cz: number): [number, number] {
+  // 20×7 cells × 52 ≈ 1100 blocks; one even/one odd so parity flips back.
+  const even = ((cx + cz * 3) & 1) === 0;
+  return even ? [cx + 20, cz + 7] : [cx - 20, cz - 7];
+}
+
+/** Always-on pair so a rift is walkable from spawn. Cell (1,0) ↔ partner. */
+export const STARTER_PORTAL_CELL: [number, number] = [1, 0];
+
+export function isStarterPortalCell(cx: number, cz: number): boolean {
+  const [ax, az] = STARTER_PORTAL_CELL;
+  if (cx === ax && cz === az) return true;
+  const [px, pz] = portalPartnerCell(ax, az);
+  return cx === px && cz === pz;
+}
+
+export function cellHasLinkedPortal(
+  cxCell: number,
+  czCell: number,
+  seed: number,
+): boolean {
+  if (isStarterPortalCell(cxCell, czCell)) return true;
+  const [px, pz] = portalPartnerCell(cxCell, czCell);
+  const ax = cxCell < px || (cxCell === px && czCell < pz) ? cxCell : px;
+  const az = ax === cxCell ? czCell : pz;
+  return hash2(ax, az, seed + 4242) > 0.93;
+}
+
+export function portalAnchor(
+  cxCell: number,
+  czCell: number,
+  seed: number,
+): { ox: number; oz: number } {
+  const [ax, az] = STARTER_PORTAL_CELL;
+  if (cxCell === ax && czCell === az) return { ox: 26, oz: 10 };
+  const [px, pz] = portalPartnerCell(ax, az);
+  if (cxCell === px && czCell === pz) return { ox: px * STRUCT_CELL + 18, oz: pz * STRUCT_CELL + 18 };
+  return {
+    ox:
+      cxCell * STRUCT_CELL +
+      Math.floor(hash2(cxCell, czCell, seed + 100) * (STRUCT_CELL - 8)) +
+      4,
+    oz:
+      czCell * STRUCT_CELL +
+      Math.floor(hash2(cxCell, czCell, seed + 101) * (STRUCT_CELL - 8)) +
+      4,
+  };
+}
+
+/** Interior of a generated frame (block mins, exclusive max on x/y). */
+export const PORTAL_INNER_W = 3;
+export const PORTAL_INNER_H = 4;
 
 type SurfaceFn = (
   wx: number,
@@ -545,38 +599,71 @@ function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
   placeLootChest(ctx, ox + 2, y + 1, oz + 2);
 }
 
-function placeRuinedPortal(ctx: Ctx, ox: number, oz: number): void {
+function placeRuinedPortal(
+  ctx: Ctx,
+  ox: number,
+  oz: number,
+  force = false,
+): void {
   const w = 4;
   const h = 5;
-  const floor = siteFloorY(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, {
-    maxSlope: 3,
-    minAboveSea: 0,
+  const padX0 = ox - 2;
+  const padX1 = ox + w + 2;
+  const padZ0 = oz - 2;
+  const padZ1 = oz + 2;
+  let floor = siteFloorY(ctx, padX0, padZ0, padX1, padZ1, {
+    maxSlope: force ? 8 : 2,
+    minAboveSea: force ? -4 : 1,
+    allowUnderwater: force,
   });
+  if (floor === null && force) {
+    floor = Math.max(SEA_LEVEL + 2, ctx.surfaceAt(ox, oz).height);
+  }
   if (floor === null) return;
+  if (floor + h + 3 >= CHUNK_HEIGHT) return;
   const y = floor;
-  ensureFoundations(ctx, ox - 1, oz - 1, ox + w + 1, oz + 1, y, Block.ARCANE);
-  const broken = hash2(ox, oz, ctx.seed + 31);
-  for (let dy = 0; dy <= h; dy++) {
-    if (broken < 0.22 && dy === h) continue;
-    setBlock(ctx, ox, y + dy, oz, Block.ARCANE);
-    if (!(broken > 0.82 && dy === 2)) setBlock(ctx, ox + w, y + dy, oz, Block.ARCANE);
-  }
-  for (let dx = 0; dx <= w; dx++) {
-    setBlock(ctx, ox + dx, y, oz, Block.ARCANE);
-    if (!(broken > 0.7 && dx === 2)) setBlock(ctx, ox + dx, y + h, oz, Block.ARCANE);
-  }
-  // Intact-enough frames get a living rift
-  if (broken > 0.28) {
-    for (let dy = 1; dy < h; dy++) {
-      for (let dx = 1; dx < w; dx++) {
-        setBlock(ctx, ox + dx, y + dy, oz, Block.PORTAL);
+
+  ensureFoundations(ctx, padX0, padZ0, padX1, padZ1, y, Block.ARCANE);
+
+  // 5×5×5 air pocket around the opening (and a bit of walk-up on both faces)
+  const ccx = ox + 2;
+  const ccy = y + 3;
+  const ccz = oz;
+  for (let dz = -2; dz <= 2; dz++) {
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const wx = ccx + dx;
+        const wy = ccy + dy;
+        const wz = ccz + dz;
+        if (wy <= y) continue;
+        setBlock(ctx, wx, wy, wz, Block.AIR);
       }
     }
   }
-  setBlock(ctx, ox - 1, y + 1, oz + 1, Block.ARCANE);
-  setBlock(ctx, ox + w + 1, y + 2, oz - 1, Block.ARCANE);
+
+  // Complete voidstone ring on solid ground
+  for (let dy = 0; dy <= h; dy++) {
+    setBlock(ctx, ox, y + dy, oz, Block.ARCANE);
+    setBlock(ctx, ox + w, y + dy, oz, Block.ARCANE);
+  }
+  for (let dx = 0; dx <= w; dx++) {
+    setBlock(ctx, ox + dx, y, oz, Block.ARCANE);
+    setBlock(ctx, ox + dx, y + h, oz, Block.ARCANE);
+  }
+  for (const dz of [-1, 1]) {
+    setBlock(ctx, ox, y, oz + dz, Block.ARCANE);
+    setBlock(ctx, ox + w, y, oz + dz, Block.ARCANE);
+    setBlock(ctx, ox, y + h, oz + dz, Block.ARCANE);
+    setBlock(ctx, ox + w, y + h, oz + dz, Block.ARCANE);
+  }
+  for (let dy = 1; dy < h; dy++) {
+    for (let dx = 1; dx < w; dx++) {
+      setBlock(ctx, ox + dx, y + dy, oz, Block.PORTAL);
+    }
+  }
   ensureColumnGrounded(ctx, ox + 1, oz, y, Block.ARCANE);
-  placeLootChest(ctx, ox + 2, y + 1, oz + 2);
+  // Loot off to the side so it doesn't sit in the walk-through
+  placeLootChest(ctx, ox + 2, y + 1, oz + 3);
 }
 
 /** Grounded rocky butte (was a floating sky island). */
@@ -807,14 +894,24 @@ export function placeStructuresInChunk(
         czCell * STRUCT_CELL +
         Math.floor(hash2(cxCell, czCell, seed + 101) * (STRUCT_CELL - 8)) +
         4;
-      if (ox * ox + oz * oz < 40 * 40) continue;
+      if (ox * ox + oz * oz < 40 * 40 && !isStarterPortalCell(cxCell, czCell)) {
+        continue;
+      }
 
       const { biome } = surfaceAt(ox, oz);
-      // Reject if origin column has no real solid ground
-      if (topSolidY(ctx, ox, oz) <= 2) continue;
+      if (topSolidY(ctx, ox, oz) <= 2 && !isStarterPortalCell(cxCell, czCell)) {
+        continue;
+      }
+
+      if (cellHasLinkedPortal(cxCell, czCell, seed)) {
+        const a = portalAnchor(cxCell, czCell, seed);
+        placeRuinedPortal(ctx, a.ox, a.oz, isStarterPortalCell(cxCell, czCell));
+        continue;
+      }
 
       const s = pickStructure(ox, oz, seed, biome);
       if (!s) continue;
+      if (s.name === "portal") continue;
 
       if (fbm2(ox * 0.02, oz * 0.02, seed + 50, 2) < 0.28) continue;
 

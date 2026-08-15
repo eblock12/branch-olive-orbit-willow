@@ -10,6 +10,7 @@ export const Biome = {
   MOUNTAINS: "mountains",
   SNOW: "snow",
   SWAMP: "swamp",
+  LAVENDER_FIELD: "lavender_field",
 } as const;
 
 export type BiomeId = (typeof Biome)[keyof typeof Biome];
@@ -23,6 +24,7 @@ export const BIOME_LABEL: Record<BiomeId, string> = {
   mountains: "Mountains",
   snow: "Snowy Peaks",
   swamp: "Swamp",
+  lavender_field: "Lavender Field",
 };
 
 export type BiomeSample = {
@@ -49,12 +51,12 @@ export function sampleClimate(
   wx: number,
   wz: number,
   seed: number,
-): { temperature: number; moisture: number; continental: number } {
+): { temperature: number; moisture: number; continental: number; bloom: number } {
   const temperature = fbm2(wx * 0.0045, wz * 0.0045, seed + 900, 4, 2.0, 0.55);
   const moisture = fbm2(wx * 0.0055, wz * 0.0055, seed + 1400, 4, 2.1, 0.52);
-  // Continentalness: low = ocean basins, high = inland
   const continental = fbm2(wx * 0.0032, wz * 0.0032, seed + 400, 5, 2.0, 0.5);
-  return { temperature, moisture, continental };
+  const bloom = fbm2(wx * 0.0036, wz * 0.0036, seed + 2100, 4, 2.0, 0.52);
+  return { temperature, moisture, continental, bloom };
 }
 
 /** Hermite blend, 0 below e0 and 1 above e1. */
@@ -72,6 +74,7 @@ export type TerrainInfluence = {
   snow: number;
   desert: number;
   swamp: number;
+  lavender: number;
 };
 
 export function terrainInfluence(
@@ -80,6 +83,7 @@ export function terrainInfluence(
   continental: number,
   heightHint: number,
   seaLevel: number,
+  bloom = 0,
 ): TerrainInfluence {
   const ocean = 1 - smooth01(0.26, 0.41, continental);
   const nearCoast =
@@ -95,26 +99,35 @@ export function terrainInfluence(
   // Climate first: hot + dry is dune country, even on high continentalness.
   const desert =
     inland *
-    smooth01(0.54, 0.68, temperature) *
-    (1 - smooth01(0.30, 0.44, moisture));
+    smooth01(0.46, 0.70, temperature) *
+    (1 - smooth01(0.22, 0.50, moisture));
 
   const mountain =
     inland *
-    (1 - desert) *
+    (1 - desert * 0.85) *
     (1 - beach) *
-    smooth01(0.52, 0.78, continental) *
-    smooth01(seaLevel - 2, seaLevel + 18, heightHint);
+    smooth01(0.46, 0.80, continental) *
+    smooth01(seaLevel - 4, seaLevel + 22, heightHint);
 
-  const snow = inland * (1 - desert) * (1 - smooth01(0.26, 0.40, temperature));
+  const snow = inland * (1 - desert * 0.7) * (1 - smooth01(0.18, 0.44, temperature));
   const swamp =
     inland *
-    (1 - mountain) *
-    (1 - desert) *
-    smooth01(0.54, 0.70, moisture) *
-    (1 - smooth01(0.48, 0.62, continental)) *
-    (1 - smooth01(seaLevel + 2, seaLevel + 9, heightHint));
+    (1 - mountain * 0.7) *
+    (1 - desert * 0.7) *
+    smooth01(0.46, 0.74, moisture) *
+    (1 - smooth01(0.42, 0.66, continental)) *
+    (1 - smooth01(seaLevel + 1, seaLevel + 12, heightHint));
+  const lavender =
+    inland *
+    (1 - mountain * 0.75) *
+    (1 - desert * 0.75) *
+    (1 - swamp * 0.6) *
+    smooth01(0.32, 0.48, temperature) *
+    (1 - smooth01(0.62, 0.76, temperature)) *
+    (1 - smooth01(0.46, 0.66, moisture)) *
+    smooth01(0.40, 0.64, bloom);
 
-  return { ocean, beach, mountain, snow, desert, swamp };
+  return { ocean, beach, mountain, snow, desert, swamp, lavender };
 }
 
 export function biomeFromClimate(
@@ -123,6 +136,7 @@ export function biomeFromClimate(
   continental: number,
   heightHint: number,
   seaLevel: number,
+  bloom = 0,
 ): BiomeId {
   // Deep / shallow ocean from continental basins
   if (continental < 0.34) {
@@ -147,6 +161,20 @@ export function biomeFromClimate(
   // Wet lowlands
   if (moisture > 0.62 && continental < 0.55 && heightHint < seaLevel + 5) {
     return Biome.SWAMP;
+  }
+
+  // Lavender fields — temperate rolling inland, before generic forest/plains
+  if (
+    bloom > 0.56 &&
+    temperature > 0.40 &&
+    temperature < 0.66 &&
+    moisture > 0.32 &&
+    moisture < 0.54 &&
+    continental > 0.40 &&
+    continental < 0.70 &&
+    heightHint < seaLevel + 14
+  ) {
+    return Biome.LAVENDER_FIELD;
   }
 
   // Forests
@@ -234,6 +262,15 @@ export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "
         cactus: false,
         snowLine: 200,
       };
+    case Biome.LAVENDER_FIELD:
+      return {
+        id,
+        heightBias: 1,
+        relief: 0.72,
+        treeThreshold: 0.993,
+        cactus: false,
+        snowLine: 96,
+      };
     default:
       return {
         id: Biome.PLAINS,
@@ -251,7 +288,7 @@ export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "
  * classification stays consistent with final terrain.
  */
 export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: number): BiomeSample {
-  const { temperature, moisture, continental } = sampleClimate(wx, wz, seed);
+  const { temperature, moisture, continental, bloom } = sampleClimate(wx, wz, seed);
   // Height hint aligned with multi-scale relief (see chunk.surfaceAt)
   const macro = fbm2(wx * 0.008, wz * 0.008, seed + 50, 5, 2.05, 0.5);
   const hills = fbm2(wx * 0.02, wz * 0.02, seed, 6, 2.1, 0.48);
@@ -260,7 +297,14 @@ export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: numb
     (continental - 0.45) * 22 +
     (macro - 0.5) * 28 +
     (hills - 0.45) * 18;
-  const id = biomeFromClimate(temperature, moisture, continental, heightHint, seaLevel);
+  const id = biomeFromClimate(
+    temperature,
+    moisture,
+    continental,
+    heightHint,
+    seaLevel,
+    bloom,
+  );
   const params = getBiomeParams(id);
   return {
     ...params,
@@ -274,7 +318,7 @@ export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: numb
  * Authored grass-top / short-grass average. Vertex tint is relative to this
  * so plains stay as-painted and inventory icons don't need a special path.
  */
-export const GRASS_TINT_REF: [number, number, number] = [0.42, 0.64, 0.30];
+export const GRASS_TINT_REF: [number, number, number] = [0.62, 0.70, 0.43];
 
 function mix3(
   a: [number, number, number],
@@ -295,25 +339,33 @@ export function grassTintAt(
   wz: number,
   seed: number,
 ): [number, number, number] {
-  const { temperature, moisture, continental } = sampleClimate(wx, wz, seed);
+  const { temperature, moisture, continental, bloom } = sampleClimate(wx, wz, seed);
   const macro = fbm2(wx * 0.008, wz * 0.008, seed + 50, 5, 2.05, 0.5);
   const hills = fbm2(wx * 0.02, wz * 0.02, seed, 6, 2.1, 0.48);
   const heightHint =
     62 + (continental - 0.45) * 22 + (macro - 0.5) * 28 + (hills - 0.45) * 18;
-  const inf = terrainInfluence(temperature, moisture, continental, heightHint, 62);
+  const inf = terrainInfluence(
+    temperature,
+    moisture,
+    continental,
+    heightHint,
+    62,
+    bloom,
+  );
 
   const t = Math.max(0, Math.min(1, temperature));
   const rain = Math.max(0, Math.min(1, moisture)) * t;
-  const dry: [number, number, number] = [0.74, 0.68, 0.28];
-  const lush: [number, number, number] = [0.34, 0.72, 0.26];
-  const cold: [number, number, number] = [0.58, 0.70, 0.58];
+  const dry: [number, number, number] = [0.84, 0.62, 0.16];
+  const lush: [number, number, number] = [0.20, 0.74, 0.16];
+  const cold: [number, number, number] = [0.50, 0.66, 0.68];
   let c = mix3(cold, mix3(dry, lush, rain), t);
 
-  c = mix3(c, [0.34, 0.40, 0.18], inf.swamp * 0.85);
-  c = mix3(c, [0.64, 0.73, 0.64], inf.snow * 0.7);
-  c = mix3(c, [0.42, 0.54, 0.32], inf.mountain * 0.45);
-  c = mix3(c, dry, inf.desert * 0.55);
-  c = mix3(c, [0.50, 0.66, 0.34], inf.beach * 0.25);
+  c = mix3(c, [0.28, 0.36, 0.14], inf.swamp * 0.9);
+  c = mix3(c, [0.62, 0.74, 0.70], inf.snow * 0.8);
+  c = mix3(c, [0.40, 0.52, 0.28], inf.mountain * 0.5);
+  c = mix3(c, dry, inf.desert * 0.75);
+  c = mix3(c, [0.52, 0.68, 0.32], inf.beach * 0.3);
+  c = mix3(c, [0.72, 0.38, 0.70], inf.lavender * 0.92);
   return c;
 }
 
@@ -323,7 +375,33 @@ export function grassTintMul(
   wz: number,
   seed: number,
 ): [number, number, number] {
-  const [r, g, b] = grassTintAt(wx, wz, seed);
+  // Soft spatial blend so discrete biome edges don't snap hue.
+  const d = 18;
+  const pts: [number, number][] = [
+    [wx, wz],
+    [wx + d, wz],
+    [wx - d, wz],
+    [wx, wz + d],
+    [wx, wz - d],
+    [wx + d, wz + d],
+    [wx - d, wz - d],
+  ];
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let wsum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x, z] = pts[i]!;
+    const c = grassTintAt(x, z, seed);
+    const w = i === 0 ? 2 : 1;
+    r += c[0] * w;
+    g += c[1] * w;
+    b += c[2] * w;
+    wsum += w;
+  }
+  r /= wsum;
+  g /= wsum;
+  b /= wsum;
   return [
     r / GRASS_TINT_REF[0],
     g / GRASS_TINT_REF[1],

@@ -1637,6 +1637,7 @@ export function surfaceFromBlock(id: number): AudioSurface {
     case Block.LEAVES:
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
+    case Block.JACARANDA_LEAVES:
     case Block.VINE:
     case Block.LILY_PAD:
       return "grass";

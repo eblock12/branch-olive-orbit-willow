@@ -13,7 +13,8 @@ function setPixel(
   b: number,
   a = 255,
 ) {
-  if (x < 0 || y < 0 || x >= w || y >= w) return;
+  const h = (data.length / 4 / w) | 0;
+  if (x < 0 || y < 0 || x >= w || y >= h) return;
   const i = (y * w + x) * 4;
   data[i] = r;
   data[i + 1] = g;
@@ -656,6 +657,8 @@ export function createBlockAtlas(): {
   drawTile(d, 63, atlasW, (x, y, set) => paintClay(x, y, set));
   drawTile(d, 64, atlasW, (x, y, set) => paintVoidstone(x, y, set, false));
   drawTile(d, 65, atlasW, (x, y, set) => paintRift(x, y, set, false));
+  drawTile(d, 66, atlasW, (x, y, set) => paintJacarandaLeaves(x, y, set));
+  paintPlant(d, atlasW, 67, "lavenderTall");
 
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
@@ -744,6 +747,24 @@ function paintSpruceLeaves(x: number, y: number, set: (r: number, g: number, b: 
   set(clamp(base[0] + n * 6), clamp(base[1] + n * 8), clamp(base[2] + n * 6));
 }
 
+function paintJacarandaLeaves(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const edge = x === 0 || y === 0 || x === 15 || y === 15;
+  if (!edge && h01(x >> 1, y >> 1, 660) > 0.78 && h01(x, y, 661) > 0.48) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 662);
+  const tone = h01(x >> 2, y >> 2, 663);
+  const blossom = h01(x, y, 664) > 0.72;
+  if (blossom) {
+    const b = mixRGB([196, 120, 214], [232, 168, 240], tone);
+    set(clamp(b[0] + n * 8), clamp(b[1] + n * 6), clamp(b[2] + n * 8));
+    return;
+  }
+  const base = mixRGB([72, 118, 64], [154, 96, 186], tone);
+  set(clamp(base[0] + n * 8), clamp(base[1] + n * 8), clamp(base[2] + n * 10));
+}
+
 function paintPumpkinTop(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
   const cx = x - 7.5;
   const cy = y - 7.5;
@@ -819,20 +840,9 @@ function paintClay(x: number, y: number, set: (r: number, g: number, b: number, 
   set(clamp(168 + n), clamp(148 + n * 0.85), clamp(136 + n * 0.7));
 }
 
-function voidVeinField(x: number, y: number): number {
-  const a = Math.sin(x * 0.82 + y * 0.21);
-  const b = Math.sin(x * -0.28 + y * 0.94 + 1.3);
-  const c = Math.sin((x * 0.55 + y * 0.55) * 0.9 - 0.6);
-  const wobble = hSigned(x, y, 642) * 0.12;
-  return Math.min(Math.abs(a + wobble), Math.abs(b), Math.abs(c + a * 0.15));
-}
-
-function voidVeinColor(x: number, y: number, glow: number): [number, number, number] {
-  const pick = h01(x >> 2, y >> 2, 643);
-  const hot = Math.min(1, glow * 1.3);
-  if (pick > 0.72) return [clamp(40 + hot * 80), clamp(180 + hot * 70), clamp(210 + hot * 45)];
-  if (pick > 0.42) return [clamp(150 + hot * 90), clamp(40 + hot * 30), clamp(210 + hot * 45)];
-  return [clamp(220 + hot * 35), clamp(110 + hot * 80), clamp(30 + hot * 20)];
+function wrapDist(v: number, period: number): number {
+  const t = ((v % period) + period) % period;
+  return Math.min(t, period - t);
 }
 
 function paintVoidstone(
@@ -841,28 +851,35 @@ function paintVoidstone(
   set: (r: number, g: number, b: number, a?: number) => void,
   emissiveOnly: boolean,
 ): void {
-  const n = hSigned(x, y, 640) * 6;
-  const field = voidVeinField(x, y);
-  const glow = Math.max(0, 1 - field / 0.16);
+  const n = hSigned(x, y, 640);
+  // Integer-period ridges so every 16px edge matches its opposite
+  const d1 = wrapDist(x + 2 * y + 3, 16);
+  const d2 = wrapDist(2 * x - y + 11, 16);
+  const d3 = wrapDist(x - 3 * y + 6, 16);
+  // Keep only the closest ridge; drop the third unless it nearly hits
+  let d = Math.min(d1, d2);
+  if (d3 < 0.55) d = Math.min(d, d3);
+  const grain = h01((x * 3 + y * 7) & 15, (y * 5 + x) & 15, 643);
+  const width = 0.42 + grain * 0.18;
+  const glow = d < width ? 1 - d / width : 0;
   if (emissiveOnly) {
-    if (glow < 0.08) {
+    if (glow < 0.25) {
       set(0, 0, 0, 255);
       return;
     }
-    const [er, eg, eb] = voidVeinColor(x, y, glow);
-    set(er, eg, eb, 255);
+    const e = glow * glow;
+    set(clamp(70 + e * 150), clamp(18 + e * 28), clamp(140 + e * 100));
     return;
   }
-  const base = 18 + n * 0.4 + h01(x >> 2, y >> 2, 641) * 8;
-  let r = base * 0.7;
-  let g = base * 0.55;
-  let b = base * 0.95;
-  if (glow > 0.05) {
-    const [vr, vg, vb] = voidVeinColor(x, y, glow);
-    const k = Math.min(1, glow * glow * 1.15);
-    r = r * (1 - k) + vr * k;
-    g = g * (1 - k) + vg * k;
-    b = b * (1 - k) + vb * k;
+  const base = 15 + n * 2.5;
+  let r = 12 + base * 0.3;
+  let g = 9 + base * 0.18;
+  let b = 18 + base * 0.5;
+  if (glow > 0.12) {
+    const k = glow * glow * 0.7;
+    r = r * (1 - k) + (88 + glow * 110) * k;
+    g = g * (1 - k) + (22 + glow * 24) * k;
+    b = b * (1 - k) + (148 + glow * 90) * k;
   }
   set(clamp(r), clamp(g), clamp(b));
 }
@@ -1221,21 +1238,45 @@ function paintPlant(
       // highlight
       if ((x === 6 || x === 7) && y === 5) px(clamp(cr + 30), clamp(cg + 20), clamp(cb + 15));
     } else if (kind === "lavender") {
-      stem(7, 8);
-      stem(8, 8);
-      for (let yy = 2; yy <= 9; yy++) {
+      stem(7, 7);
+      stem(8, 7);
+      leafDot(5, 11);
+      leafDot(10, 12);
+      for (let yy = 2; yy <= 8; yy++) {
         if (x >= 6 && x <= 9 && y === yy) {
-          const t = (9 - yy) / 7;
+          const t = (8 - yy) / 7;
           px(
-            clamp(148 + t * 30 + (x % 2) * 8),
-            clamp(96 + t * 10),
-            clamp(188 + t * 20),
+            clamp(156 + t * 36 + (x % 2) * 10),
+            clamp(88 + t * 16),
+            clamp(196 + t * 24),
           );
         }
       }
-      // tiny florets off stem
       if ((x === 5 || x === 10) && y >= 3 && y <= 7 && y % 2 === 0)
-        px(160, 100, 200);
+        px(176, 112, 214);
+      if (x === 7 && y === 2) px(220, 176, 236);
+    } else if (kind === "lavenderTall") {
+      const spikes: [number, number, number][] = [
+        [4, 3, 14],
+        [8, 1, 14],
+        [12, 4, 14],
+      ];
+      for (const [sx, y0, y1] of spikes) {
+        if (x === sx && y >= y0 + 5 && y <= y1) {
+          px(48, 118, 52);
+        }
+        if ((x === sx || x === sx + 1) && y >= y0 && y <= y0 + 6) {
+          const t = (y0 + 6 - y) / 6;
+          px(
+            clamp(150 + t * 40 + (x === sx ? 0 : 12)),
+            clamp(84 + t * 18),
+            clamp(190 + t * 28),
+          );
+        }
+        if (x === sx - 1 && y >= y0 + 1 && y <= y0 + 5 && y % 2 === 0)
+          px(168, 104, 208);
+      }
+      if (x === 8 && y === 1) px(228, 188, 240);
     } else if (kind === "sunflower") {
       stem(7, 9);
       stem(8, 9);

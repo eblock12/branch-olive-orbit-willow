@@ -78,6 +78,7 @@ export function blockDrop(id: number): ItemId | null {
     case Block.LEAVES:
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
+    case Block.JACARANDA_LEAVES:
       return Math.random() < 0.12 ? Block.PLANKS : null;
     case Block.BEDROCK:
     case Block.WATER:

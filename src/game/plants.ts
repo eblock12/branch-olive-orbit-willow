@@ -129,6 +129,19 @@ export function placePlantsInChunk(
         continue;
       }
 
+      // Lavender fields: dense purple carpet
+      if (biome === Biome.LAVENDER_FIELD && onGrass) {
+        if (h > 0.42) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.78 ? Block.LAVENDER_TALL : h > 0.72 ? Block.ALLIUM : Block.LAVENDER;
+          continue;
+        }
+        if (h > 0.28) {
+          blocks[idx(lx, py, lz)] = Block.SHORT_GRASS;
+          continue;
+        }
+      }
+
       // Pumpkin patches on open plains
       if (biome === Biome.PLAINS && onGrass && patch > 0.48 && patch < 0.56 && h > 0.978) {
         blocks[idx(lx, py, lz)] = Block.PUMPKIN;
@@ -154,7 +167,7 @@ export function placePlantsInChunk(
         const dens =
           biome === Biome.FOREST
             ? 0.86
-            : biome === Biome.PLAINS
+            : biome === Biome.PLAINS || biome === Biome.LAVENDER_FIELD
               ? 0.78
               : biome === Biome.SWAMP
                 ? 0.88

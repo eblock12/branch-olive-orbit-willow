@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { World } from "./world";
 import type { Player } from "./player";
+import { warpMobIfNeeded, type PortalSystem } from "./portals";
 import {
   createEntityShadow,
   disposeEntityShadow,
@@ -225,6 +226,7 @@ export class SlenderGiant {
   private hipL = new THREE.Vector3();
   private hipR = new THREE.Vector3();
   alive = true;
+  portalCd = 0;
   private wanderT = 4 + Math.random() * 8;
   private wandering = false;
   private stepCool = 0;
@@ -410,6 +412,12 @@ export class SlenderGiant {
     );
     this.syncMeshes(this.footLCur, this.footRCur);
     this.shirt.resetToAnchor(this.clothAnchor);
+  }
+
+  snapAfterWarp(world: World): void {
+    this.prevX = this.x;
+    this.prevZ = this.z;
+    this.plantFeet(world);
   }
 
   update(
@@ -907,6 +915,7 @@ export class SlenderGiantSystem {
     player: Player,
     dayFactor: number,
     windAt?: (x: number, z: number) => { windX: number; windZ: number },
+    portals?: PortalSystem | null,
   ): void {
     for (let i = this.giants.length - 1; i >= 0; i--) {
       const g = this.giants[i]!;
@@ -917,10 +926,17 @@ export class SlenderGiantSystem {
         this.giants.splice(i, 1);
         continue;
       }
+      const px = g.x;
+      const py = g.y;
+      const pz = g.z;
       const w = windAt?.(g.x, g.z) ?? { windX: 0, windZ: 0 };
       g.update(dt, world, player, w.windX, w.windZ);
+      if (g.portalCd > 0) g.portalCd -= dt;
+      if (portals && warpMobIfNeeded(portals, world, g, px, py, pz)) {
+        g.snapAfterWarp(world);
+      }
       const d = Math.hypot(g.x - player.x, g.z - player.z);
-      if (d > 160) g.alive = false;
+      if (d > 160 && g.portalCd <= 0) g.alive = false;
     }
 
     this.spawnTimer -= dt;

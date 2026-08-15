@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { Block } from "./blocks";
 import type { World } from "./world";
 import type { Player } from "./player";
+import { warpMobIfNeeded, type PortalSystem } from "./portals";
 import {
   createEntityShadow,
   disposeEntityShadow,
@@ -160,6 +161,7 @@ export class NaughtyCaterpillar {
   vy = 0;
   onGround = true;
   yaw = 0;
+  portalCd = 0;
   mood: CaterpillarMood = "wander";
   hp = 3;
   alive = true;
@@ -192,6 +194,7 @@ export class NaughtyCaterpillar {
     this.y = y;
     this.z = z;
     this.yaw = Math.random() * Math.PI * 2;
+    this.portalCd = 0;
     this.pickWanderTarget();
     this.syncMesh();
   }
@@ -724,7 +727,7 @@ export class CaterpillarSystem {
     return c;
   }
 
-  update(dt: number, world: World, player: Player): void {
+  update(dt: number, world: World, player: Player, portals?: PortalSystem | null): void {
     for (let i = this.list.length - 1; i >= 0; i--) {
       const c = this.list[i]!;
       if (!c.alive) {
@@ -738,9 +741,16 @@ export class CaterpillarSystem {
         this.list.splice(i, 1);
         continue;
       }
+      const px = c.x;
+      const py = c.y;
+      const pz = c.z;
       c.update(dt, world, player);
+      if (c.portalCd > 0) c.portalCd -= dt;
+      if (portals && warpMobIfNeeded(portals, world, c, px, py, pz)) {
+        c.mesh.position.set(c.x, c.y, c.z);
+      }
       const d = Math.hypot(c.x - player.x, c.z - player.z);
-      if (d > 48) {
+      if (d > 48 && c.portalCd <= 0) {
         this.group.remove(c.mesh);
         this.group.remove(c.shadow);
         c.dispose();

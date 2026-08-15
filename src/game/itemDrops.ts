@@ -4,6 +4,7 @@ import { isBlockItem, itemColor, type ItemId, type ItemStack } from "./items";
 import { tileUVs } from "./textures";
 import type { World } from "./world";
 import type { Player } from "./player";
+import type { PortalSystem } from "./portals";
 
 const DROP_SIZE = 0.28;
 const PLANT_DROP = 0.36;
@@ -21,6 +22,10 @@ const MAGNET_RADIUS = 2.2;
 const MAX_DROPS = 96;
 const MAX_LIFE = 120; // seconds before despawn
 const DEATH_LIFE = 600; // 10 min — enough to walk back from spawn
+const _portalYaw = new THREE.Quaternion().setFromAxisAngle(
+  new THREE.Vector3(0, 1, 0),
+  Math.PI,
+);
 
 type Drop = {
   id: ItemId;
@@ -37,6 +42,10 @@ type Drop = {
   spin: number;
   bob: number;
   maxAge: number;
+  prevX: number;
+  prevY: number;
+  prevZ: number;
+  portalCd: number;
 };
 
 function buildDropGeometry(blockId: BlockId): THREE.BufferGeometry {
@@ -182,6 +191,10 @@ export class ItemDropSystem {
       spin: (Math.random() - 0.5) * 4,
       bob: Math.random() * Math.PI * 2,
       maxAge: MAX_LIFE,
+      prevX: x + 0.5,
+      prevY: y + 0.55,
+      prevZ: z + 0.5,
+      portalCd: 0,
     };
     mesh.position.set(drop.x, drop.y, drop.z);
     mesh.rotation.set(
@@ -235,6 +248,10 @@ export class ItemDropSystem {
       spin: (Math.random() - 0.5) * 5,
       bob: Math.random() * Math.PI * 2,
       maxAge: MAX_LIFE,
+      prevX: x,
+      prevY: y,
+      prevZ: z,
+      portalCd: 0,
     };
     mesh.position.set(x, y, z);
     mesh.rotation.set(
@@ -289,6 +306,10 @@ export class ItemDropSystem {
       spin: (Math.random() - 0.5) * 6,
       bob: Math.random() * Math.PI * 2,
       maxAge: DEATH_LIFE,
+      prevX: x,
+      prevY: y,
+      prevZ: z,
+      portalCd: 0,
     };
     mesh.position.set(x, y, z);
     mesh.rotation.set(
@@ -316,6 +337,7 @@ export class ItemDropSystem {
     world: World,
     player: Player,
     tryPickup: (id: ItemId, count: number, durability?: number) => number,
+    portals?: PortalSystem | null,
   ): ItemId[] {
     const picked: ItemId[] = [];
     const px = player.x;
@@ -406,6 +428,36 @@ export class ItemDropSystem {
       d.x = nx;
       d.y = ny;
       d.z = nz;
+
+      if (d.portalCd > 0) d.portalCd -= dt;
+      else if (portals) {
+        const warp = portals.tryWarpEntity(
+          world,
+          d.x,
+          d.y,
+          d.z,
+          d.vx,
+          d.vy,
+          d.vz,
+          d.prevX,
+          d.prevY,
+          d.prevZ,
+        );
+        if (warp) {
+          d.x = warp.x;
+          d.y = warp.y;
+          d.z = warp.z;
+          d.vx = warp.vx;
+          d.vy = warp.vy;
+          d.vz = warp.vz;
+          d.mesh.quaternion.premultiply(_portalYaw);
+          d.mesh.rotation.setFromQuaternion(d.mesh.quaternion);
+          d.portalCd = 0.9;
+        }
+      }
+      d.prevX = d.x;
+      d.prevY = d.y;
+      d.prevZ = d.z;
 
       // Ground settle
       if (d.y < 0.2) {

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { World } from "./world";
 import type { Player } from "./player";
+import { warpMobIfNeeded, type PortalSystem } from "./portals";
 import {
   createEntityShadow,
   disposeEntityShadow,
@@ -383,6 +384,7 @@ class PassiveMob {
   vy = 0;
   onGround = true;
   yaw = Math.random() * Math.PI * 2;
+  portalCd = 0;
   hp: number;
   alive = true;
   dying: DeathAnim | null = null;
@@ -905,7 +907,7 @@ export class PassiveMobSystem {
     return m;
   }
 
-  update(dt: number, world: World, player: Player): void {
+  update(dt: number, world: World, player: Player, portals?: PortalSystem | null): void {
     for (let i = this.list.length - 1; i >= 0; i--) {
       const m = this.list[i]!;
       if (!m.alive) {
@@ -923,9 +925,17 @@ export class PassiveMobSystem {
         this.list.splice(i, 1);
         continue;
       }
+      const px = m.x;
+      const py = m.y;
+      const pz = m.z;
       m.update(dt, world, player);
+      if (m.portalCd > 0) m.portalCd -= dt;
+      if (portals && warpMobIfNeeded(portals, world, m, px, py, pz)) {
+        m.mesh.position.set(m.x, m.y, m.z);
+        m.shadow.position.set(m.x, m.y, m.z);
+      }
       const d = Math.hypot(m.x - player.x, m.z - player.z);
-      if (d > 72) {
+      if (d > 72 && m.portalCd <= 0) {
         this.group.remove(m.mesh);
         this.group.remove(m.shadow);
         m.dispose();

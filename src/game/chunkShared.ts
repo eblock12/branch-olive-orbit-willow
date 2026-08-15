@@ -6,10 +6,12 @@ export const VOXEL_BYTES = CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT;
 export const SLOT_PAYLOAD = VOXEL_BYTES * 3;
 
 /**
- * Slots cover the loaded world + in-flight gen.
- * 16-radius ≈ 800 chunks; 1024 leaves headroom for the ready queue.
+ * Slots cover the loaded world + LRU trail + in-flight gen.
+ * 16-radius ≈ 800; 2048 holds view + both portal ends + a long backtrack.
+ * Alloc falls back to 1024 if the larger SAB is rejected.
  */
-export const SLOT_COUNT = 1024;
+export const SLOT_COUNT = 2048;
+export const SLOT_COUNT_FALLBACK = 1024;
 
 export const SLOT_FREE = 0;
 export const SLOT_BUSY = 1;
@@ -83,23 +85,26 @@ export function sharedMemoryAvailable(): boolean {
 
 export function createChunkShare(): ChunkShare | null {
   if (!sharedMemoryAvailable()) return null;
-  try {
-    const control = new SharedArrayBuffer(SLOT_COUNT * CTRL_STRIDE * 4);
-    const voxels = new SharedArrayBuffer(SLOT_COUNT * SLOT_PAYLOAD);
-    const meshControl = new SharedArrayBuffer(MESH_SLOT_COUNT * MH_STRIDE * 4);
-    const mesh = new SharedArrayBuffer(MESH_SLOT_COUNT * MESH_PAYLOAD_BYTES);
-    return {
-      control,
-      voxels,
-      meshControl,
-      mesh,
-      ctrl: new Int32Array(control),
-      meshCtrl: new Int32Array(meshControl),
-      slotCount: SLOT_COUNT,
-    };
-  } catch {
-    return null;
+  for (const n of [SLOT_COUNT, SLOT_COUNT_FALLBACK]) {
+    try {
+      const control = new SharedArrayBuffer(n * CTRL_STRIDE * 4);
+      const voxels = new SharedArrayBuffer(n * SLOT_PAYLOAD);
+      const meshControl = new SharedArrayBuffer(MESH_SLOT_COUNT * MH_STRIDE * 4);
+      const mesh = new SharedArrayBuffer(MESH_SLOT_COUNT * MESH_PAYLOAD_BYTES);
+      return {
+        control,
+        voxels,
+        meshControl,
+        mesh,
+        ctrl: new Int32Array(control),
+        meshCtrl: new Int32Array(meshControl),
+        slotCount: n,
+      };
+    } catch {
+      /* try smaller pool */
+    }
   }
+  return null;
 }
 
 export function ctrlIndex(slot: number, field: number): number {

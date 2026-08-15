@@ -465,30 +465,34 @@ export function generateChunkBlocks(
       if (!shouldPlaceTree(wx, wz, seed, treeThreshold)) continue;
 
       const pick = fbm2(wx * 0.8, wz * 0.8, seed + 19);
-      type Species = "oak" | "birch" | "spruce" | "willow";
+      type Species = "oak" | "birch" | "spruce" | "willow" | "jacaranda";
       let species: Species = "oak";
       if (biome === Biome.SNOW || biome === Biome.MOUNTAINS) species = "spruce";
       else if (biome === Biome.SWAMP) species = pick > 0.35 ? "willow" : "oak";
+      else if (biome === Biome.LAVENDER_FIELD)
+        species = pick > 0.35 ? "jacaranda" : "birch";
       else if (biome === Biome.PLAINS) species = pick > 0.58 ? "birch" : "oak";
       else if (biome === Biome.FOREST) {
         species = pick > 0.7 ? "birch" : pick < 0.18 ? "spruce" : "oak";
       }
 
       const wood =
-        species === "birch"
+        species === "birch" || species === "jacaranda"
           ? Block.BIRCH_WOOD
           : species === "spruce"
             ? Block.SPRUCE_WOOD
             : Block.WOOD;
       const leaf =
-        species === "birch"
-          ? Block.BIRCH_LEAVES
-          : species === "spruce"
-            ? Block.SPRUCE_LEAVES
-            : Block.LEAVES;
+        species === "jacaranda"
+          ? Block.JACARANDA_LEAVES
+          : species === "birch"
+            ? Block.BIRCH_LEAVES
+            : species === "spruce"
+              ? Block.SPRUCE_LEAVES
+              : Block.LEAVES;
 
       const trunkH =
-        species === "birch"
+        species === "birch" || species === "jacaranda"
           ? 6 + Math.floor(fbm2(wx, wz, seed + 7) * 4)
           : species === "spruce"
             ? 6 + Math.floor(fbm2(wx, wz, seed + 7) * 5)
@@ -497,7 +501,11 @@ export function generateChunkBlocks(
               : 4 + Math.floor(fbm2(wx, wz, seed + 7) * 3);
       const top = height + trunkH;
       const canopyR =
-        species === "willow" ? 3 : species === "spruce" ? 2 : species === "birch" ? 2 : 2;
+        species === "willow" || species === "jacaranda"
+          ? 3
+          : species === "spruce"
+            ? 2
+            : 2;
 
       if (ox >= 0 && oz >= 0 && ox < CHUNK_SIZE && oz < CHUNK_SIZE) {
         for (let t = 1; t <= trunkH; t++) {
@@ -521,7 +529,7 @@ export function generateChunkBlocks(
               if (dy === 1 && dist > 3) continue;
               if (dy === 2 && dist > 2) continue;
               if (Math.abs(dx) === 3 && Math.abs(dz) === 3) continue;
-            } else if (species === "birch") {
+            } else if (species === "birch" || species === "jacaranda") {
               if (dy === -2 && dist > 0) continue;
               if (dy === -1 && dist > 1) continue;
               if (dy === 0 && dist > 2) continue;
