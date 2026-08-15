@@ -934,7 +934,6 @@ export function blitArcaneEmissive(ctx: CanvasRenderingContext2D, pulse = 1): vo
     ctx.putImageData(img, col * TILE_SIZE, row * TILE_SIZE);
   };
   paint(ARCANE_TILE, paintVoidstone);
-  paint(PORTAL_TILE, paintRift);
 }
 
 function paintFurnaceFront(

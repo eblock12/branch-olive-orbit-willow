@@ -749,7 +749,9 @@ export class CaterpillarSystem {
       if (portals && warpMobIfNeeded(portals, world, c, px, py, pz)) {
         c.mesh.position.set(c.x, c.y, c.z);
       }
-      const d = Math.hypot(c.x - player.x, c.z - player.z);
+      const d = portals
+        ? portals.shortPathDist(world, c.x, c.z, player.x, player.z)
+        : Math.hypot(c.x - player.x, c.z - player.z);
       if (d > 48 && c.portalCd <= 0) {
         this.group.remove(c.mesh);
         this.group.remove(c.shadow);

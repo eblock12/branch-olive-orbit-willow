@@ -934,7 +934,9 @@ export class PassiveMobSystem {
         m.mesh.position.set(m.x, m.y, m.z);
         m.shadow.position.set(m.x, m.y, m.z);
       }
-      const d = Math.hypot(m.x - player.x, m.z - player.z);
+      const d = portals
+        ? portals.shortPathDist(world, m.x, m.z, player.x, player.z)
+        : Math.hypot(m.x - player.x, m.z - player.z);
       if (d > 72 && m.portalCd <= 0) {
         this.group.remove(m.mesh);
         this.group.remove(m.shadow);

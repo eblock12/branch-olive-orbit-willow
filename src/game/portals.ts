@@ -222,6 +222,24 @@ export class PortalSystem {
     return null;
   }
 
+  /** XZ distance, using a portal hop if that path is shorter. */
+  shortPathDist(world: World, x: number, z: number, px: number, pz: number): number {
+    let best = Math.hypot(x - px, z - pz);
+    for (const frame of this.frames) {
+      const dest = this.partnerOf(frame, world);
+      if (!dest) continue;
+      const viaDest =
+        Math.hypot(x - dest.cx, z - dest.cz) +
+        Math.hypot(px - frame.cx, pz - frame.cz);
+      const viaHere =
+        Math.hypot(x - frame.cx, z - frame.cz) +
+        Math.hypot(px - dest.cx, pz - dest.cz);
+      if (viaDest < best) best = viaDest;
+      if (viaHere < best) best = viaHere;
+    }
+    return best;
+  }
+
   renderView(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -240,15 +258,8 @@ export class PortalSystem {
     if (!dest) return;
 
     renderer.getSize(this.tmpSize);
-    const close =
-      Math.hypot(
-        player.x - live.cx,
-        player.y - live.cy,
-        player.z - live.cz,
-      ) < 5;
-    const scale = close ? 1 : 0.5;
-    const tw = Math.max(160, Math.floor(this.tmpSize.x * scale));
-    const th = Math.max(90, Math.floor(this.tmpSize.y * scale));
+    const tw = Math.max(256, Math.floor(this.tmpSize.x * 0.75));
+    const th = Math.max(144, Math.floor(this.tmpSize.y * 0.75));
     if (this.rt.width !== tw || this.rt.height !== th) {
       this.rt.setSize(tw, th);
     }
@@ -264,6 +275,7 @@ export class PortalSystem {
     const prevAlpha = renderer.getClearAlpha();
     renderer.shadowMap.enabled = false;
     renderer.shadowMap.autoUpdate = false;
+    this.group.visible = false;
     renderer.setRenderTarget(this.rt);
     const sky =
       scene.background instanceof THREE.Color
@@ -273,6 +285,7 @@ export class PortalSystem {
     renderer.clear();
     renderer.render(scene, this.portalCam);
     renderer.setRenderTarget(prevTarget);
+    this.group.visible = true;
     renderer.shadowMap.enabled = prevShadow;
     renderer.shadowMap.autoUpdate = prevAuto;
     renderer.setClearColor(prevClear, prevAlpha);

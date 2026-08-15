@@ -731,7 +731,9 @@ export class HostileSystem {
         this.list.splice(i, 1);
         continue;
       }
-      const d = Math.hypot(h.x - player.x, h.z - player.z);
+      const d = portals
+        ? portals.shortPathDist(world, h.x, h.z, player.x, player.z)
+        : Math.hypot(h.x - player.x, h.z - player.z);
       if (d > DESPAWN_DIST && h.portalCd <= 0) {
         this.group.remove(h.mesh);
         this.group.remove(h.shadow);
@@ -762,7 +764,9 @@ export class HostileSystem {
         for (let i = this.list.length - 1; i >= 0; i--) {
           const h = this.list[i]!;
           if (h.portalCd > 0) continue;
-          const d = Math.hypot(h.x - player.x, h.z - player.z);
+          const d = portals
+            ? portals.shortPathDist(world, h.x, h.z, player.x, player.z)
+            : Math.hypot(h.x - player.x, h.z - player.z);
           if (d > 28 || h.hp < h.def.hp * 0.5) {
             h.alive = false;
           }

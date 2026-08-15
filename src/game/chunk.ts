@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isSlab, isStairCell, isLeaves, stairFacing, shapeMaterial, doorPlane, waterLevel, lightEmission } from "./blocks";
+import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isSlab, isStairCell, isLeaves, isPortal, stairFacing, shapeMaterial, doorPlane, waterLevel, lightEmission } from "./blocks";
 import { tileUVs } from "./textures";
 import { grassTintMul } from "./biomes";
 
@@ -881,7 +881,7 @@ function buildLod0(
     for (let lz = 0; lz < CHUNK_SIZE; lz++) {
       for (let lx = 0; lx < CHUNK_SIZE; lx++) {
         const id = chunk.get(lx, y, lz);
-        if (id === Block.AIR || isWater(id) || id === Block.CHEST) continue;
+        if (id === Block.AIR || isWater(id) || id === Block.CHEST || isPortal(id)) continue;
         const def = BLOCKS[id];
         if (!def) continue;
 
@@ -996,7 +996,7 @@ function buildLod1(
     for (let lz = 0; lz < CHUNK_SIZE; lz += step) {
       for (let lx = 0; lx < CHUNK_SIZE; lx += step) {
         const id = dominantCell(chunk, lx, y, lz, step, cellOpts);
-        if (id === Block.AIR) continue;
+        if (id === Block.AIR || isPortal(id)) continue;
         const wx = baseX + lx;
         const wz = baseZ + lz;
         const sx = Math.min(step, CHUNK_SIZE - lx);
@@ -1103,7 +1103,7 @@ function buildLod2(
           includeFoliage: false,
         });
         if (id === Block.AIR || isWater(id)) continue;
-        if (isLeaves(id) || id === Block.CACTUS) continue;
+        if (isLeaves(id) || id === Block.CACTUS || isPortal(id)) continue;
         h = y;
         tid = id;
         // Sample a bit below for cliff material

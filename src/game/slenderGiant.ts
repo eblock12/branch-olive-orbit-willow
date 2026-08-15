@@ -935,7 +935,9 @@ export class SlenderGiantSystem {
       if (portals && warpMobIfNeeded(portals, world, g, px, py, pz)) {
         g.snapAfterWarp(world);
       }
-      const d = Math.hypot(g.x - player.x, g.z - player.z);
+      const d = portals
+        ? portals.shortPathDist(world, g.x, g.z, player.x, player.z)
+        : Math.hypot(g.x - player.x, g.z - player.z);
       if (d > 160 && g.portalCd <= 0) g.alive = false;
     }
 
