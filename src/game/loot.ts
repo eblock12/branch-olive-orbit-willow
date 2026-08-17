@@ -43,6 +43,9 @@ export function mobLoot(kind: string): { id: ItemId; count: number }[] {
       add({ id: Item.RAW_RABBIT, count: 1 });
       add(maybe(0.55, Item.LEATHER, 1, 1));
       break;
+    case "cat":
+      add({ id: Item.STRING, count: n(1, 2) });
+      break;
     case "caterpillar":
       add({ id: Item.STRING, count: n(1, 2) });
       break;

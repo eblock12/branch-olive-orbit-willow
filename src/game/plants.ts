@@ -98,7 +98,8 @@ export function placePlantsInChunk(
       const onDirt = ground === Block.DIRT || ground === Block.CLAY;
       const onSand = ground === Block.SAND;
       const onSnow = ground === Block.SNOW || ground === Block.SNOW_GRASS;
-      if (!onGrass && !onDirt && !onSand && !onSnow) continue;
+      const onMycelium = ground === Block.MYCELIUM;
+      if (!onGrass && !onDirt && !onSand && !onSnow && !onMycelium) continue;
 
       const h = hash2(wx, wz, seed + 9001);
       const patch = fbm2(wx * 0.04, wz * 0.04, seed + 44, 3);
@@ -111,7 +112,11 @@ export function placePlantsInChunk(
 
       // Mushrooms in dark forest floor patches
       if (
-        (biome === Biome.FOREST || biome === Biome.SWAMP) &&
+        (biome === Biome.FOREST ||
+          biome === Biome.SWAMP ||
+          biome === Biome.REDWOOD ||
+          biome === Biome.RAINFOREST ||
+          biome === Biome.FUNGAL) &&
         patch < 0.38 &&
         h > 0.982
       ) {
@@ -142,6 +147,56 @@ export function placePlantsInChunk(
         }
       }
 
+      // Redwood floor: ferns, mossy grass, few flowers
+      if (biome === Biome.REDWOOD && onGrass) {
+        if (h > 0.62) {
+          blocks[idx(lx, py, lz)] = h > 0.88 ? Block.FERN : Block.SHORT_GRASS;
+          continue;
+        }
+        if (h > 0.97) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.99 ? Block.MUSHROOM_BROWN : Block.BLUEBELL;
+          continue;
+        }
+      }
+
+      // Rainforest floor: ferns, orchids, mushrooms
+      if (biome === Biome.RAINFOREST && (onGrass || onDirt)) {
+        if (h > 0.38) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.82
+              ? Block.JUNGLE_FERN
+              : h > 0.74
+                ? Block.FERN
+                : Block.SHORT_GRASS;
+          continue;
+        }
+        if (h > 0.955) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.985 ? Block.ORCHID : Block.MUSHROOM_BROWN;
+          continue;
+        }
+      }
+
+      // Fungal jungle: mycelium carpet of shrooms
+      if (biome === Biome.FUNGAL && (onMycelium || onDirt || onGrass)) {
+        if (h > 0.34) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.88
+              ? Block.GLOWSHROOM
+              : h > 0.74
+                ? Block.TOADSTOOL
+                : h > 0.58
+                  ? Block.MUSHROOM_RED
+                  : Block.MUSHROOM_BROWN;
+          continue;
+        }
+        if (h > 0.22) {
+          blocks[idx(lx, py, lz)] = Block.SHORT_GRASS;
+          continue;
+        }
+      }
+
       // Pumpkin patches on open plains
       if (biome === Biome.PLAINS && onGrass && patch > 0.48 && patch < 0.56 && h > 0.978) {
         blocks[idx(lx, py, lz)] = Block.PUMPKIN;
@@ -165,7 +220,7 @@ export function placePlantsInChunk(
       if (onGrass && h > 0.72 - patch * 0.15) {
         // Density by biome
         const dens =
-          biome === Biome.FOREST
+          biome === Biome.FOREST || biome === Biome.REDWOOD || biome === Biome.RAINFOREST
             ? 0.86
             : biome === Biome.PLAINS || biome === Biome.LAVENDER_FIELD
               ? 0.78

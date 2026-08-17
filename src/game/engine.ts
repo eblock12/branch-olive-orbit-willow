@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, isDoor, isDoorCell, isLadder, isLeaves, canSupportTorch, canSupportLadder, plantHitbox, torchIdFromHitFace, torchAttachDir, doorId, doorFacingFromLook, doorIsUpper, doorToggle, doorIsOpen, ladderIdFromHitFace, ladderAttachDir, blocksLight, isStairItem, stairIdFromItem, type BlockId } from "./blocks";
+import { Block, isBed, isChest, isFurnace, isPlant, isSolid, isTorch, isWater, isSourceWater, isDoor, isDoorCell, isLadder, isLeaves, canSupportTorch, canSupportLadder, plantHitbox, torchIdFromHitFace, torchAttachDir, doorId, doorFacingFromLook, doorIsUpper, doorToggle, doorIsOpen, ladderIdFromHitFace, ladderAttachDir, blocksLight, isStairItem, stairIdFromItem, type BlockId } from "./blocks";
 
 import { Player, MOUSE_SENS } from "./player";
 import { World } from "./world";
@@ -7,10 +7,16 @@ import { createBlockAtlas, createDestroyCrackTextures, CRACK_STAGE_COUNT } from 
 
 
 
-import { raycastVoxel, type VoxelHit } from "./raycast";
-import { CHUNK_HEIGHT } from "./chunk";
+import { raycastVoxel, raycastWaterSource, type VoxelHit } from "./raycast";
+import {
+  defaultDebugSettings,
+  clampDebug,
+  type DebugSettings,
+} from "./debugSettings";
+import { CHUNK_HEIGHT, setVertexAo } from "./chunk";
 import { CaterpillarSystem } from "./caterpillars";
 import { PassiveMobSystem } from "./passiveMobs";
+import { CatSystem, isCatTreat } from "./cats";
 import { HostileSystem } from "./hostiles";
 import { SlenderGiantSystem } from "./slenderGiant";
 import { BirdSystem } from "./birds";
@@ -34,7 +40,7 @@ import {
   type ItemId,
   type ItemStack,
 } from "./survival";
-import { itemName, isTool, isFood, isBow, isBoneMeal, armorInfo, Item, itemMaxStack } from "./items";
+import { itemName, isTool, isFood, isBow, isBoneMeal, isEmptyBucket, isWaterBucket, armorInfo, Item, itemMaxStack } from "./items";
 import { ItemDropSystem } from "./itemDrops";
 import { WaterFX } from "./water";
 import { ViewHand } from "./viewHand";
@@ -46,6 +52,7 @@ import { TorchFlame } from "./torchFlame";
 import { PortalSystem } from "./portals";
 import { ProjectileSystem } from "./projectiles";
 import { PlayerRig } from "./playerRig";
+import { VolumetricLighting } from "./volumetrics";
 import {
   loadWorldSave,
   writeWorldSave,
@@ -72,6 +79,7 @@ export type HudSnapshot = {
     idleWorkers: number;
     shared: boolean;
   };
+  load: { progress: number; have: number; need: number };
   target: VoxelHit | null;
   isTouch: boolean;
   caterpillars: number;
@@ -82,6 +90,7 @@ export type HudSnapshot = {
   slenderNearby: boolean;
   weather: WeatherKind;
   rain: number;
+  snow: boolean;
   dayPhase: number;
   isDay: boolean;
   biome: string;
@@ -123,6 +132,8 @@ export type HudSnapshot = {
     output: { id: ItemId; count: number; name: string };
   }[];
   freeCraft: boolean;
+  debugOpen: boolean;
+  debug: DebugSettings;
   cursor: HotbarSlot;
   tip: string;
   notice: string;
@@ -143,6 +154,8 @@ export class GameEngine {
   private player: Player;
   private caterpillars: CaterpillarSystem;
   private animals: PassiveMobSystem;
+  private cats: CatSystem;
+  private cats!: CatSystem;
   private hostiles: HostileSystem;
   private slenderGiant: SlenderGiantSystem;
   private birds: BirdSystem;
@@ -154,7 +167,11 @@ export class GameEngine {
   private itemDrops: ItemDropSystem;
   private waterFX: WaterFX;
   private weather: WeatherSystem;
+  private volumetrics: VolumetricLighting;
   private viewHand: ViewHand;
+  private debug = defaultDebugSettings();
+  private debugOpen = false;
+  private debugRev = 0;
 
 
   private dayNight: DayNightCycle;
@@ -278,7 +295,9 @@ export class GameEngine {
     this.renderer.setClearColor(0x5ba3d9, 1);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.BasicShadowMap;
+    // 5-tap Vogel PCF (Three r185). Softens texel stairsteps / acne without
+    // VSM light-bleed through 1-block walls.
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.shadowMap.autoUpdate = true;
 
     this.scene = new THREE.Scene();
@@ -374,6 +393,7 @@ export class GameEngine {
     this.player = new Player();
     this.caterpillars = new CaterpillarSystem();
     this.animals = new PassiveMobSystem();
+    this.cats = new CatSystem();
     this.hostiles = new HostileSystem();
     this.slenderGiant = new SlenderGiantSystem();
     this.birds = new BirdSystem();
@@ -384,6 +404,7 @@ export class GameEngine {
     this.viewHand.attachTo(this.camera);
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
     this.portals = new PortalSystem(this.scene);
+    this.world.bindPortals(this.portals);
 
     const startX = loaded?.player?.x ?? 0;
     const startZ = loaded?.player?.z ?? 0;
@@ -398,10 +419,12 @@ export class GameEngine {
     this.portals.preloadVisibleExits(this.world, this.player.x, this.player.z);
     this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 3);
     this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
+    this.cats.seedAround(this.world, this.player.x, this.player.z, 3);
 
     this.scene.add(this.world.group);
     this.scene.add(this.caterpillars.group);
     this.scene.add(this.animals.group);
+    this.scene.add(this.cats.group);
     this.scene.add(this.hostiles.group);
     this.scene.add(this.slenderGiant.group);
     this.scene.add(this.birds.group);
@@ -424,10 +447,12 @@ export class GameEngine {
       this.scene.fog as THREE.Fog,
       this.material,
       seed,
+      atlas.spec,
     );
     this.weather.onLightning = ({ dist, strength, x, y, z }) => {
       this.audio.thunder(dist, strength, x, y, z);
     };
+    this.volumetrics = new VolumetricLighting();
     {
       const depth = this.material.userData.windDepthMaterial as
         | THREE.Material
@@ -795,6 +820,7 @@ export class GameEngine {
     this.particleMat.dispose();
     this.leafParticleMat.dispose();
     this.weather.dispose();
+    this.volumetrics.dispose();
     this.dayNight.dispose(this.scene);
     this.itemDrops.dispose();
     this.chestVisuals.dispose();
@@ -804,6 +830,7 @@ export class GameEngine {
     this.previewCanvas = null;
     this.caterpillars.dispose();
     this.animals.dispose();
+    this.cats.dispose();
     this.hostiles.dispose();
     this.slenderGiant.dispose();
     this.birds.dispose();
@@ -1020,6 +1047,10 @@ export class GameEngine {
     this.camera.aspect = w / Math.max(1, h);
     this.camera.updateProjectionMatrix();
     this.waterFX.setSize(w, h);
+    if (this.volumetrics) {
+      const buf = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+      this.volumetrics.setSize(buf.x, buf.y);
+    }
   };
 
 
@@ -1034,7 +1065,7 @@ export class GameEngine {
       this.mouseDown.right = false;
       // Crafting / death unlock the pointer on purpose — keep session
       // "playing" so the start overlay doesn't cover those UIs.
-      if (!this.craftingOpen && !this.openFurnacePos && !this.openChestPos && !this.survival.dead) {
+      if (!this.craftingOpen && !this.openFurnacePos && !this.openChestPos && !this.debugOpen && !this.survival.dead) {
         this.playing = false;
       }
     }
@@ -1065,11 +1096,16 @@ export class GameEngine {
       e.preventDefault();
       this.toggleFreeCraft();
     }
-    if (e.code === "Escape" && (this.craftingOpen || this.openFurnacePos || this.openChestPos)) {
+    if (e.code === "F7" || e.code === "Backquote") {
+      e.preventDefault();
+      this.toggleDebug();
+    }
+    if (e.code === "Escape" && (this.craftingOpen || this.openFurnacePos || this.openChestPos || this.debugOpen)) {
       e.preventDefault();
       this.setCraftingOpen(false);
       this.closeFurnace();
       this.closeChest();
+      this.setDebugOpen(false);
     }
     if (e.code === "KeyQ") {
       e.preventDefault();
@@ -1090,7 +1126,7 @@ export class GameEngine {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (!this.playing || this.survival.dead || this.craftingOpen || this.openFurnacePos || this.openChestPos) return;
+    if (!this.playing || this.survival.dead || this.craftingOpen || this.openFurnacePos || this.openChestPos || this.debugOpen) return;
     if (e.button === 0) {
       this.mouseDown.left = true;
       this.tryBreak(true);
@@ -1340,6 +1376,18 @@ export class GameEngine {
       }
       return;
     }
+    if (held && isCatTreat(held)) {
+      if (this.cats.tryFeed(this.player, held)) {
+        this.survival.removeItem(held, 1);
+        this.viewHand.punch();
+        this.audio.pickup();
+        this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+        this.flashNotice("The cat accepted the offering");
+        this.lastPlace = now;
+        this.emitHud();
+        return;
+      }
+    }
     if (held && isBoneMeal(held) && this.target) {
       if (this.world.applyBoneMeal(this.target.x, this.target.y, this.target.z)) {
         this.survival.removeItem(Item.BONE_MEAL, 1);
@@ -1349,6 +1397,59 @@ export class GameEngine {
         this.lastPlace = now;
         this.emitHud();
       }
+      return;
+    }
+    if (held && isEmptyBucket(held)) {
+      const [lx, ly, lz] = this.player.lookDir();
+      const src = raycastWaterSource(
+        this.player.x,
+        this.player.eyeY,
+        this.player.z,
+        lx,
+        ly,
+        lz,
+        6,
+        (x, y, z) => this.world.getBlock(x, y, z),
+      );
+      if (src && isSourceWater(this.world.getBlock(src.x, src.y, src.z))) {
+        if (!this.world.setBlock(src.x, src.y, src.z, Block.AIR)) return;
+        this.world.kickWater();
+        this.survival.replaceSelected(Item.WATER_BUCKET);
+        this.viewHand.punch();
+        this.audio.placeBlock("water", src.x + 0.5, src.y + 0.5, src.z + 0.5);
+        this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+        this.lastPlace = now;
+        this.markSave();
+        this.emitHud();
+      }
+      return;
+    }
+    if (held && isWaterBucket(held)) {
+      let px: number;
+      let py: number;
+      let pz: number;
+      if (this.target) {
+        px = this.target.x + this.target.nx;
+        py = this.target.y + this.target.ny;
+        pz = this.target.z + this.target.nz;
+      } else {
+        const [lx, ly, lz] = this.player.lookDir();
+        px = Math.floor(this.player.x + lx * 2.2);
+        py = Math.floor(this.player.eyeY + ly * 2.2);
+        pz = Math.floor(this.player.z + lz * 2.2);
+      }
+      if (py < 0 || py >= CHUNK_HEIGHT) return;
+      const dest = this.world.getBlock(px, py, pz);
+      if (dest !== Block.AIR && !isWater(dest)) return;
+      if (!this.world.setBlock(px, py, pz, Block.WATER)) return;
+      this.world.kickWater();
+      this.survival.replaceSelected(Item.BUCKET);
+      this.viewHand.punch();
+      this.audio.placeBlock("water", px + 0.5, py + 0.5, pz + 0.5);
+      this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
+      this.lastPlace = now;
+      this.markSave();
+      this.emitHud();
       return;
     }
     if (!this.survival.hasSelectedPlaceable()) return;
@@ -1566,6 +1667,16 @@ export class GameEngine {
         lz,
         range,
         dmg,
+      ) ||
+      this.cats.tryPunch(
+        this.player.x,
+        this.player.eyeY,
+        this.player.z,
+        lx,
+        ly,
+        lz,
+        range,
+        dmg,
       );
     if (result) {
       this.swingJuice = 1;
@@ -1642,6 +1753,80 @@ export class GameEngine {
     this.survival.freeCraft = !this.survival.freeCraft;
     this.audio.ui();
     this.emitHud();
+  }
+
+  toggleDebug(): void {
+    this.setDebugOpen(!this.debugOpen);
+  }
+
+  setDebugOpen(open: boolean): void {
+    this.debugOpen = open;
+    this.mouseDown.left = false;
+    this.mouseDown.right = false;
+    if (open) {
+      if (this.craftingOpen) this.setCraftingOpen(false);
+      this.closeFurnace(false);
+      this.closeChest(false);
+      if (document.pointerLockElement === this.canvas) {
+        document.exitPointerLock();
+      }
+    } else if (!this.isTouch && this.playing && !this.craftingOpen && !this.openFurnacePos && !this.openChestPos) {
+      this.canvas.requestPointerLock();
+    }
+    this.emitHud();
+  }
+
+  patchDebug(partial: Partial<DebugSettings>): void {
+    this.debug = clampDebug({ ...this.debug, ...partial });
+    this.applyDebug();
+    this.emitHud();
+  }
+
+  private applyDebug(): void {
+    const d = this.debug;
+    if (this.debugRev < 2) {
+      this.debugRev = 2;
+      d.vertexAo = true;
+    }
+    if (d.viewRadius == null) d.viewRadius = 16;
+    if (d.lodFull == null) d.lodFull = 7;
+    if (d.lodMid == null) d.lodMid = 13;
+    setVertexAo(d.vertexAo);
+    this.renderer.shadowMap.enabled = d.shadows;
+    this.weather.applyVisualDebug({
+      clouds: d.clouds,
+      cloudShadows: d.cloudShadows,
+      particles: d.particles,
+      lightning: d.lightning,
+      leafSway: d.leafSway,
+      specular: d.specular,
+      specStrength: d.specStrength,
+      fog: d.fog,
+    });
+    this.birds.group.visible = d.birds;
+    this.ambiance.group.visible = d.ambiance;
+    this.audio.applyMix({
+      master: d.master,
+      sfx: d.sfx,
+      amb: d.amb,
+      rain: d.rain,
+      wind: d.wind,
+      thunder: d.thunder,
+      reverb: d.reverb,
+      mute: d.mute,
+    });
+    const vr = d.viewRadius ?? 16;
+    const lf = d.lodFull ?? 7;
+    const lm = d.lodMid ?? 13;
+    this.world.setViewSettings(vr, lf, lm);
+    this.weather.setFogViewBlocks(vr * 16);
+    const far = vr * 16 * 1.45 + 80;
+    if (Math.abs(this.camera.far - far) > 1) {
+      this.camera.far = far;
+      this.camera.updateProjectionMatrix();
+    }
+    const sh = this.sun.shadow;
+    if (sh) sh.intensity = (this.dayNight.state.dayFactor > 0.45 ? 0.84 : 0.94) * d.shadowStrength;
   }
 
   private toggleCrafting(): void {
@@ -2027,6 +2212,25 @@ export class GameEngine {
     if (this.playing || this.animals.count > 0) {
       this.animals.update(dt, this.world, this.player, this.portals);
     }
+    if (this.playing || this.cats.count > 0) {
+      const held = this.survival.selectedSlot?.id ?? null;
+      this.cats.update(
+        dt,
+        this.world,
+        this.player,
+        {
+          findPrey: (x, z, r) =>
+            this.animals.nearestSmall(x, z, r) ?? this.caterpillars.nearest(x, z, r),
+          findHostile: (x, z, r) => this.hostiles.nearest(x, z, r),
+          batDrop: (x, y, z, r, vx, vz) => this.itemDrops.batNear(x, y, z, r, vx, vz),
+          spawnGift: (id, x, y, z) => this.itemDrops.spawn(id, x, y, z),
+          dayFactor: this.dayNight?.state.dayFactor ?? 1,
+          holdingTreat: isCatTreat(held),
+        },
+        this.portals,
+      );
+      if (this.cats.consumeMeows()) this.audio.meow();
+    }
 
     // Day/night first so hostiles know sun state
     const dn = this.dayNight.update(
@@ -2128,6 +2332,7 @@ export class GameEngine {
       this.player.y,
       this.player.z,
       this.player.submerged,
+      this.world.isColdPrecip(this.player.x, this.player.y, this.player.z),
     );
     {
       const w = this.weather.sample;
@@ -2211,6 +2416,7 @@ export class GameEngine {
         submerged: this.player.submerged,
         dayFactor: dn.dayFactor,
         rain: w.rain,
+        snowing: w.snow,
         windSpeed: w.windSpeed,
         surface: this.footSurface(),
         skyOpen: this.audioSky,
@@ -2229,6 +2435,7 @@ export class GameEngine {
     this.prevHealth = this.survival.health;
 
     this.dayNight.finalizeKeyLight();
+    this.applyDebug();
 
     // Water FX: reflection / refraction RTs + underwater state
     this.waterFX.update(dt);
@@ -2263,7 +2470,10 @@ export class GameEngine {
       this._air < 4.95 ||
       this.eatJuice > 0.02 ||
       this.swingJuice > 0.02;
-    if (this.hudAccum >= (juiceHud ? 0.05 : 0.25)) {
+    const booting =
+      this.world.getRingMeshProgress(this.player.x, this.player.z, 6).progress <
+      0.9;
+    if (this.hudAccum >= (juiceHud || booting ? 0.05 : 0.25)) {
       this.fps = Math.round(this.frames / this.hudAccum);
       this.frames = 0;
       this.hudAccum = 0;
@@ -2421,6 +2631,16 @@ export class GameEngine {
     );
     this.viewHand.setVisible(this.playing && !this.survival.dead);
     this.renderer.render(this.scene, this.camera);
+    this.volumetrics.render(
+      this.renderer,
+      this.camera,
+      this.dayNight.state,
+      this.weather.sample.gloom,
+      this.weather.sample.storm,
+      this.player.submerged,
+      this.debug.volumetrics,
+      this.debug.volStrength,
+    );
     this.waterFX.renderUnderwaterOverlay(this.renderer);
     this.renderPlayerPreview(dt);
   }
@@ -2601,6 +2821,7 @@ export class GameEngine {
     const pops = [
       ...this.hostiles.consumeDeaths(),
       ...this.animals.consumeDeaths(),
+      ...this.cats.consumeDeaths(),
       ...this.caterpillars.consumeDeaths(),
     ];
     for (const p of pops) {
@@ -2845,6 +3066,7 @@ export class GameEngine {
         z: this.player.z,
       },
       chunkGen: this.world.getQueueStats(),
+      load: this.world.getRingMeshProgress(this.player.x, this.player.z, 6),
       target: this.target,
       isTouch: this.isTouch,
       caterpillars: stats.alive,
@@ -2855,6 +3077,7 @@ export class GameEngine {
       slenderNearby: hs.slender > 0,
       weather: w.kind,
       rain: w.rain,
+      snow: w.snow,
       dayPhase: this.dayNight.state.phase,
       isDay: this.dayNight.state.dayFactor > 0.45,
       biome: this.world.getBiomeLabel(this.player.x, this.player.z),
@@ -2904,6 +3127,8 @@ export class GameEngine {
         },
       })),
       freeCraft: this.survival.freeCraft,
+      debugOpen: this.debugOpen,
+      debug: this.debug,
       cursor: this.survival.cursor
         ? { ...this.survival.cursor }
         : null,

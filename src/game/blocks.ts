@@ -91,6 +91,18 @@ export const Block = {
   PORTAL: 98,
   JACARANDA_LEAVES: 99,
   LAVENDER_TALL: 100,
+  REDWOOD_WOOD: 101,
+  REDWOOD_LEAVES: 102,
+  JUNGLE_WOOD: 103,
+  JUNGLE_LEAVES: 104,
+  ORCHID: 105,
+  JUNGLE_FERN: 106,
+  MYCELIUM: 107,
+  MUSHROOM_STEM: 108,
+  MUSHROOM_CAP_RED: 109,
+  MUSHROOM_CAP_CYAN: 110,
+  GLOWSHROOM: 111,
+  TOADSTOOL: 112,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
@@ -109,10 +121,10 @@ export type BlockDef = {
   shape?: BlockShape;
 };
 
-/** Atlas is 8 columns × 9 rows of 16px tiles */
+/** Atlas is 8 columns × 11 rows of 16px tiles */
 export const TILE_SIZE = 16;
 export const ATLAS_COLS = 8;
-export const ATLAS_ROWS = 9;
+export const ATLAS_ROWS = 11;
 /** Column count — tile index is `col + row * ATLAS_TILES` */
 export const ATLAS_TILES = 8;
 
@@ -557,6 +569,74 @@ export const BLOCKS: Record<number, BlockDef> = {
     color: "#b878d0",
   },
   [Block.LAVENDER_TALL]: plant(Block.LAVENDER_TALL, "Tall Lavender", 67, "#b080d8"),
+  [Block.REDWOOD_WOOD]: {
+    id: Block.REDWOOD_WOOD,
+    name: "Redwood Log",
+    solid: true,
+    transparent: false,
+    tiles: [68, 68, 69],
+    color: "#6a3424",
+  },
+  [Block.REDWOOD_LEAVES]: {
+    id: Block.REDWOOD_LEAVES,
+    name: "Redwood Leaves",
+    solid: true,
+    transparent: true,
+    tiles: [70, 70, 70],
+    color: "#2a5a32",
+  },
+  [Block.JUNGLE_WOOD]: {
+    id: Block.JUNGLE_WOOD,
+    name: "Jungle Log",
+    solid: true,
+    transparent: false,
+    tiles: [71, 71, 72],
+    color: "#4a3020",
+  },
+  [Block.JUNGLE_LEAVES]: {
+    id: Block.JUNGLE_LEAVES,
+    name: "Jungle Leaves",
+    solid: true,
+    transparent: true,
+    tiles: [73, 73, 73],
+    color: "#1e7a38",
+  },
+  [Block.ORCHID]: plant(Block.ORCHID, "Orchid", 74, "#d060c8"),
+  [Block.JUNGLE_FERN]: plant(Block.JUNGLE_FERN, "Jungle Fern", 75, "#2a8a40"),
+  [Block.MYCELIUM]: {
+    id: Block.MYCELIUM,
+    name: "Mycelium",
+    solid: true,
+    transparent: false,
+    tiles: [76, 2, 77],
+    color: "#6a5478",
+  },
+  [Block.MUSHROOM_STEM]: {
+    id: Block.MUSHROOM_STEM,
+    name: "Mushroom Stem",
+    solid: true,
+    transparent: false,
+    tiles: [78, 78, 78],
+    color: "#d8d0c4",
+  },
+  [Block.MUSHROOM_CAP_RED]: {
+    id: Block.MUSHROOM_CAP_RED,
+    name: "Red Mushroom Cap",
+    solid: true,
+    transparent: false,
+    tiles: [79, 79, 79],
+    color: "#c43038",
+  },
+  [Block.MUSHROOM_CAP_CYAN]: {
+    id: Block.MUSHROOM_CAP_CYAN,
+    name: "Glowcap",
+    solid: true,
+    transparent: false,
+    tiles: [80, 80, 80],
+    color: "#38c8c0",
+  },
+  [Block.GLOWSHROOM]: plant(Block.GLOWSHROOM, "Glowshroom", 81, "#48e0d0"),
+  [Block.TOADSTOOL]: plant(Block.TOADSTOOL, "Toadstool", 82, "#d84850"),
 };
 
 /** Hotbar / creative placeables (includes a selection of flora) */
@@ -568,9 +648,18 @@ export const PLACEABLE: BlockId[] = [
   Block.WOOD,
   Block.BIRCH_WOOD,
   Block.SPRUCE_WOOD,
+  Block.REDWOOD_WOOD,
+  Block.JUNGLE_WOOD,
   Block.LEAVES,
   Block.BIRCH_LEAVES,
   Block.SPRUCE_LEAVES,
+  Block.JACARANDA_LEAVES,
+  Block.REDWOOD_LEAVES,
+  Block.JUNGLE_LEAVES,
+  Block.MYCELIUM,
+  Block.MUSHROOM_STEM,
+  Block.MUSHROOM_CAP_RED,
+  Block.MUSHROOM_CAP_CYAN,
   Block.PUMPKIN,
   Block.GRAVEL,
   Block.CLAY,
@@ -584,6 +673,8 @@ export const PLACEABLE: BlockId[] = [
   Block.SNOW_GRASS,
   Block.SHORT_GRASS,
   Block.FERN,
+  Block.JUNGLE_FERN,
+  Block.ORCHID,
   Block.POPPY,
   Block.DANDELION,
   Block.CORNFLOWER,
@@ -598,6 +689,8 @@ export const PLACEABLE: BlockId[] = [
   Block.ROSE,
   Block.MUSHROOM_RED,
   Block.MUSHROOM_BROWN,
+  Block.GLOWSHROOM,
+  Block.TOADSTOOL,
   Block.CATTAIL,
   Block.TORCH,
   Block.COAL_ORE,
@@ -916,7 +1009,13 @@ export function isCrossBlock(id: number): boolean {
 }
 
 export function isLog(id: number): boolean {
-  return id === Block.WOOD || id === Block.BIRCH_WOOD || id === Block.SPRUCE_WOOD;
+  return (
+    id === Block.WOOD ||
+    id === Block.BIRCH_WOOD ||
+    id === Block.SPRUCE_WOOD ||
+    id === Block.REDWOOD_WOOD ||
+    id === Block.JUNGLE_WOOD
+  );
 }
 
 export function isLeaves(id: number): boolean {
@@ -924,7 +1023,9 @@ export function isLeaves(id: number): boolean {
     id === Block.LEAVES ||
     id === Block.BIRCH_LEAVES ||
     id === Block.SPRUCE_LEAVES ||
-    id === Block.JACARANDA_LEAVES
+    id === Block.JACARANDA_LEAVES ||
+    id === Block.REDWOOD_LEAVES ||
+    id === Block.JUNGLE_LEAVES
   );
 }
 
@@ -950,6 +1051,8 @@ export function lightEmission(id: number): number {
   if (id === Block.FURNACE_LIT) return 13;
   if (id === Block.PORTAL) return 12;
   if (id === Block.ARCANE) return 8;
+  if (id === Block.MUSHROOM_CAP_CYAN) return 8;
+  if (id === Block.GLOWSHROOM) return 7;
   return 0;
 }
 

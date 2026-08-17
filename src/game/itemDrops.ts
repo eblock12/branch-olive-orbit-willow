@@ -143,6 +143,24 @@ export class ItemDropSystem {
     });
   }
 
+  /** Bat a nearby drop — cats knocking things off surfaces. */
+  batNear(x: number, y: number, z: number, r: number, vx: number, vz: number): boolean {
+    let best: Drop | null = null;
+    let bestD = r;
+    for (const d of this.drops) {
+      const dist = Math.hypot(d.x - x, d.z - z);
+      if (dist < bestD && Math.abs(d.y - y) < 1.6) {
+        bestD = dist;
+        best = d;
+      }
+    }
+    if (!best) return false;
+    best.vx += vx;
+    best.vz += vz;
+    best.vy += 2.4;
+    return true;
+  }
+
   private geoFor(id: BlockId): THREE.BufferGeometry {
     let g = this.geoCache.get(id);
     if (!g) {

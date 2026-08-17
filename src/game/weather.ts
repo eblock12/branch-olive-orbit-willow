@@ -42,6 +42,7 @@ export type WeatherSample = {
   windSpeed: number;
   gloom: number;
   stormProximity: number;
+  snow: boolean;
 };
 
 type RainDrop = {
@@ -49,6 +50,7 @@ type RainDrop = {
   vx: number; vy: number; vz: number;
   life: number; maxLife: number;
   bouncing: boolean; active: boolean;
+  phase: number;
 };
 
 type Splash = {
@@ -103,23 +105,61 @@ function stormWindFalloff(dist: number, radius: number): number {
   return t * t * 0.35 + t * t * t * t * 0.65;
 }
 
+function makeSnowFlakeTexture(): THREE.CanvasTexture {
+  const s = 16;
+  const c = document.createElement("canvas");
+  c.width = s;
+  c.height = s;
+  const g = c.getContext("2d")!;
+  g.clearRect(0, 0, s, s);
+  g.fillStyle = "#ffffff";
+  g.strokeStyle = "#ffffff";
+  g.lineWidth = 1.4;
+  g.lineCap = "round";
+  g.beginPath();
+  g.moveTo(8, 2);
+  g.lineTo(8, 14);
+  g.moveTo(2, 8);
+  g.lineTo(14, 8);
+  g.moveTo(3.5, 3.5);
+  g.lineTo(12.5, 12.5);
+  g.moveTo(12.5, 3.5);
+  g.lineTo(3.5, 12.5);
+  g.stroke();
+  g.beginPath();
+  g.arc(8, 8, 1.6, 0, Math.PI * 2);
+  g.fill();
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 /** Shared uniforms for color + depth wind shaders */
 const windUniforms = {
   uTime: { value: 0 },
   uWind: { value: new THREE.Vector2(0, 0) },
   uSkyMul: { value: 1 },
+  specMap: { value: null as THREE.Texture | null },
+  uSpecLight: { value: new THREE.Vector3(0.2, 0.95, 0.2) },
+  uWet: { value: 0 },
+  uSpecScale: { value: 1 },
 };
 
 const WIND_VERT_DECL = /* glsl */ `
 attribute float wind;
 attribute vec2 light;
 varying vec2 vLight;
+varying vec3 vViewLight;
 uniform float uTime;
 uniform vec2 uWind;
+uniform vec3 uSpecLight;
 `;
 
 const WIND_VERT_DISPLACE = /* glsl */ `
 vLight = light;
+vViewLight = normalize((viewMatrix * vec4(uSpecLight, 0.0)).xyz);
 if (wind > 0.001) {
   float wLen = length(uWind);
   float amp = min(0.42, 0.022 + wLen * 0.085 + wLen * wLen * 0.004);
@@ -147,6 +187,10 @@ function injectWindIntoShader(shader: {
   shader.uniforms.uTime = windUniforms.uTime;
   shader.uniforms.uWind = windUniforms.uWind;
   shader.uniforms.uSkyMul = windUniforms.uSkyMul;
+  shader.uniforms.specMap = windUniforms.specMap;
+  shader.uniforms.uSpecLight = windUniforms.uSpecLight;
+  shader.uniforms.uWet = windUniforms.uWet;
+  shader.uniforms.uSpecScale = windUniforms.uSpecScale;
   if (!shader.vertexShader.includes("attribute float wind")) {
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
@@ -166,7 +210,11 @@ ${WIND_VERT_DISPLACE}`,
       "#include <common>",
       `#include <common>
 varying vec2 vLight;
+varying vec3 vViewLight;
 uniform float uSkyMul;
+uniform sampler2D specMap;
+uniform float uWet;
+uniform float uSpecScale;
 `,
     );
     shader.fragmentShader = shader.fragmentShader.replace(
@@ -175,6 +223,19 @@ uniform float uSkyMul;
 float att = 0.055 + cover * cover * 0.945;
 outgoingLight *= att;
 outgoingLight += outgoingLight * vec3(0.28, 0.1, 0.0) * vLight.x * (1.0 - vLight.y * uSkyMul);
+#ifdef USE_MAP
+  vec3 specTex = texture2D(specMap, vMapUv).rgb;
+  float specM = specTex.r + specTex.g * uWet;
+  if (specM > 0.02) {
+    vec3 n = normalize(normal);
+    vec3 viewDir = normalize(vViewPosition);
+    vec3 h = normalize(viewDir + normalize(vViewLight));
+    float nh = max(dot(n, h), 0.0);
+    float power = mix(12.0, 56.0, specM);
+    float spec = pow(nh, power) * specM * uSpecScale;
+    outgoingLight += vec3(0.92, 0.95, 1.0) * spec * (0.28 + cover * 0.72);
+  }
+#endif
 #include <opaque_fragment>`,
     );
   }
@@ -185,11 +246,18 @@ outgoingLight += outgoingLight * vec3(0.28, 0.1, 0.0) * vLight.x * (1.0 - vLight
  * Color pass + mesh.customDepthMaterial share the same uniforms so
  * shadow maps track swaying leaves without breaking USE_SHADOWMAP.
  */
-export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
+export function installWindOnMaterial(
+  material: THREE.MeshLambertMaterial,
+  specMap?: THREE.Texture | null,
+): {
   update: (time: number, windX: number, windZ: number) => void;
   setSkyMul: (v: number) => void;
+  setSpecLight: (x: number, y: number, z: number) => void;
+  setWet: (v: number) => void;
+  setSpecScale: (v: number) => void;
 } {
-  material.customProgramCacheKey = () => "block-leaf-wind-v8-skylight";
+  if (specMap) windUniforms.specMap.value = specMap;
+  material.customProgramCacheKey = () => "block-leaf-wind-v9-spec";
   material.onBeforeCompile = (shader) => {
     injectWindIntoShader(shader);
   };
@@ -199,7 +267,7 @@ export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
     depthPacking: THREE.RGBADepthPacking,
     alphaTest: material.alphaTest > 0 ? material.alphaTest : 0.5,
   });
-  depthMat.customProgramCacheKey = () => "block-leaf-wind-depth-v8-skylight";
+  depthMat.customProgramCacheKey = () => "block-leaf-wind-depth-v9-spec";
   depthMat.onBeforeCompile = (shader) => {
     injectWindIntoShader(shader);
   };
@@ -214,6 +282,15 @@ export function installWindOnMaterial(material: THREE.MeshLambertMaterial): {
     },
     setSkyMul(v: number) {
       windUniforms.uSkyMul.value = v;
+    },
+    setSpecLight(x: number, y: number, z: number) {
+      windUniforms.uSpecLight.value.set(x, y, z);
+    },
+    setWet(v: number) {
+      windUniforms.uWet.value = v;
+    },
+    setSpecScale(v: number) {
+      windUniforms.uSpecScale.value = v;
     },
   };
 }
@@ -235,6 +312,11 @@ export class WeatherSystem {
   private rainPositions: Float32Array;
   private rainGeom: THREE.BufferGeometry;
   private rainLines: THREE.LineSegments;
+  private snowPositions: Float32Array;
+  private snowGeom: THREE.BufferGeometry;
+  private snowPoints: THREE.Points;
+  private snowTex: THREE.CanvasTexture;
+  private snowing = false;
   private splashPositions: Float32Array;
   private splashGeom: THREE.BufferGeometry;
   private splashPoints: THREE.Points;
@@ -264,12 +346,19 @@ export class WeatherSystem {
 
   private lastSample: WeatherSample = {
     kind: "clear", intensity: 0, rain: 0, storm: 0, cloud: 0.2,
-    windX: 0.25, windZ: 0.12, windSpeed: 0.28, gloom: 0, stormProximity: 0,
+    windX: 0.25, windZ: 0.12, windSpeed: 0.28, gloom: 0, stormProximity: 0, snow: false,
   };
   private windHook: {
     update: (t: number, x: number, z: number) => void;
     setSkyMul: (v: number) => void;
+    setSpecLight: (x: number, y: number, z: number) => void;
+    setWet: (v: number) => void;
+    setSpecScale: (v: number) => void;
   };
+  private fxEnabled = true;
+  private lightningEnabled = true;
+  private fogEnabled = true;
+  private fogViewBlocks = 256;
   /** Fired when lightning hits (distance in blocks from player) */
   onLightning: ((info: {
     dist: number;
@@ -288,10 +377,11 @@ export class WeatherSystem {
     fog: THREE.Fog,
     blockMaterial: THREE.MeshLambertMaterial,
     seed = 1337,
+    specMap?: THREE.Texture | null,
   ) {
     this.scene = scene; this.sun = sun; this.ambient = ambient;
     this.hemi = hemi; this.fog = fog; this.seed = seed;
-    this.windHook = installWindOnMaterial(blockMaterial);
+    this.windHook = installWindOnMaterial(blockMaterial, specMap);
 
     this.flashMain = new THREE.DirectionalLight(0xdde8ff, 0);
     this.flashMain.position.set(20, 80, -30);
@@ -321,7 +411,7 @@ export class WeatherSystem {
         transparent: true,
         opacity: 0.45,
         depthWrite: false,
-        blending: THREE.AdditiveBlending,
+        fog: true,
       }),
     );
     this.rainLines.frustumCulled = false;
@@ -339,8 +429,35 @@ export class WeatherSystem {
         maxLife: 1,
         bouncing: false,
         active: false,
+        phase: 0,
       });
     }
+
+    this.snowTex = makeSnowFlakeTexture();
+    this.snowPositions = new Float32Array(this.maxRain * 3);
+    this.snowGeom = new THREE.BufferGeometry();
+    this.snowGeom.setAttribute(
+      "position",
+      new THREE.BufferAttribute(this.snowPositions, 3),
+    );
+    this.snowPoints = new THREE.Points(
+      this.snowGeom,
+      new THREE.PointsMaterial({
+        map: this.snowTex,
+        color: 0xffffff,
+        size: 0.14,
+        transparent: true,
+        opacity: 0.88,
+        depthWrite: false,
+        sizeAttenuation: true,
+        fog: true,
+        alphaTest: 0.08,
+      }),
+    );
+    this.snowPoints.frustumCulled = false;
+    this.snowPoints.renderOrder = 1;
+    this.snowPoints.visible = false;
+    this.group.add(this.snowPoints);
 
     this.splashPositions = new Float32Array(this.maxSplash * 3);
     this.splashGeom = new THREE.BufferGeometry();
@@ -382,11 +499,36 @@ export class WeatherSystem {
 
   get sample(): WeatherSample { return this.lastSample; }
 
+  applyVisualDebug(opts: {
+    clouds: boolean;
+    cloudShadows: boolean;
+    particles: boolean;
+    lightning: boolean;
+    leafSway: boolean;
+    specular: boolean;
+    specStrength: number;
+    fog: boolean;
+  }): void {
+    this.cloudLayer.group.visible = opts.clouds;
+    this.cloudLayer.setCastShadow(opts.cloudShadows);
+    this.fxEnabled = opts.particles;
+    this.lightningEnabled = opts.lightning;
+    this.windHook.setSpecScale(opts.specular ? opts.specStrength : 0);
+    if (!opts.leafSway) this.windHook.update(this.time, 0, 0);
+    this.fogEnabled = opts.fog;
+  }
+
+  setFogViewBlocks(blocks: number): void {
+    this.fogViewBlocks = Math.max(80, blocks);
+  }
+
   setDayNight(dn: DayNightSample): void {
     this.lastDayNight = dn;
     this.baseSunIntensity = Math.max(0.05, dn.sunIntensity);
     this.baseAmbientIntensity = dn.ambientIntensity;
     this.baseHemiIntensity = dn.hemiIntensity;
+    const lit = dn.dayFactor >= dn.nightFactor ? dn.sunDir : dn.moonDir;
+    this.windHook.setSpecLight(lit.x, lit.y, lit.z);
   }
 
   private fairCloudDeckY(): number {
@@ -443,8 +585,8 @@ export class WeatherSystem {
    */
   private minCenterDist(a: WeatherCell, b: WeatherCell): number {
     let pad = 28;
-    if (a.kind === "storm" || b.kind === "storm") pad = 48;
-    if (a.kind === "storm" && b.kind === "storm") pad = 72;
+    if (a.kind === "storm" || b.kind === "storm") pad = 64;
+    if (a.kind === "storm" && b.kind === "storm") pad = 120;
     return a.radius * 0.9 + b.radius * 0.9 + pad;
   }
 
@@ -455,7 +597,7 @@ export class WeatherSystem {
   /** Typical exclusion radius used for Poisson min-distance (kind-aware). */
   private poissonMinDistFor(kind: WeatherKind, radius: number): number {
     // Keep large storm decks from overlapping (radius ~64–96)
-    if (kind === "storm") return radius * 2.1 + 80;
+    if (kind === "storm") return radius * 1.85 + 140;
     if (kind === "rain") return radius * 1.7 + 40;
     if (kind === "overcast") return radius * 1.55 + 32;
     return radius + 20;
@@ -571,42 +713,35 @@ export class WeatherSystem {
     radius: number;
     intensity: number;
   } {
-    // Storm radius: world units. Chunk = 16 → diameter 8 chunks ≈ radius 64.
-    // Target avg ~8–10 chunks across (radius 64–80), min solid 8 chunks (64).
-    const stormRadius = () => 64 + Math.random() * 32; // 64–96 → ~8–12 chunks ø
-    // Prefer a couple of storms first, then mix rain / overcast
-    if (slot < 2 && stormCount < 2) {
+    // Storms: ~24–36 chunks across so one deck can fill the whole view.
+    // 24 chunks * 16 = 384 blocks → radius 192 covers the view from center.
+    const stormRadius = () => 200 + Math.random() * 80; // 200–280 → ~25–35 chunks ø
+    // At most one of these; extras are rain / overcast on the fringe
+    if (slot < 1 && stormCount < 1) {
       return {
         kind: "storm",
         radius: stormRadius(),
-        intensity: 0.82 + Math.random() * 0.18,
+        intensity: 0.84 + Math.random() * 0.16,
       };
     }
     const roll = Math.random();
-    if (roll < 0.35) {
+    if (roll < 0.4) {
       return {
         kind: "rain",
-        radius: 55 + Math.random() * 40,
+        radius: 70 + Math.random() * 50,
         intensity: 0.55 + Math.random() * 0.4,
       };
     }
-    if (roll < 0.7) {
+    if (roll < 0.8) {
       return {
         kind: "overcast",
-        radius: 70 + Math.random() * 45,
+        radius: 80 + Math.random() * 50,
         intensity: 0.45 + Math.random() * 0.35,
-      };
-    }
-    if (stormCount < 2 && roll < 0.85) {
-      return {
-        kind: "storm",
-        radius: stormRadius(),
-        intensity: 0.78 + Math.random() * 0.22,
       };
     }
     return {
       kind: "rain",
-      radius: 50 + Math.random() * 35,
+      radius: 60 + Math.random() * 40,
       intensity: 0.5 + Math.random() * 0.4,
     };
   }
@@ -614,39 +749,32 @@ export class WeatherSystem {
   /** Initial Poisson layout around a world center. */
   private seedWeatherFromPoisson(cx: number, cz: number): void {
     this.cells = [];
-    // minDist ~200 keeps large storm cores from overlapping at seed
-    const pts = this.poissonDiskAnnulus(cx, cz, 50, 340, 210, 6);
-    let storms = 0;
-    let i = 0;
+    // One continent-scale storm sitting over/near the player so the
+    // first day is actually *in* weather, not watching a distant cell.
+    const stormR = 210 + Math.random() * 70;
+    const stormAng = Math.random() * Math.PI * 2;
+    const stormD = 30 + Math.random() * 90;
+    this.cells.push(
+      this.makeCell(
+        cx + Math.cos(stormAng) * stormD,
+        cz + Math.sin(stormAng) * stormD,
+        "storm",
+        0.88 + Math.random() * 0.12,
+        stormR,
+      ),
+    );
+    // Fringe rain / overcast well outside the mega-deck
+    const pts = this.poissonDiskAnnulus(cx, cz, 280, 520, 160, 5);
+    let i = 1;
     for (const p of pts) {
-      const spec = this.pickKindForSlot(i, storms);
-      if (spec.kind === "storm") storms++;
-      // Validate with real radius/kind (Poisson used conservative minDist)
-      if (!this.canPlaceSystem(p.x, p.z, spec.radius, spec.kind)) {
-        // Try a smaller rain system in the same slot
-        const fallbackR = 50 + Math.random() * 30;
-        if (this.canPlaceSystem(p.x, p.z, fallbackR, "rain")) {
-          this.cells.push(
-            this.makeCell(p.x, p.z, "rain", 0.6 + Math.random() * 0.3, fallbackR),
-          );
-        }
-        i++;
-        continue;
-      }
+      const spec = this.pickKindForSlot(i, 1);
+      if (spec.kind === "storm") continue;
+      if (!this.canPlaceSystem(p.x, p.z, spec.radius, spec.kind)) continue;
       this.cells.push(
         this.makeCell(p.x, p.z, spec.kind, spec.intensity, spec.radius),
       );
       i++;
-    }
-    // Guarantee at least one storm if Poisson was sparse
-    if (!this.cells.some((c) => c.kind === "storm")) {
-      const extra = this.poissonDiskAnnulus(cx, cz, 80, 280, 240, 3);
-      const p = extra[0];
-      if (p) {
-        this.cells.push(
-          this.makeCell(p.x, p.z, "storm", 0.9, 72 + Math.random() * 24),
-        );
-      }
+      if (this.cells.length >= 4) break;
     }
     this.separateCellsHard();
   }
@@ -664,7 +792,7 @@ export class WeatherSystem {
       const storms = this.cells.filter(
         (c) => c.kind === "storm" && c.id !== ignoreId,
       ).length;
-      if (storms >= 2) return false;
+      if (storms >= 1) return false;
     }
     const probe: WeatherCell = {
       id: -1,
@@ -855,16 +983,16 @@ export class WeatherSystem {
     // Storms drift slowly so a large system can sit over the player for minutes
     const speed =
       kind === "storm"
-        ? 0.2 + Math.random() * 0.16
+        ? 0.045 + Math.random() * 0.04
         : kind === "rain"
-          ? 0.35 + Math.random() * 0.25
-          : 0.4 + Math.random() * 0.35;
+          ? 0.28 + Math.random() * 0.2
+          : 0.35 + Math.random() * 0.3;
     const life =
       kind === "storm"
-        ? 420 + Math.random() * 420 // 7–14 minutes
+        ? 1400 + Math.random() * 900 // ~23–38 min — longer than a 15 min day
         : kind === "rain"
-          ? 240 + Math.random() * 240
-          : 120 + Math.random() * 180;
+          ? 280 + Math.random() * 260
+          : 140 + Math.random() * 200;
     return {
       id: nextCellId++,
       x,
@@ -990,6 +1118,7 @@ export class WeatherSystem {
     return {
       kind, intensity, rain, storm, cloud, windX, windZ, windSpeed, gloom,
       stormProximity: Math.min(1, stormProximity),
+      snow: false,
     };
   }
 
@@ -1000,6 +1129,7 @@ export class WeatherSystem {
     py: number,
     pz: number,
     underwater = false,
+    snowy = false,
   ): void {
     this.time += dt;
     this.baseWindX = 0.22 + Math.sin(this.time * 0.05) * 0.12;
@@ -1014,7 +1144,7 @@ export class WeatherSystem {
         // Rare, gentle wander toward a new target (storms: very infrequent)
         const interval =
           cell.kind === "storm"
-            ? 40 + Math.random() * 70
+            ? 80 + Math.random() * 140
             : cell.kind === "rain"
               ? 22 + Math.random() * 35
               : 14 + Math.random() * 22;
@@ -1022,7 +1152,7 @@ export class WeatherSystem {
         const windAng = Math.atan2(this.baseWindZ, this.baseWindX);
         const wander =
           cell.kind === "storm"
-            ? 0.35 // ±~20°
+            ? 0.22
             : cell.kind === "rain"
               ? 0.7
               : 1.0;
@@ -1032,7 +1162,7 @@ export class WeatherSystem {
       // Max turn rate (rad/s) — storms turn like freighters
       const maxTurn =
         cell.kind === "storm"
-          ? 0.035 // ~2°/s
+          ? 0.012
           : cell.kind === "rain"
             ? 0.08
             : 0.12;
@@ -1046,13 +1176,13 @@ export class WeatherSystem {
       // Soft speed toward cruise
       const cruise =
         cell.kind === "storm"
-          ? 0.28
+          ? 0.065
           : cell.kind === "rain"
             ? 0.5
             : 0.55;
       const maxSpd =
-        cell.kind === "storm" ? 0.42 : cell.kind === "rain" ? 0.75 : 1.0;
-      const minSpd = cell.kind === "storm" ? 0.14 : 0.2;
+        cell.kind === "storm" ? 0.11 : cell.kind === "rain" ? 0.75 : 1.0;
+      const minSpd = cell.kind === "storm" ? 0.035 : 0.2;
       cell.speed += (cruise - cell.speed) * Math.min(1, 0.15 * dt);
       cell.speed = Math.max(minSpd, Math.min(maxSpd, cell.speed));
 
@@ -1065,7 +1195,7 @@ export class WeatherSystem {
         dz = cell.z - pz,
         dist = Math.hypot(dx, dz);
       // Recycle far systems via Poisson so they re-enter on a clean slot
-      const recycleAt = Math.max(220, cell.radius * 2.8);
+      const recycleAt = Math.max(480, cell.radius * 2.4 + 200);
       if (dist > recycleAt) {
         const pos = this.placeFromPoisson(
           px,
@@ -1126,11 +1256,20 @@ export class WeatherSystem {
     }
 
     const local = this.sampleAt(px, pz);
+    if (snowy !== this.snowing) {
+      for (const d of this.rain) d.active = false;
+      for (const s of this.splashes) s.active = false;
+      this.snowing = snowy;
+    }
+    local.snow = snowy && local.rain > 0.04;
     this.lastSample = local;
     this.updateFlashLights(dt, px, py, pz);
     this.windHook.update(this.time, local.windX, local.windZ);
     const day = this.lastDayNight?.dayFactor ?? 1;
     this.windHook.setSkyMul(Math.max(0, Math.min(1, day)));
+    this.windHook.setWet(
+      Math.max(0, Math.min(1, local.rain * 0.85 + local.storm * 0.35)),
+    );
     this.applyAtmosphere(local);
     this.cloudLayer.update(
       dt,
@@ -1142,7 +1281,7 @@ export class WeatherSystem {
       this.flashAmount,
       this.lastDayNight?.dayFactor ?? 1,
     );
-    this.updateRain(dt, world, px, py, pz, local, underwater);
+    this.updateRain(dt, world, px, py, pz, local, underwater || !this.fxEnabled);
     this.updateBolts(dt);
   }
 
@@ -1345,12 +1484,16 @@ export class WeatherSystem {
     if (f > 0) this.tmpFog.lerp(FOG_FLASH, Math.min(0.35, f * 0.4));
     this.fog.color.copy(this.tmpFog);
     const aerosolFog = totalMie * 22 + humidAerosol * 18;
-    this.fog.near = Math.max(18, 72 - peak * 22 - aerosolFog * 0.28 + f * 7);
-    // Match ~16-chunk view (256 blocks): soft fade just before the horizon
+    const reach = this.fogViewBlocks;
+    this.fog.near = Math.max(18, reach * 0.28 - peak * 22 - aerosolFog * 0.28 + f * 7);
     this.fog.far = Math.max(
       this.fog.near + 60,
-      290 - peak * 70 - aerosolFog * 1.2 + f * 28,
+      reach * 1.12 - peak * 70 - aerosolFog * 1.2 + f * 28,
     );
+    if (!this.fogEnabled) {
+      this.fog.near = Math.max(800, reach * 3);
+      this.fog.far = Math.max(2400, reach * 8);
+    }
 
 
 
@@ -1449,10 +1592,17 @@ export class WeatherSystem {
     if (underwater) {
       this.rainLines.visible = false;
       this.splashPoints.visible = false;
+      this.snowPoints.visible = false;
       for (const d of this.rain) d.active = false;
       for (const s of this.splashes) s.active = false;
       return;
     }
+
+    if (this.snowing) {
+      this.updateSnow(dt, world, px, py, pz, local);
+      return;
+    }
+    this.snowPoints.visible = false;
 
     const rainAmt = local.rain;
     const storm = local.storm;
@@ -1500,6 +1650,7 @@ export class WeatherSystem {
       drop.maxLife = drop.life;
       drop.bouncing = false;
       drop.active = true;
+      drop.phase = Math.random() * Math.PI * 2;
     }
 
     let ri = 0;
@@ -1579,7 +1730,16 @@ export class WeatherSystem {
     this.rainGeom.attributes.position!.needsUpdate = true;
     this.rainLines.visible = ri > 0 && rainAmt > 0.03;
     const mat = this.rainLines.material as THREE.LineBasicMaterial;
-    mat.opacity = 0.28 + Math.min(0.55, rainAmt * 0.35 + storm * 0.4);
+    const night = this.lastDayNight?.nightFactor ?? 0;
+    const day = 1 - night;
+    // Additive-looking ice-blue by day; slate and quieter after dark
+    mat.color.setRGB(
+      THREE.MathUtils.lerp(0.29, 0.72, day),
+      THREE.MathUtils.lerp(0.34, 0.83, day),
+      THREE.MathUtils.lerp(0.40, 0.93, day),
+    );
+    const dayOp = 0.28 + Math.min(0.55, rainAmt * 0.35 + storm * 0.4);
+    mat.opacity = dayOp * (0.32 + day * 0.68);
 
     let si = 0;
     for (const sp of this.splashes) {
@@ -1602,6 +1762,104 @@ export class WeatherSystem {
     this.splashGeom.setDrawRange(0, si);
     this.splashGeom.attributes.position!.needsUpdate = true;
     this.splashPoints.visible = si > 0;
+    const splashMat = this.splashPoints.material as THREE.PointsMaterial;
+    splashMat.color.setRGB(
+      THREE.MathUtils.lerp(0.38, 0.85, day),
+      THREE.MathUtils.lerp(0.42, 0.91, day),
+      THREE.MathUtils.lerp(0.48, 0.96, day),
+    );
+    splashMat.opacity = (0.35 + Math.min(0.35, rainAmt * 0.2 + storm * 0.15)) * (0.4 + day * 0.6);
+  }
+
+  private updateSnow(
+    dt: number,
+    world: World,
+    px: number,
+    py: number,
+    pz: number,
+    local: WeatherSample,
+  ): void {
+    this.rainLines.visible = false;
+    this.splashPoints.visible = false;
+
+    const rainAmt = local.rain;
+    const storm = local.storm;
+    const density = Math.min(
+      1,
+      rainAmt * 0.5 + storm * 0.85 + rainAmt * storm * 0.35,
+    );
+    const want =
+      density > 0.04 ? Math.floor(this.maxRain * Math.min(0.7, density * 0.72)) : 0;
+    const windMul = 0.55 + local.windSpeed * 0.35 + storm * 0.2;
+    const spread = 20 + storm * 14 + rainAmt * 6;
+
+    let active = 0;
+    for (const d of this.rain) if (d.active) active++;
+    const spawnBudget = Math.min(
+      want - active,
+      10 + Math.floor(rainAmt * 18 + storm * 28),
+    );
+    for (let s = 0; s < spawnBudget; s++) {
+      const drop = this.rain.find((r) => !r.active);
+      if (!drop) break;
+      drop.x = px + (Math.random() - 0.5) * spread;
+      drop.z = pz + (Math.random() - 0.5) * spread;
+      const cloudCeil = this.fairCloudDeckY() - 8;
+      const top = Math.min(cloudCeil, py + 14 + storm * 4);
+      const bot = Math.min(top - 2, py + 4);
+      drop.y = bot + Math.random() * Math.max(1, top - bot);
+      drop.vx =
+        local.windX * windMul * 0.55 + (Math.random() - 0.5) * 0.35;
+      drop.vz =
+        local.windZ * windMul * 0.55 + (Math.random() - 0.5) * 0.35;
+      drop.vy = -1.15 - Math.random() * 1.1 - storm * 0.7;
+      drop.life = 3.2 + Math.random() * 2.8 + storm * 0.6;
+      drop.maxLife = drop.life;
+      drop.bouncing = false;
+      drop.active = true;
+      drop.phase = Math.random() * Math.PI * 2;
+    }
+
+    let si = 0;
+    for (const d of this.rain) {
+      if (!d.active) continue;
+      d.life -= dt;
+      if (d.life <= 0) {
+        d.active = false;
+        continue;
+      }
+      d.phase += dt * (1.6 + local.windSpeed * 0.4);
+      const flutter = Math.sin(d.phase) * 0.55;
+      const flutter2 = Math.cos(d.phase * 0.73 + 1.2) * 0.4;
+      d.vx += (local.windX * 0.45 + flutter * 0.9) * dt;
+      d.vz += (local.windZ * 0.45 + flutter2 * 0.9) * dt;
+      d.vx *= 1 - 0.35 * dt;
+      d.vz *= 1 - 0.35 * dt;
+      d.x += d.vx * dt;
+      d.y += d.vy * dt;
+      d.z += d.vz * dt;
+      const surface = world.getRainHitY(Math.floor(d.x), Math.floor(d.z));
+      if (d.y <= surface + 0.04) {
+        d.active = false;
+        continue;
+      }
+      if (d.y < py - 18 || Math.hypot(d.x - px, d.z - pz) > spread * 0.95) {
+        d.active = false;
+        continue;
+      }
+      this.snowPositions[si * 3] = d.x;
+      this.snowPositions[si * 3 + 1] = d.y;
+      this.snowPositions[si * 3 + 2] = d.z;
+      si++;
+    }
+    for (let i = si; i < this.maxRain; i++) this.snowPositions[i * 3 + 1] = -999;
+    this.snowGeom.setDrawRange(0, si);
+    this.snowGeom.attributes.position!.needsUpdate = true;
+    this.snowPoints.visible = si > 0 && rainAmt > 0.03;
+    const mat = this.snowPoints.material as THREE.PointsMaterial;
+    const night = this.lastDayNight?.nightFactor ?? 0;
+    mat.opacity = (0.55 + Math.min(0.3, rainAmt * 0.25)) * (0.55 + (1 - night) * 0.45);
+    mat.size = 0.12 + storm * 0.04;
   }
 
   private spawnSplash(
@@ -1628,6 +1886,7 @@ export class WeatherSystem {
   }
 
   private strike(cell: WeatherCell, world: World, px: number, py: number, pz: number): void {
+    if (!this.lightningEnabled) return;
     const coreR = Math.max(4, cell.radius * Math.min(0.4, cell.core));
     const spd = Math.hypot(cell.vx, cell.vz) || 1;
     let sx: number, sz: number;
@@ -1727,6 +1986,8 @@ export class WeatherSystem {
     this.group.remove(this.cloudLayer.group);
     this.cloudLayer.dispose();
     this.rainGeom.dispose(); (this.rainLines.material as THREE.Material).dispose();
+    this.snowGeom.dispose(); (this.snowPoints.material as THREE.Material).dispose();
+    this.snowTex.dispose();
     this.splashGeom.dispose(); (this.splashPoints.material as THREE.Material).dispose();
     this.scene.remove(this.group);
   }

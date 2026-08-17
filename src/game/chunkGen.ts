@@ -163,6 +163,268 @@ function isSolidId(id: number): boolean {
   return isSolid(id);
 }
 
+function setIfOpen(
+  blocks: Uint8Array,
+  lx: number,
+  y: number,
+  lz: number,
+  id: number,
+  overwriteLeaves = true,
+): void {
+  if (lx < 0 || lz < 0 || lx >= CHUNK_SIZE || lz >= CHUNK_SIZE) return;
+  if (y < 0 || y >= CHUNK_HEIGHT) return;
+  const i = index(lx, y, lz);
+  const cur = blocks[i]!;
+  if (cur === Block.AIR || (overwriteLeaves && isLeaves(cur))) {
+    blocks[i] = id;
+  }
+}
+
+function shouldPlaceFungus(
+  wx: number,
+  wz: number,
+  seed: number,
+  treeThreshold: number,
+): boolean {
+  return shouldPlaceTree(wx, wz, seed, treeThreshold);
+}
+
+function placeFungus(
+  blocks: Uint8Array,
+  ox: number,
+  oz: number,
+  height: number,
+  seed: number,
+  wx: number,
+  wz: number,
+): void {
+  const roll = hash2(wx, wz, seed + 71);
+  const glow = hash2(wx, wz, seed + 73) > 0.58;
+  const fat = roll > 0.78;
+  const trunkH = fat
+    ? 11 + Math.floor(hash2(wx, wz, seed + 74) * 6)
+    : 5 + Math.floor(hash2(wx, wz, seed + 74) * 7);
+  const capR = fat ? 4 + (roll > 0.9 ? 1 : 0) : 2 + (roll > 0.45 ? 1 : 0);
+  const stem = Block.MUSHROOM_STEM;
+  const cap = glow ? Block.MUSHROOM_CAP_CYAN : Block.MUSHROOM_CAP_RED;
+  const umbrella = hash2(wx, wz, seed + 76) > 0.4;
+
+  const stems: [number, number][] = fat
+    ? [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+      ]
+    : [[0, 0]];
+
+  for (const [dx, dz] of stems) {
+    for (let t = 1; t <= trunkH; t++) {
+      setIfOpen(blocks, ox + dx, height + t, oz + dz, stem, true);
+    }
+  }
+
+  // Shelf knobs on the stalk
+  const shelves = 1 + (fat ? 2 : 0);
+  for (let s = 0; s < shelves; s++) {
+    const sy = height + 2 + Math.floor(hash2(wx + s, wz, seed + 80) * (trunkH - 3));
+    const dir = Math.floor(hash2(wx, wz + s, seed + 81) * 4);
+    const sx = dir === 0 ? -1 : dir === 1 ? (fat ? 2 : 1) : fat ? 0 : 0;
+    const sz = dir === 2 ? -1 : dir === 3 ? (fat ? 2 : 1) : 0;
+    setIfOpen(blocks, ox + sx, sy, oz + sz, cap, false);
+  }
+
+  const top = height + trunkH;
+  for (let dy = 0; dy <= (umbrella ? 2 : 3); dy++) {
+    const layerR =
+      umbrella
+        ? dy === 0
+          ? capR
+          : dy === 1
+            ? capR - 0.2
+            : Math.max(1, capR - 2)
+        : dy === 0
+          ? capR - 1
+          : dy === 1
+            ? capR
+            : Math.max(1, capR - dy + 1);
+    const span = Math.ceil(layerR);
+    for (let dx = -span; dx <= span + (fat ? 1 : 0); dx++) {
+      for (let dz = -span; dz <= span + (fat ? 1 : 0); dz++) {
+        const cx = dx - (fat ? 0.5 : 0);
+        const cz = dz - (fat ? 0.5 : 0);
+        if (cx * cx + cz * cz > layerR * layerR + 0.45) continue;
+        const inStem =
+          dx >= 0 &&
+          dx <= (fat ? 1 : 0) &&
+          dz >= 0 &&
+          dz <= (fat ? 1 : 0);
+        if (inStem && dy === 0) continue;
+        setIfOpen(blocks, ox + dx, top + dy, oz + dz, cap, false);
+      }
+    }
+  }
+
+  if (umbrella) {
+    const rim = capR;
+    const span = Math.ceil(rim);
+    for (let dx = -span; dx <= span + (fat ? 1 : 0); dx++) {
+      for (let dz = -span; dz <= span + (fat ? 1 : 0); dz++) {
+        const cx = dx - (fat ? 0.5 : 0);
+        const cz = dz - (fat ? 0.5 : 0);
+        const d2 = cx * cx + cz * cz;
+        if (d2 < (rim - 0.85) * (rim - 0.85) || d2 > rim * rim + 0.6) continue;
+        setIfOpen(blocks, ox + dx, top - 1, oz + dz, cap, false);
+      }
+    }
+  }
+}
+
+function shouldPlaceJungle(
+  wx: number,
+  wz: number,
+  seed: number,
+  treeThreshold: number,
+): boolean {
+  return shouldPlaceTree(wx, wz, seed, treeThreshold);
+}
+
+function placeJungle(
+  blocks: Uint8Array,
+  ox: number,
+  oz: number,
+  height: number,
+  seed: number,
+  wx: number,
+  wz: number,
+): void {
+  const trunkH = 8 + Math.floor(hash2(wx, wz, seed + 17) * 7);
+  const fat = hash2(wx, wz, seed + 21) > 0.72;
+  const canopyR = fat ? 4 : 3 + (hash2(wx, wz, seed + 23) > 0.5 ? 1 : 0);
+  const wood = Block.JUNGLE_WOOD;
+  const leaf = Block.JUNGLE_LEAVES;
+
+  if (ox >= 0 && oz >= 0 && ox < CHUNK_SIZE && oz < CHUNK_SIZE) {
+    for (let t = 1; t <= trunkH; t++) {
+      const ty = height + t;
+      if (ty >= 0 && ty < CHUNK_HEIGHT) blocks[index(ox, ty, oz)] = wood;
+    }
+  }
+  if (fat) {
+    for (const [dx, dz] of [
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ] as const) {
+      const n = 2 + (hash2(wx + dx, wz + dz, seed + 29) > 0.5 ? 1 : 0);
+      for (let t = 1; t <= n; t++) {
+        setIfOpen(blocks, ox + dx, height + t, oz + dz, wood, true);
+      }
+    }
+  }
+
+  const top = height + trunkH;
+  for (let dy = -2; dy <= 4; dy++) {
+    const layerR =
+      dy < 0
+        ? canopyR - 1
+        : dy > 2
+          ? Math.max(1, canopyR - (dy - 1))
+          : canopyR - Math.abs(dy - 1) * 0.25;
+    const span = Math.ceil(layerR);
+    for (let dx = -span; dx <= span; dx++) {
+      for (let dz = -span; dz <= span; dz++) {
+        const dist = Math.hypot(dx, dz);
+        if (dist > layerR + 0.35) continue;
+        if (hash2(wx + dx, wz + dz + dy * 3, seed + 33) > 0.86 && dist > 1.2) continue;
+        if (dx === 0 && dz === 0 && dy <= 0) continue;
+        setIfOpen(blocks, ox + dx, top + dy, oz + dz, leaf, false);
+
+        if (
+          dist >= layerR - 0.8 &&
+          dy >= 0 &&
+          dy <= 2 &&
+          fbm2(wx + dx, wz + dz, seed + 47) > 0.58
+        ) {
+          const hang = 3 + Math.floor(hash2(wx + dx, wz + dz, seed + 51) * 5);
+          for (let v = 1; v <= hang; v++) {
+            const vy = top + dy - v;
+            if (vy <= height + 1 || vy < 0) break;
+            const lx2 = ox + dx;
+            const lz2 = oz + dz;
+            if (lx2 < 0 || lz2 < 0 || lx2 >= CHUNK_SIZE || lz2 >= CHUNK_SIZE) break;
+            const vi = index(lx2, vy, lz2);
+            if (blocks[vi] !== Block.AIR) break;
+            blocks[vi] = Block.VINE;
+          }
+        }
+      }
+    }
+  }
+}
+
+function shouldPlaceRedwood(wx: number, wz: number, seed: number): boolean {
+  if ((wx & 3) !== 0 || (wz & 3) !== 0) return false;
+  return hash2(wx, wz, seed + 88) > 0.52;
+}
+
+function placeRedwood(
+  blocks: Uint8Array,
+  ox: number,
+  oz: number,
+  height: number,
+  seed: number,
+  wx: number,
+  wz: number,
+): void {
+  const trunkH = 17 + Math.floor(hash2(wx, wz, seed + 9) * 10);
+  const canopyR = 5 + (hash2(wx, wz, seed + 11) > 0.45 ? 1 : 0);
+  const wood = Block.REDWOOD_WOOD;
+  const leaf = Block.REDWOOD_LEAVES;
+
+  for (let t = 1; t <= trunkH; t++) {
+    const ty = height + t;
+    for (const [dx, dz] of [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ] as const) {
+      setIfOpen(blocks, ox + dx, ty, oz + dz, wood, true);
+    }
+  }
+  const flare = 2 + (hash2(wx, wz, seed + 13) > 0.5 ? 1 : 0);
+  for (let t = 1; t <= flare; t++) {
+    const ty = height + t;
+    setIfOpen(blocks, ox - 1, ty, oz, wood);
+    setIfOpen(blocks, ox + 2, ty, oz + 1, wood);
+    setIfOpen(blocks, ox, ty, oz - 1, wood);
+    setIfOpen(blocks, ox + 1, ty, oz + 2, wood);
+  }
+
+  const top = height + trunkH;
+  for (let dy = -4; dy <= 6; dy++) {
+    const layerR =
+      dy < 0
+        ? canopyR - 1 + dy * 0.15
+        : dy > 4
+          ? Math.max(1.4, canopyR - (dy - 2) * 0.9)
+          : canopyR - Math.abs(dy - 1) * 0.35;
+    const r2 = layerR * layerR;
+    const span = Math.ceil(layerR);
+    for (let dx = -span; dx <= span + 1; dx++) {
+      for (let dz = -span; dz <= span + 1; dz++) {
+        const cx = dx - 0.5;
+        const cz = dz - 0.5;
+        if (cx * cx + cz * cz > r2 + 0.4) continue;
+        const inTrunk = dx >= 0 && dx <= 1 && dz >= 0 && dz <= 1;
+        if (inTrunk && dy <= 0) continue;
+        setIfOpen(blocks, ox + dx, top + dy, oz + dz, leaf, false);
+      }
+    }
+  }
+}
+
 /** Pure voxel fill for one chunk — safe to run in a Web Worker */
 export function generateChunkBlocks(
   cx: number,
@@ -235,12 +497,16 @@ export function generateChunkBlocks(
       inf.ocean * 0.55 -
       inf.beach * 0.5 -
       inf.swamp * 0.65 -
-      inf.desert * 0.4;
+      inf.desert * 0.4 +
+      inf.rainforest * 0.08 -
+      inf.fungal * 0.22;
     const bias =
       inf.mountain * 14 +
       inf.snow * 5 +
       inf.desert * -2 +
       inf.swamp * -3 +
+      inf.rainforest * 2 +
+      inf.fungal * -1 +
       inf.beach * -2 +
       inf.ocean * -14;
 
@@ -327,6 +593,7 @@ export function generateChunkBlocks(
     if (biome === Biome.SWAMP) {
       return hash2(wx, wz, seed + 77) > 0.55 ? Block.CLAY : Block.GRASS;
     }
+    if (biome === Biome.FUNGAL) return Block.MYCELIUM;
     return Block.GRASS;
   };
 
@@ -427,7 +694,7 @@ export function generateChunkBlocks(
   placeOresInChunk(blocks, cx, cz, seed);
 
   // Pass 2: trees / cactus — sample outside chunk for canopy wrap
-  const CANOPY = 3;
+  const CANOPY = 8;
   for (let oz = -CANOPY; oz < CHUNK_SIZE + CANOPY; oz++) {
     for (let ox = -CANOPY; ox < CHUNK_SIZE + CANOPY; ox++) {
       const wx = baseX + ox;
@@ -462,6 +729,28 @@ export function generateChunkBlocks(
       }
 
       if (biome === Biome.DESERT) continue;
+
+      if (biome === Biome.REDWOOD) {
+        if (shouldPlaceRedwood(wx, wz, seed)) {
+          placeRedwood(blocks, ox, oz, height, seed, wx, wz);
+        }
+        continue;
+      }
+
+      if (biome === Biome.RAINFOREST) {
+        if (shouldPlaceJungle(wx, wz, seed, treeThreshold)) {
+          placeJungle(blocks, ox, oz, height, seed, wx, wz);
+        }
+        continue;
+      }
+
+      if (biome === Biome.FUNGAL) {
+        if (shouldPlaceFungus(wx, wz, seed, treeThreshold)) {
+          placeFungus(blocks, ox, oz, height, seed, wx, wz);
+        }
+        continue;
+      }
+
       if (!shouldPlaceTree(wx, wz, seed, treeThreshold)) continue;
 
       const pick = fbm2(wx * 0.8, wz * 0.8, seed + 19);

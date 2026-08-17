@@ -35,6 +35,9 @@ const FUEL_SECONDS: Record<number, number> = {
   [Block.WOOD]: 15,
   [Block.BIRCH_WOOD]: 15,
   [Block.SPRUCE_WOOD]: 15,
+  [Block.REDWOOD_WOOD]: 15,
+  [Block.JUNGLE_WOOD]: 15,
+  [Block.MUSHROOM_STEM]: 10,
   [Block.PLANKS]: 15,
   [Item.STICK]: 5,
 };

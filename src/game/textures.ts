@@ -89,6 +89,7 @@ export type BlockIconMap = Record<number, string>;
 
 export function createBlockAtlas(): {
   texture: THREE.CanvasTexture;
+  spec: THREE.CanvasTexture;
   dataUrl: string;
   icons: BlockIconMap;
 } {
@@ -659,6 +660,21 @@ export function createBlockAtlas(): {
   drawTile(d, 65, atlasW, (x, y, set) => paintRift(x, y, set, false));
   drawTile(d, 66, atlasW, (x, y, set) => paintJacarandaLeaves(x, y, set));
   paintPlant(d, atlasW, 67, "lavenderTall");
+  drawTile(d, 68, atlasW, (x, y, set) => paintRedwoodEnd(x, y, set));
+  drawTile(d, 69, atlasW, (x, y, set) => paintRedwoodBark(x, y, set));
+  drawTile(d, 70, atlasW, (x, y, set) => paintRedwoodLeaves(x, y, set));
+  drawTile(d, 71, atlasW, (x, y, set) => paintJungleEnd(x, y, set));
+  drawTile(d, 72, atlasW, (x, y, set) => paintJungleBark(x, y, set));
+  drawTile(d, 73, atlasW, (x, y, set) => paintJungleLeaves(x, y, set));
+  paintPlant(d, atlasW, 74, "orchid");
+  paintPlant(d, atlasW, 75, "jungleFern");
+  drawTile(d, 76, atlasW, (x, y, set) => paintMyceliumTop(x, y, set));
+  drawTile(d, 77, atlasW, (x, y, set) => paintMyceliumSide(x, y, set));
+  drawTile(d, 78, atlasW, (x, y, set) => paintMushroomStem(x, y, set));
+  drawTile(d, 79, atlasW, (x, y, set) => paintMushroomCap(x, y, set, false));
+  drawTile(d, 80, atlasW, (x, y, set) => paintMushroomCap(x, y, set, true));
+  paintPlant(d, atlasW, 81, "glowshroom");
+  paintPlant(d, atlasW, 82, "toadstool");
 
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
@@ -669,7 +685,246 @@ export function createBlockAtlas(): {
   tex.generateMipmaps = false;
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
-  return { texture: tex, dataUrl: canvas.toDataURL("image/png"), icons };
+  return {
+    texture: tex,
+    spec: createSpecAtlas(),
+    dataUrl: canvas.toDataURL("image/png"),
+    icons,
+  };
+}
+
+/** R = dry spec, G = wet-only spec. Same UVs as the color atlas. */
+function createSpecAtlas(): THREE.CanvasTexture {
+  const atlasW = ATLAS_COLS * TILE_SIZE;
+  const atlasH = ATLAS_ROWS * TILE_SIZE;
+  const canvas = document.createElement("canvas");
+  canvas.width = atlasW;
+  canvas.height = atlasH;
+  const ctx = canvas.getContext("2d")!;
+  const img = ctx.createImageData(atlasW, atlasH);
+  const d = img.data;
+
+  const spec = (
+    tile: number,
+    fn: (x: number, y: number) => [number, number],
+  ) => {
+    drawTile(d, tile, atlasW, (x, y, set) => {
+      const [r, g] = fn(x, y);
+      set(clamp(r), clamp(g), 0, 255);
+    });
+  };
+
+  spec(3, (x, y) => {
+    const n = h01(x, y, 203);
+    return [0, 28 + n * 36];
+  });
+  spec(8, (x, y) => {
+    const n = h01(x, y, 208);
+    return [0, 32 + n * 40];
+  });
+  spec(11, (x, y) => {
+    const fleck = h01(x, y, 113) > 0.97;
+    const n = h01(x, y, 211);
+    return [fleck ? 200 : 72 + n * 40, 0];
+  });
+  spec(12, (x, y) => {
+    const crack =
+      Math.abs((x * 3 + y * 7) % 13) === 0 ||
+      Math.abs((x * 5 - y * 2) % 17) === 0;
+    const fleck = h01(x, y, 122) > 0.96;
+    return [fleck ? 240 : crack ? 200 : 155, 0];
+  });
+  spec(13, () => [90, 0]);
+  spec(15, (x, y) => {
+    const snowH = 4 + ((h01(x, 0, 150) * 2) | 0);
+    if (y < snowH) return [70 + h01(x, y, 215) * 40, 0];
+    return [0, 0];
+  });
+  spec(38, (x, y) => {
+    const blob =
+      h01(x >> 1, y >> 1, 383) > 0.62 && h01(x, y, 384) > 0.35;
+    return [blob ? 88 : 0, 0];
+  });
+  spec(39, (x, y) => {
+    const blob =
+      h01(x >> 1, y >> 1, 392) > 0.58 && h01(x, y, 393) > 0.32;
+    return [blob ? 220 : 0, 0];
+  });
+  spec(62, (x, y) => [0, 24 + h01(x, y, 262) * 32]);
+  spec(64, (x, y) => {
+    const d1 = wrapDist(x + 2 * y + 3, 16);
+    const d2 = wrapDist(2 * x - y + 11, 16);
+    const d3 = wrapDist(x - 3 * y + 6, 16);
+    let dist = Math.min(d1, d2);
+    if (d3 < 0.55) dist = Math.min(dist, d3);
+    const glow = dist < 0.55 ? 1 - dist / 0.55 : 0;
+    return [glow > 0.2 ? 40 + glow * 180 : 0, 0];
+  });
+  spec(65, (x, y) => {
+    const cx = Math.abs((x - 7.5) / 7.5);
+    const core = Math.pow(1 - Math.min(1, cx * 1.05), 1.4);
+    return [core > 0.25 ? 80 + core * 140 : 0, 0];
+  });
+
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function paintRedwoodEnd(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const r0 = Math.hypot(x - 7.5, y - 7.5);
+  const ring = Math.sin(r0 * 1.45 + hSigned(x, y, 680) * 0.25);
+  if (r0 < 1.6) {
+    set(92, 48, 28);
+    return;
+  }
+  const n = hSigned(x, y, 681) * 6;
+  if (ring > 0) set(clamp(148 + n), clamp(72 + n * 0.5), clamp(38 + n * 0.3));
+  else set(clamp(110 + n), clamp(52 + n * 0.4), clamp(28 + n * 0.3));
+}
+
+function paintRedwoodBark(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const furrow = (x + Math.floor(h01(0, y, 690) * 2)) % 4 === 0;
+  const n = hSigned(x, y, 691);
+  if (furrow) {
+    set(clamp(48 + n * 6), clamp(22 + n * 3), clamp(14 + n * 2));
+    return;
+  }
+  set(clamp(118 + n * 14), clamp(54 + n * 8), clamp(30 + n * 5));
+  if (h01(x, y, 692) > 0.93) set(86, 40, 22);
+}
+
+function paintRedwoodLeaves(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
+  const edge = x === 0 || y === 0 || x === 15 || y === 15;
+  if (!edge && h01(x >> 1, y >> 1, 700) > 0.86 && h01(x, y, 701) > 0.58) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 702);
+  const tone = h01(x >> 2, y >> 2, 703);
+  const base = mixRGB([28, 72, 36], [48, 102, 52], tone);
+  set(clamp(base[0] + n * 6), clamp(base[1] + n * 8), clamp(base[2] + n * 5));
+}
+
+function paintJungleEnd(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const r0 = Math.hypot(x - 7.5, y - 7.5);
+  const ring = Math.sin(r0 * 1.7 + hSigned(x, y, 710) * 0.3);
+  if (r0 < 1.5) {
+    set(86, 62, 28);
+    return;
+  }
+  const n = hSigned(x, y, 711) * 8;
+  if (ring > 0) set(clamp(128 + n), clamp(88 + n * 0.5), clamp(42 + n * 0.3));
+  else set(clamp(96 + n), clamp(64 + n * 0.4), clamp(30 + n * 0.3));
+}
+
+function paintJungleBark(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const furrow = (x + Math.floor(h01(0, y, 720) * 3)) % 3 === 0;
+  const n = hSigned(x, y, 721);
+  if (furrow) {
+    set(clamp(42 + n * 6), clamp(28 + n * 4), clamp(16 + n * 3));
+    return;
+  }
+  set(clamp(92 + n * 14), clamp(62 + n * 10), clamp(32 + n * 6));
+  if (h01(x, y, 722) > 0.9) set(62, 78, 36);
+}
+
+function paintJungleLeaves(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const edge = x === 0 || y === 0 || x === 15 || y === 15;
+  if (!edge && h01(x >> 1, y >> 1, 730) > 0.82 && h01(x, y, 731) > 0.55) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 732);
+  const tone = h01(x >> 2, y >> 2, 733);
+  const base = mixRGB([18, 96, 36], [46, 158, 58], tone);
+  set(clamp(base[0] + n * 8), clamp(base[1] + n * 10), clamp(base[2] + n * 6));
+  if (h01(x, y, 734) > 0.93) set(210, 72, 96);
+}
+
+function paintMyceliumTop(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const n = hSigned(x, y, 740) * 0.5 + hSigned(x >> 1, y >> 1, 741) * 0.5;
+  const base = mixRGB([78, 58, 88], [52, 44, 62], h01(x >> 2, y >> 2, 742));
+  set(clamp(base[0] + n * 10), clamp(base[1] + n * 8), clamp(base[2] + n * 12));
+  if (h01(x, y, 743) > 0.78) {
+    const glow = h01(x, y, 744);
+    if (glow > 0.55) set(62, 186, 176);
+    else set(198, 86, 92);
+  }
+}
+
+function paintMyceliumSide(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const fringe = 3 + ((h01(x, 0, 750) * 2) | 0);
+  if (y < fringe) {
+    paintMyceliumTop(x, y, set);
+    return;
+  }
+  const n = hSigned(x, y, 751);
+  set(clamp(118 + n * 12), clamp(82 + n * 8), clamp(50 + n * 6));
+}
+
+function paintMushroomStem(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const n = hSigned(x, y, 760);
+  const pore = ((x + y * 2) & 3) === 0 && h01(x, y, 761) > 0.35;
+  if (pore) {
+    set(clamp(168 + n * 8), clamp(158 + n * 6), clamp(142 + n * 6));
+    return;
+  }
+  set(clamp(214 + n * 10), clamp(206 + n * 8), clamp(192 + n * 8));
+}
+
+function paintMushroomCap(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+  cyan: boolean,
+): void {
+  const n = hSigned(x, y, cyan ? 772 : 770);
+  const spot = h01(x >> 1, y >> 1, cyan ? 773 : 771) > 0.72 && h01(x, y, 774) > 0.4;
+  if (cyan) {
+    if (spot) {
+      set(clamp(210 + n * 10), clamp(252 + n * 4), clamp(236 + n * 8));
+      return;
+    }
+    const base = mixRGB([24, 148, 142], [48, 210, 196], h01(x >> 2, y >> 2, 775));
+    set(clamp(base[0] + n * 10), clamp(base[1] + n * 12), clamp(base[2] + n * 10));
+    return;
+  }
+  if (spot) {
+    set(clamp(236 + n * 8), clamp(228 + n * 8), clamp(214 + n * 6));
+    return;
+  }
+  const base = mixRGB([168, 32, 38], [214, 52, 48], h01(x >> 2, y >> 2, 776));
+  set(clamp(base[0] + n * 10), clamp(base[1] + n * 8), clamp(base[2] + n * 6));
 }
 
 function paintBirchEnd(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
@@ -1370,6 +1625,59 @@ function paintPlant(
         if (fr < 2.4) px(255, 248, 210);
       }
       if ((x === 7 || x === 8) && y <= 1) px(255, 230, 120);
+    } else if (kind === "orchid") {
+      stem(7, 8);
+      stem(8, 9);
+      leafDot(5, 11);
+      leafDot(10, 12);
+      const blooms: [number, number, number, number, number][] = [
+        [7, 4, 228, 92, 196],
+        [5, 6, 244, 232, 246],
+        [10, 5, 196, 56, 168],
+        [8, 3, 252, 180, 80],
+      ];
+      for (const [bx, by, r, g, b] of blooms) {
+        const dx = x - bx;
+        const dy = y - by;
+        if (dx * dx + dy * dy < 3.4) px(r, g, b);
+        if (dx === 0 && dy === 0) px(248, 236, 180);
+      }
+    } else if (kind === "jungleFern") {
+      const fronds: [number, number, number][] = [
+        [3, 6, 14],
+        [5, 4, 14],
+        [8, 3, 14],
+        [11, 5, 14],
+        [13, 7, 14],
+      ];
+      for (const [bx, y0, y1] of fronds) {
+        if (x === bx && y >= y0 && y <= y1) {
+          const t = (y1 - y) / (y1 - y0 + 1);
+          px(clamp(28 + t * 18), clamp(108 + t * 36), clamp(40 + t * 12));
+        }
+        if ((x === bx - 1 || x === bx + 1) && y >= y0 && y <= y0 + 4 && y % 2 === 0) {
+          px(36, 132, 52);
+        }
+      }
+    } else if (kind === "glowshroom") {
+      if (x >= 6 && x <= 9 && y >= 9 && y <= 14) {
+        px(210, 204, 188);
+      }
+      const dx = x - 7.5;
+      const dy = y - 6;
+      if (dx * dx + dy * dy * 1.15 < 18 && y <= 10) {
+        px(48, 216, 204);
+        if (dx * dx + dy * dy < 5) px(186, 255, 236);
+      }
+      if ((x === 5 || x === 10) && y >= 6 && y <= 8) px(72, 232, 214);
+    } else if (kind === "toadstool") {
+      if (x >= 6 && x <= 9 && y >= 10 && y <= 14) px(214, 204, 186);
+      const dx = x - 7.5;
+      const dy = y - 7;
+      if (dx * dx + dy * dy * 1.2 < 16 && y <= 11) {
+        px(196, 44, 52);
+        if (h01(x, y, 250) > 0.72) px(244, 236, 220);
+      }
     }
   });
 }

@@ -240,6 +240,47 @@ export class PortalSystem {
     return best;
   }
 
+  /** Dest pads just outside the paired opening, or empty if this cell isn't a rift. */
+  mapWater(world: World, x: number, y: number, z: number): { x: number; y: number; z: number }[] {
+    const frame = this.frameForWaterCell(world, x, y, z);
+    if (!frame) return [];
+    const dest = this.partnerOf(frame, world);
+    if (!dest) return [];
+    this.pinPair(frame, dest);
+    world.setStreamFoci(this.stickyFoci);
+    const dx = dest.x1 - (x - frame.x0);
+    const dy = dest.y0 + (y - frame.y0);
+    return [
+      { x: dx, y: dy, z: dest.z0 + 1 },
+      { x: dx, y: dy, z: dest.z0 - 1 },
+    ];
+  }
+
+  private frameForWaterCell(
+    world: World,
+    x: number,
+    y: number,
+    z: number,
+  ): PortalFrame | null {
+    for (const f of this.frames) {
+      if (this.openingCell(f, x, y, z)) return f;
+    }
+    const cx = Math.floor(x / STRUCT_CELL);
+    const cz = Math.floor(z / STRUCT_CELL);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!cellHasLinkedPortal(cx + dx, cz + dz, world.seed)) continue;
+        const f = this.frameAtCell(world, cx + dx, cz + dz);
+        if (f && this.openingCell(f, x, y, z)) return f;
+      }
+    }
+    return null;
+  }
+
+  private openingCell(f: PortalFrame, x: number, y: number, z: number): boolean {
+    return z === f.z0 && x >= f.x0 && x <= f.x1 && y >= f.y0 && y <= f.y1;
+  }
+
   renderView(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,

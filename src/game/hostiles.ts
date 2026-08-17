@@ -704,6 +704,24 @@ export class HostileSystem {
     return false;
   }
 
+  nearest(
+    x: number,
+    z: number,
+    r: number,
+  ): { x: number; y: number; z: number } | null {
+    let best: { x: number; y: number; z: number } | null = null;
+    let bestD = r;
+    for (const h of this.list) {
+      if (!h.alive) continue;
+      const d = Math.hypot(h.x - x, h.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = { x: h.x, y: h.y, z: h.z };
+      }
+    }
+    return best;
+  }
+
   update(
     dt: number,
     world: World,

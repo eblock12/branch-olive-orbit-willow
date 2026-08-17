@@ -1,4 +1,4 @@
-import { isMineable, isPlant, plantHitbox } from "./blocks";
+import { isMineable, isPlant, plantHitbox, isSourceWater } from "./blocks";
 
 export type VoxelHit = {
   x: number;
@@ -189,5 +189,64 @@ export function raycastVoxel(
     }
   }
 
+  return null;
+}
+
+/** First still-water source along the look ray (skips flowing and solids). */
+export function raycastWaterSource(
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  maxDist: number,
+  getBlock: (x: number, y: number, z: number) => number,
+): VoxelHit | null {
+  const len = Math.hypot(dx, dy, dz) || 1;
+  dx /= len;
+  dy /= len;
+  dz /= len;
+  let x = Math.floor(ox);
+  let y = Math.floor(oy);
+  let z = Math.floor(oz);
+  const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+  const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+  const stepZ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+  const tDeltaX = stepX !== 0 ? Math.abs(1 / dx) : Infinity;
+  const tDeltaY = stepY !== 0 ? Math.abs(1 / dy) : Infinity;
+  const tDeltaZ = stepZ !== 0 ? Math.abs(1 / dz) : Infinity;
+  let tMaxX =
+    stepX > 0 ? (Math.floor(ox) + 1 - ox) * tDeltaX : stepX < 0 ? (ox - Math.floor(ox)) * tDeltaX : Infinity;
+  let tMaxY =
+    stepY > 0 ? (Math.floor(oy) + 1 - oy) * tDeltaY : stepY < 0 ? (oy - Math.floor(oy)) * tDeltaY : Infinity;
+  let tMaxZ =
+    stepZ > 0 ? (Math.floor(oz) + 1 - oz) * tDeltaZ : stepZ < 0 ? (oz - Math.floor(oz)) * tDeltaZ : Infinity;
+  let t = 0;
+  for (let i = 0; i < 256; i++) {
+    if (t > maxDist) return null;
+    if (isSourceWater(getBlock(x, y, z))) {
+      return { x, y, z, nx: 0, ny: 1, nz: 0, distance: t };
+    }
+    if (tMaxX < tMaxY) {
+      if (tMaxX < tMaxZ) {
+        t = tMaxX;
+        tMaxX += tDeltaX;
+        x += stepX;
+      } else {
+        t = tMaxZ;
+        tMaxZ += tDeltaZ;
+        z += stepZ;
+      }
+    } else if (tMaxY < tMaxZ) {
+      t = tMaxY;
+      tMaxY += tDeltaY;
+      y += stepY;
+    } else {
+      t = tMaxZ;
+      tMaxZ += tDeltaZ;
+      z += stepZ;
+    }
+  }
   return null;
 }

@@ -439,6 +439,17 @@ class PassiveMob {
     this.pickWander();
   }
 
+  scareFrom(fromX: number, fromZ: number): void {
+    if (!this.alive || this.dying) return;
+    this.state = "flee";
+    this.stateT = 2 + Math.random();
+    const dx = this.x - fromX;
+    const dz = this.z - fromZ;
+    const len = Math.hypot(dx, dz) || 1;
+    this.targetX = this.x + (dx / len) * 10;
+    this.targetZ = this.z + (dz / len) * 10;
+  }
+
   private pickWander(): void {
     const a = Math.random() * Math.PI * 2;
     const d = 2 + Math.random() * 7;
@@ -884,6 +895,31 @@ export class PassiveMobSystem {
       kinds[m.kind] = (kinds[m.kind] ?? 0) + 1;
     }
     return { alive: this.count, kinds };
+  }
+
+  nearestSmall(
+    x: number,
+    z: number,
+    r: number,
+  ): { x: number; y: number; z: number; scare: () => void } | null {
+    let best: PassiveMob | null = null;
+    let bestD = r;
+    for (const m of this.list) {
+      if (!m.alive || (m.kind !== "rabbit" && m.kind !== "chicken")) continue;
+      const d = Math.hypot(m.x - x, m.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = m;
+      }
+    }
+    if (!best) return null;
+    const prey = best;
+    return {
+      x: prey.x,
+      y: prey.y,
+      z: prey.z,
+      scare: () => prey.scareFrom(x, z),
+    };
   }
 
   seedAround(world: World, cx: number, cz: number, n: number): void {

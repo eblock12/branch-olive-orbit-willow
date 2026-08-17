@@ -1,50 +1,54 @@
 import { Block, BLOCKS, isPlant, isDoor, isLadder, isStair, isSlab, shapeMaterial, type BlockId } from "./blocks";
 
-/** Item IDs: 0–99 reserved for blocks; 100+ materials & tools */
+/** Item IDs: 0–199 reserved for blocks; 200+ materials & tools */
+export const ITEM_ID_MIN = 200;
+
 export const Item = {
-  STICK: 100,
-  WOOD_PICK: 101,
-  WOOD_AXE: 102,
-  WOOD_SHOVEL: 103,
-  WOOD_SWORD: 104,
-  STONE_PICK: 105,
-  STONE_AXE: 106,
-  STONE_SHOVEL: 107,
-  STONE_SWORD: 108,
-  COAL: 109,
-  IRON_INGOT: 110,
-  IRON_PICK: 111,
-  IRON_AXE: 112,
-  IRON_SHOVEL: 113,
-  IRON_SWORD: 114,
-  RAW_PORK: 115,
-  COOKED_PORK: 116,
-  RAW_BEEF: 117,
-  COOKED_BEEF: 118,
-  RAW_MUTTON: 119,
-  COOKED_MUTTON: 120,
-  RAW_CHICKEN: 121,
-  COOKED_CHICKEN: 122,
-  RAW_RABBIT: 123,
-  COOKED_RABBIT: 124,
-  ROTTEN_FLESH: 125,
-  LEATHER: 126,
-  FEATHER: 127,
-  WOOL: 128,
-  STRING: 129,
-  BONE: 130,
-  BREAD: 131,
-  BOW: 132,
-  ARROW: 133,
-  LEATHER_HELM: 134,
-  LEATHER_CHEST: 135,
-  LEATHER_LEGS: 136,
-  LEATHER_BOOTS: 137,
-  BONE_MEAL: 138,
-  IRON_HELM: 139,
-  IRON_CHEST: 140,
-  IRON_LEGS: 141,
-  IRON_BOOTS: 142,
+  STICK: 200,
+  WOOD_PICK: 201,
+  WOOD_AXE: 202,
+  WOOD_SHOVEL: 203,
+  WOOD_SWORD: 204,
+  STONE_PICK: 205,
+  STONE_AXE: 206,
+  STONE_SHOVEL: 207,
+  STONE_SWORD: 208,
+  COAL: 209,
+  IRON_INGOT: 210,
+  IRON_PICK: 211,
+  IRON_AXE: 212,
+  IRON_SHOVEL: 213,
+  IRON_SWORD: 214,
+  RAW_PORK: 215,
+  COOKED_PORK: 216,
+  RAW_BEEF: 217,
+  COOKED_BEEF: 218,
+  RAW_MUTTON: 219,
+  COOKED_MUTTON: 220,
+  RAW_CHICKEN: 221,
+  COOKED_CHICKEN: 222,
+  RAW_RABBIT: 223,
+  COOKED_RABBIT: 224,
+  ROTTEN_FLESH: 225,
+  LEATHER: 226,
+  FEATHER: 227,
+  WOOL: 228,
+  STRING: 229,
+  BONE: 230,
+  BREAD: 231,
+  BOW: 232,
+  ARROW: 233,
+  LEATHER_HELM: 234,
+  LEATHER_CHEST: 235,
+  LEATHER_LEGS: 236,
+  LEATHER_BOOTS: 237,
+  BONE_MEAL: 238,
+  IRON_HELM: 239,
+  IRON_CHEST: 240,
+  IRON_LEGS: 241,
+  IRON_BOOTS: 242,
+  BUCKET: 243,
+  WATER_BUCKET: 244,
 } as const;
 
 export type ItemId = number;
@@ -302,6 +306,18 @@ const TOOLS: ItemDef[] = [
     maxStack: 64,
     color: "#f4f0e4",
   },
+  {
+    id: Item.BUCKET,
+    name: "Bucket",
+    maxStack: 16,
+    color: "#8a9098",
+  },
+  {
+    id: Item.WATER_BUCKET,
+    name: "Water Bucket",
+    maxStack: 1,
+    color: "#3a7ec8",
+  },
 ];
 
 const FOODS: ItemDef[] = [
@@ -330,7 +346,7 @@ export const ITEM_DEFS: Record<number, ItemDef> = Object.fromEntries(
 );
 
 export function isBlockItem(id: ItemId): boolean {
-  return id > 0 && id < 100 && !!BLOCKS[id];
+  return id > 0 && id < ITEM_ID_MIN && !!BLOCKS[id];
 }
 
 export function isTool(id: ItemId): boolean {
@@ -351,6 +367,14 @@ export function isArrow(id: ItemId | null | undefined): boolean {
 
 export function isBoneMeal(id: ItemId | null | undefined): boolean {
   return id === Item.BONE_MEAL;
+}
+
+export function isEmptyBucket(id: ItemId | null | undefined): boolean {
+  return id === Item.BUCKET;
+}
+
+export function isWaterBucket(id: ItemId | null | undefined): boolean {
+  return id === Item.WATER_BUCKET;
 }
 
 export function armorInfo(
@@ -412,6 +436,10 @@ export function baseMineTime(blockId: number): number {
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
     case Block.JACARANDA_LEAVES:
+    case Block.REDWOOD_LEAVES:
+    case Block.JUNGLE_LEAVES:
+    case Block.MUSHROOM_CAP_RED:
+    case Block.MUSHROOM_CAP_CYAN:
       return 0.28;
     case Block.SNOW:
     case Block.SNOW_GRASS:
@@ -421,6 +449,7 @@ export function baseMineTime(blockId: number): number {
     case Block.SAND:
     case Block.GRAVEL:
     case Block.CLAY:
+    case Block.MYCELIUM:
       return 0.55;
     case Block.CACTUS:
     case Block.ICE:
@@ -428,6 +457,9 @@ export function baseMineTime(blockId: number): number {
     case Block.WOOD:
     case Block.BIRCH_WOOD:
     case Block.SPRUCE_WOOD:
+    case Block.REDWOOD_WOOD:
+    case Block.JUNGLE_WOOD:
+    case Block.MUSHROOM_STEM:
     case Block.PLANKS:
     case Block.PLANKS_STAIR:
     case Block.PLANKS_SLAB:
@@ -475,11 +507,18 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.WOOD ||
     blockId === Block.BIRCH_WOOD ||
     blockId === Block.SPRUCE_WOOD ||
+    blockId === Block.REDWOOD_WOOD ||
+    blockId === Block.JUNGLE_WOOD ||
+    blockId === Block.MUSHROOM_STEM ||
     blockId === Block.PLANKS ||
     blockId === Block.LEAVES ||
     blockId === Block.BIRCH_LEAVES ||
     blockId === Block.SPRUCE_LEAVES ||
     blockId === Block.JACARANDA_LEAVES ||
+    blockId === Block.REDWOOD_LEAVES ||
+    blockId === Block.JUNGLE_LEAVES ||
+    blockId === Block.MUSHROOM_CAP_RED ||
+    blockId === Block.MUSHROOM_CAP_CYAN ||
     blockId === Block.CHEST ||
     blockId === Block.BED ||
     isDoor(blockId) ||
@@ -494,6 +533,7 @@ function preferredTool(blockId: number): ToolKind {
     blockId === Block.SAND ||
     blockId === Block.GRAVEL ||
     blockId === Block.CLAY ||
+    blockId === Block.MYCELIUM ||
     blockId === Block.SNOW ||
     blockId === Block.SNOW_GRASS
   ) {
@@ -608,6 +648,20 @@ export const RECIPES: Recipe[] = [
     inputs: [{ id: Block.SPRUCE_WOOD, count: 1 }],
     output: { id: Block.PLANKS, count: 4 },
     hint: "Spruce log → 4 planks",
+  },
+  {
+    id: "planks_redwood",
+    name: "Redwood Planks",
+    inputs: [{ id: Block.REDWOOD_WOOD, count: 1 }],
+    output: { id: Block.PLANKS, count: 4 },
+    hint: "Redwood log → 4 planks",
+  },
+  {
+    id: "planks_jungle",
+    name: "Jungle Planks",
+    inputs: [{ id: Block.JUNGLE_WOOD, count: 1 }],
+    output: { id: Block.PLANKS, count: 4 },
+    hint: "Jungle log → 4 planks",
   },
   {
     id: "planks_stairs",
@@ -900,6 +954,13 @@ export const RECIPES: Recipe[] = [
     hint: "2 armor",
   },
   {
+    id: "bucket",
+    name: "Bucket",
+    inputs: [{ id: Item.IRON_INGOT, count: 3 }],
+    output: { id: Item.BUCKET, count: 1 },
+    hint: "Scoop source water",
+  },
+  {
     id: "crafting_cobble",
     name: "Cobblestone (hint)",
     inputs: [],
@@ -1112,6 +1173,27 @@ function paintItemIcon(id: ItemId): string {
     ctx.fill();
     ctx.fillStyle = "#e0d8c8";
     ctx.fillRect(14, 16, 3, 3);
+    return c.toDataURL("image/png");
+  }
+  if (id === Item.BUCKET || id === Item.WATER_BUCKET) {
+    ctx.fillStyle = "#8a9098";
+    ctx.beginPath();
+    ctx.moveTo(8, 10);
+    ctx.lineTo(10, 26);
+    ctx.lineTo(22, 26);
+    ctx.lineTo(24, 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#c4c8d0";
+    ctx.fillRect(8, 8, 16, 4);
+    ctx.fillStyle = "#6a7078";
+    ctx.fillRect(7, 10, 18, 2);
+    if (id === Item.WATER_BUCKET) {
+      ctx.fillStyle = "#3a7ec8";
+      ctx.fillRect(11, 14, 10, 10);
+      ctx.fillStyle = "#6ab0e0";
+      ctx.fillRect(12, 15, 8, 3);
+    }
     return c.toDataURL("image/png");
   }
   if (id === Item.LEATHER_HELM) {

@@ -72,3 +72,51 @@
 .item-select-name {
   animation: item-select-name 1.8s ease-out forwards;
 }
+
+@keyframes boot-pulse {
+  0%,
+  100% {
+    transform: scale(0.82);
+    opacity: 0.22;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.55;
+  }
+}
+
+@keyframes boot-pulse-core {
+  0%,
+  100% {
+    transform: scale(0.92);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+@keyframes boot-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    letter-spacing: 0.34em;
+  }
+  50% {
+    opacity: 1;
+    letter-spacing: 0.42em;
+  }
+}
+
+.boot-pulse-ring {
+  animation: boot-pulse 2.4s ease-in-out infinite;
+}
+
+.boot-pulse-core {
+  animation: boot-pulse-core 2.4s ease-in-out infinite;
+}
+
+.boot-title {
+  animation: boot-breathe 2.8s ease-in-out infinite;
+}

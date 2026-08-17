@@ -11,6 +11,9 @@ export const Biome = {
   SNOW: "snow",
   SWAMP: "swamp",
   LAVENDER_FIELD: "lavender_field",
+  REDWOOD: "redwood",
+  RAINFOREST: "rainforest",
+  FUNGAL: "fungal",
 } as const;
 
 export type BiomeId = (typeof Biome)[keyof typeof Biome];
@@ -25,6 +28,9 @@ export const BIOME_LABEL: Record<BiomeId, string> = {
   snow: "Snowy Peaks",
   swamp: "Swamp",
   lavender_field: "Lavender Field",
+  redwood: "Redwood Grove",
+  rainforest: "Rainforest",
+  fungal: "Fungal Jungle",
 };
 
 export type BiomeSample = {
@@ -75,6 +81,9 @@ export type TerrainInfluence = {
   desert: number;
   swamp: number;
   lavender: number;
+  redwood: number;
+  rainforest: number;
+  fungal: number;
 };
 
 export function terrainInfluence(
@@ -126,8 +135,51 @@ export function terrainInfluence(
     (1 - smooth01(0.62, 0.76, temperature)) *
     (1 - smooth01(0.46, 0.66, moisture)) *
     smooth01(0.40, 0.64, bloom);
+  const redwood =
+    inland *
+    (1 - mountain * 0.7) *
+    (1 - desert * 0.85) *
+    (1 - swamp * 0.5) *
+    (1 - lavender * 0.8) *
+    smooth01(0.34, 0.46, temperature) *
+    (1 - smooth01(0.56, 0.68, temperature)) *
+    smooth01(0.48, 0.62, moisture) *
+    (1 - smooth01(0.48, 0.62, bloom));
+  const rainforest =
+    inland *
+    (1 - mountain * 0.75) *
+    (1 - desert * 0.95) *
+    (1 - swamp * 0.45) *
+    (1 - snow * 0.9) *
+    (1 - lavender * 0.6) *
+    (1 - redwood * 0.55) *
+    smooth01(0.50, 0.64, temperature) *
+    smooth01(0.54, 0.70, moisture);
+  const fungal =
+    inland *
+    (1 - mountain * 0.8) *
+    (1 - desert * 0.95) *
+    (1 - swamp * 0.35) *
+    (1 - snow * 0.9) *
+    (1 - lavender * 0.55) *
+    (1 - redwood * 0.45) *
+    smooth01(0.42, 0.52, temperature) *
+    (1 - smooth01(0.62, 0.74, temperature)) *
+    smooth01(0.52, 0.68, moisture) *
+    smooth01(0.44, 0.60, bloom);
 
-  return { ocean, beach, mountain, snow, desert, swamp, lavender };
+  return {
+    ocean,
+    beach,
+    mountain,
+    snow,
+    desert,
+    swamp,
+    lavender,
+    redwood,
+    rainforest: rainforest * (1 - fungal * 0.65),
+    fungal,
+  };
 }
 
 export function biomeFromClimate(
@@ -175,6 +227,46 @@ export function biomeFromClimate(
     heightHint < seaLevel + 14
   ) {
     return Biome.LAVENDER_FIELD;
+  }
+
+  // Cool, wet inland — giant redwoods before generic forest
+  if (
+    bloom < 0.46 &&
+    moisture > 0.52 &&
+    temperature > 0.36 &&
+    temperature < 0.58 &&
+    continental > 0.46 &&
+    continental < 0.74 &&
+    heightHint > seaLevel + 2 &&
+    heightHint < seaLevel + 24
+  ) {
+    return Biome.REDWOOD;
+  }
+
+  // Warm, soaked, spore-heavy — fungal jungle before rainforest
+  if (
+    bloom > 0.52 &&
+    moisture > 0.58 &&
+    temperature > 0.44 &&
+    temperature < 0.64 &&
+    continental > 0.38 &&
+    continental < 0.70 &&
+    heightHint > seaLevel &&
+    heightHint < seaLevel + 16
+  ) {
+    return Biome.FUNGAL;
+  }
+
+  // Hot, soaked inland — rainforest before generic forest
+  if (
+    temperature > 0.56 &&
+    moisture > 0.60 &&
+    continental > 0.36 &&
+    continental < 0.74 &&
+    heightHint > seaLevel - 1 &&
+    heightHint < seaLevel + 20
+  ) {
+    return Biome.RAINFOREST;
   }
 
   // Forests
@@ -271,6 +363,33 @@ export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "
         cactus: false,
         snowLine: 96,
       };
+    case Biome.REDWOOD:
+      return {
+        id,
+        heightBias: 3,
+        relief: 1.05,
+        treeThreshold: 0.999,
+        cactus: false,
+        snowLine: 100,
+      };
+    case Biome.RAINFOREST:
+      return {
+        id,
+        heightBias: 2,
+        relief: 1.08,
+        treeThreshold: 0.918,
+        cactus: false,
+        snowLine: 200,
+      };
+    case Biome.FUNGAL:
+      return {
+        id,
+        heightBias: 0,
+        relief: 0.78,
+        treeThreshold: 0.902,
+        cactus: false,
+        snowLine: 200,
+      };
     default:
       return {
         id: Biome.PLAINS,
@@ -312,6 +431,21 @@ export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: numb
     moisture,
     continental,
   };
+}
+
+/** Rain becomes snow here — snow biome, high peaks, or genuinely cold air. */
+export function isColdPrecip(
+  wx: number,
+  wy: number,
+  wz: number,
+  seed: number,
+  seaLevel: number,
+): boolean {
+  const s = sampleBiome(wx, wz, seed, seaLevel);
+  if (s.id === Biome.SNOW) return true;
+  if (s.id === Biome.MOUNTAINS && wy >= s.snowLine - 8) return true;
+  if (s.temperature < 0.34 && wy > seaLevel + 10) return true;
+  return false;
 }
 
 /**
@@ -366,6 +500,9 @@ export function grassTintAt(
   c = mix3(c, dry, inf.desert * 0.75);
   c = mix3(c, [0.52, 0.68, 0.32], inf.beach * 0.3);
   c = mix3(c, [0.72, 0.38, 0.70], inf.lavender * 0.92);
+  c = mix3(c, [0.22, 0.44, 0.20], inf.redwood * 0.85);
+  c = mix3(c, [0.10, 0.52, 0.18], inf.rainforest * 0.9);
+  c = mix3(c, [0.42, 0.24, 0.50], inf.fungal * 0.88);
   return c;
 }
 

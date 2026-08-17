@@ -67,6 +67,8 @@ export function blockDrop(id: number): ItemId | null {
     case Block.WOOD:
     case Block.BIRCH_WOOD:
     case Block.SPRUCE_WOOD:
+    case Block.REDWOOD_WOOD:
+    case Block.JUNGLE_WOOD:
     case Block.COBBLE:
     case Block.PLANKS:
     case Block.SNOW:
@@ -79,6 +81,8 @@ export function blockDrop(id: number): ItemId | null {
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
     case Block.JACARANDA_LEAVES:
+    case Block.REDWOOD_LEAVES:
+    case Block.JUNGLE_LEAVES:
       return Math.random() < 0.12 ? Block.PLANKS : null;
     case Block.BEDROCK:
     case Block.WATER:
@@ -315,6 +319,19 @@ export class SurvivalState {
     s.count--;
     if (s.count <= 0) this.slots[this.selected] = null;
     return id;
+  }
+
+  /** Swap the selected stack into `id` (splits if stacked). */
+  replaceSelected(id: ItemId): boolean {
+    const s = this.slots[this.selected];
+    if (!s || s.count <= 0) return false;
+    if (s.count > 1) {
+      s.count--;
+      this.addItem(id, 1);
+      return true;
+    }
+    this.slots[this.selected] = { id, count: 1 };
+    return true;
   }
 
   /** Eat held food. Heals now; hunger fill is stored for later. */

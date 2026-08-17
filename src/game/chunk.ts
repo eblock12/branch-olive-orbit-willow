@@ -201,6 +201,14 @@ const FACE_SHADE = [1.0, 0.72, 0.84, 0.84, 0.92, 0.92];
  * Vertex ambient occlusion levels (Minecraft-style).
  * Returns 0..3 where 3 = open (bright), 0 = fully occluded (dark corner).
  */
+export let VERTEX_AO = true;
+/** Bump to force remesh when the shade curve changes. */
+export const AO_REV = 4;
+
+export function setVertexAo(on: boolean): void {
+  VERTEX_AO = on;
+}
+
 function aoLevel(side1: boolean, side2: boolean, corner: boolean): number {
   if (side1 && side2) return 0;
   return 3 - (Number(side1) + Number(side2) + Number(corner));
@@ -208,8 +216,11 @@ function aoLevel(side1: boolean, side2: boolean, corner: boolean): number {
 
 /** Map AO level → multiplicative darkening (cheap baked AO). */
 function aoShade(level: number): number {
-  // 3 → 1.0, 2 → 0.8, 1 → 0.65, 0 → 0.5
-  return 0.5 + (level / 3) * 0.5;
+  if (!VERTEX_AO) return 1;
+  if (level <= 0) return 0.24;
+  if (level === 1) return 0.44;
+  if (level === 2) return 0.68;
+  return 1;
 }
 
 /**

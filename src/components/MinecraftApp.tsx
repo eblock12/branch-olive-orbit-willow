@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ClientOnly } from "@tanstack/react-router";
 import { BLOCKS, isPlant } from "../game/blocks";
 import type { GameEngine, HudSnapshot } from "../game/engine";
+import { defaultDebugSettings, type DebugSettings } from "../game/debugSettings";
 import type { HotbarSlot } from "../game/survival";
 import {
   isBlockItem,
@@ -29,6 +30,7 @@ const DEFAULT_HUD: HudSnapshot = {
     idleWorkers: 0,
     shared: false,
   },
+  load: { progress: 0, have: 0, need: 1 },
   target: null,
   isTouch: false,
   caterpillars: 0,
@@ -39,6 +41,7 @@ const DEFAULT_HUD: HudSnapshot = {
   slenderNearby: false,
   weather: "clear",
   rain: 0,
+  snow: false,
   dayPhase: 0.2,
   isDay: true,
   biome: "Plains",
@@ -67,6 +70,8 @@ const DEFAULT_HUD: HudSnapshot = {
   chest: null,
   recipes: [],
   freeCraft: false,
+  debugOpen: false,
+  debug: defaultDebugSettings(),
   cursor: null,
   tip: "Press E for inventory",
   notice: "",
@@ -371,9 +376,281 @@ const WEATHER_LABEL: Record<string, string> = {
   overcast: "Overcast",
   rain: "Rain",
   storm: "Storm",
+  snow: "Snow",
+  blizzard: "Blizzard",
 };
 
 /** phase 0 = 06:00, 0.25 = 12:00, 0.5 = 18:00, 0.75 = 00:00 */
+function ToggleRow({
+  label,
+  on,
+  onChange,
+}: {
+  label: string;
+  on: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => onChange(!on)}
+      className="flex w-full items-center justify-between gap-3 py-1.5 text-left"
+    >
+      <span className="text-xs text-fg">{label}</span>
+      <span
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${
+          on ? "bg-fg" : "bg-elevated ring-1 ring-inset ring-border"
+        }`}
+      >
+        <span
+          className={`block size-4 rounded-full shadow-sm transition-transform ${
+            on ? "translate-x-4 bg-bg" : "translate-x-0 bg-muted"
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
+
+function SliderRow({
+  label,
+  value,
+  min = 0,
+  max = 2,
+  step = 0.05,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block py-1">
+      <span className="flex items-center justify-between text-xs text-fg">
+        <span>{label}</span>
+        <span className="font-mono text-[10px] text-subtle">
+          {step >= 1 ? String(Math.round(value)) : value.toFixed(2)}
+        </span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="mt-1 h-1.5 w-full cursor-pointer appearance-none rounded-full bg-border accent-accent"
+      />
+    </label>
+  );
+}
+
+function DebugPanel({
+  settings,
+  onPatch,
+  onClose,
+}: {
+  settings: DebugSettings;
+  onPatch: (p: Partial<DebugSettings>) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[70] flex items-start justify-end p-3 pt-16 sm:p-4 sm:pt-20">
+      <div className="pointer-events-auto max-h-[min(78vh,40rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-border bg-surface/95 p-4 shadow-2xl">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-subtle">
+              Tuner
+            </p>
+            <h2 className="text-sm font-semibold text-fg">Graphics & audio</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-border bg-bg px-2.5 py-1 text-xs text-muted hover:text-fg"
+          >
+            Close
+          </button>
+        </div>
+        <div className="grid gap-5 sm:grid-cols-2">
+          <section>
+            <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-subtle">
+              World
+            </p>
+            <SliderRow
+              label="View chunks"
+              value={settings.viewRadius}
+              min={6}
+              max={24}
+              step={1}
+              onChange={(viewRadius) =>
+                onPatch({
+                  viewRadius,
+                  lodFull: Math.min(settings.lodFull, viewRadius - 1),
+                  lodMid: Math.min(settings.lodMid, viewRadius),
+                })
+              }
+            />
+            <SliderRow
+              label="LOD 0 (full)"
+              value={settings.lodFull}
+              min={2}
+              max={Math.max(2, settings.viewRadius - 1)}
+              step={1}
+              onChange={(lodFull) =>
+                onPatch({
+                  lodFull,
+                  lodMid: Math.max(settings.lodMid, lodFull + 1),
+                })
+              }
+            />
+            <SliderRow
+              label="LOD 1 (foliage)"
+              value={settings.lodMid}
+              min={Math.min(settings.viewRadius, settings.lodFull + 1)}
+              max={settings.viewRadius}
+              step={1}
+              onChange={(lodMid) => onPatch({ lodMid })}
+            />
+            <p className="mb-2 mt-3 text-[10px] font-medium uppercase tracking-wider text-subtle">
+              Graphics
+            </p>
+            <ToggleRow
+              label="Vertex AO"
+              on={settings.vertexAo}
+              onChange={(vertexAo) => onPatch({ vertexAo })}
+            />
+            <ToggleRow
+              label="Specular"
+              on={settings.specular}
+              onChange={(specular) => onPatch({ specular })}
+            />
+            <SliderRow
+              label="Spec strength"
+              value={settings.specStrength}
+              onChange={(specStrength) => onPatch({ specStrength })}
+            />
+            <ToggleRow
+              label="Light shafts"
+              on={settings.volumetrics}
+              onChange={(volumetrics) => onPatch({ volumetrics })}
+            />
+            <SliderRow
+              label="Shaft strength"
+              value={settings.volStrength}
+              onChange={(volStrength) => onPatch({ volStrength })}
+            />
+            <ToggleRow
+              label="Shadows"
+              on={settings.shadows}
+              onChange={(shadows) => onPatch({ shadows })}
+            />
+            <SliderRow
+              label="Shadow dark"
+              value={settings.shadowStrength}
+              max={1.5}
+              onChange={(shadowStrength) => onPatch({ shadowStrength })}
+            />
+            <ToggleRow
+              label="Clouds"
+              on={settings.clouds}
+              onChange={(clouds) => onPatch({ clouds })}
+            />
+            <ToggleRow
+              label="Cloud shadows"
+              on={settings.cloudShadows}
+              onChange={(cloudShadows) => onPatch({ cloudShadows })}
+            />
+            <ToggleRow
+              label="Rain / snow"
+              on={settings.particles}
+              onChange={(particles) => onPatch({ particles })}
+            />
+            <ToggleRow
+              label="Lightning"
+              on={settings.lightning}
+              onChange={(lightning) => onPatch({ lightning })}
+            />
+            <ToggleRow
+              label="Leaf sway"
+              on={settings.leafSway}
+              onChange={(leafSway) => onPatch({ leafSway })}
+            />
+            <ToggleRow
+              label="Fog"
+              on={settings.fog}
+              onChange={(fog) => onPatch({ fog })}
+            />
+            <ToggleRow
+              label="Birds"
+              on={settings.birds}
+              onChange={(birds) => onPatch({ birds })}
+            />
+            <ToggleRow
+              label="Ambiance FX"
+              on={settings.ambiance}
+              onChange={(ambiance) => onPatch({ ambiance })}
+            />
+          </section>
+          <section>
+            <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-subtle">
+              Audio
+            </p>
+            <ToggleRow
+              label="Mute"
+              on={settings.mute}
+              onChange={(mute) => onPatch({ mute })}
+            />
+            <SliderRow
+              label="Master"
+              value={settings.master}
+              onChange={(master) => onPatch({ master })}
+            />
+            <SliderRow
+              label="SFX"
+              value={settings.sfx}
+              onChange={(sfx) => onPatch({ sfx })}
+            />
+            <SliderRow
+              label="Ambience"
+              value={settings.amb}
+              onChange={(amb) => onPatch({ amb })}
+            />
+            <SliderRow
+              label="Rain"
+              value={settings.rain}
+              onChange={(rain) => onPatch({ rain })}
+            />
+            <SliderRow
+              label="Wind"
+              value={settings.wind}
+              onChange={(wind) => onPatch({ wind })}
+            />
+            <SliderRow
+              label="Thunder"
+              value={settings.thunder}
+              onChange={(thunder) => onPatch({ thunder })}
+            />
+            <SliderRow
+              label="Reverb"
+              value={settings.reverb}
+              onChange={(reverb) => onPatch({ reverb })}
+            />
+            <p className="mt-3 text-[10px] leading-relaxed text-subtle">
+              Reverb still ducks outdoors. Vertex AO remeshes nearby chunks.
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function formatClock(phase: number): string {
   const hours24 = ((phase * 24 + 6) % 24 + 24) % 24;
   const h = Math.floor(hours24);
@@ -388,6 +665,11 @@ function GameShell() {
   const [hud, setHud] = useState<HudSnapshot>(DEFAULT_HUD);
   const [ready, setReady] = useState(false);
   const [worldKey, setWorldKey] = useState(0);
+  const [bootGone, setBootGone] = useState(false);
+  const [bootFade, setBootFade] = useState(false);
+  const bootAt = useRef(
+    typeof performance !== "undefined" ? performance.now() : 0,
+  );
   const [confirmNew, setConfirmNew] = useState(false);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   /** Short landscape + touch only — phones held sideways; not tablets/desktop. */
@@ -464,6 +746,23 @@ function GameShell() {
     };
   }, [worldKey]);
 
+  useEffect(() => {
+    setBootGone(false);
+    setBootFade(false);
+    bootAt.current = performance.now();
+  }, [worldKey]);
+
+  useEffect(() => {
+    if (bootGone || bootFade) return;
+    if (!ready) return;
+    const enough = hud.load.progress >= 0.86;
+    const waited = performance.now() - bootAt.current > 900;
+    if (!enough || !waited) return;
+    setBootFade(true);
+    const t = window.setTimeout(() => setBootGone(true), 520);
+    return () => window.clearTimeout(t);
+  }, [ready, hud.load.progress, bootGone, bootFade]);
+
   const onPlay = useCallback(() => {
     setConfirmNew(false);
     engineRef.current?.requestPlay();
@@ -507,6 +806,14 @@ function GameShell() {
 
   const onToggleFreeCraft = useCallback(() => {
     engineRef.current?.toggleFreeCraft();
+  }, []);
+
+  const onToggleDebug = useCallback(() => {
+    engineRef.current?.toggleDebug();
+  }, []);
+
+  const onPatchDebug = useCallback((partial: Partial<DebugSettings>) => {
+    engineRef.current?.patchDebug(partial);
   }, []);
 
   const onNewWorld = useCallback(() => {
@@ -704,7 +1011,11 @@ function GameShell() {
                   lsTouch ? "text-xs" : "text-xs"
                 }`}
               >
-                {WEATHER_LABEL[hud.weather] ?? hud.weather}
+                {hud.snow
+                  ? hud.rain > 0.55
+                    ? "Blizzard"
+                    : "Snow"
+                  : (WEATHER_LABEL[hud.weather] ?? hud.weather)}
                 {hud.rain > 0.15 ? (
                   <span className="font-mono text-[10px] text-subtle">
                     {" "}
@@ -744,6 +1055,20 @@ function GameShell() {
               {!lsTouch && (
                 <button
                   type="button"
+                  onClick={onToggleDebug}
+                  className={`pointer-events-auto mt-1 w-full rounded-md border px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
+                    hud.debugOpen
+                      ? "border-accent bg-accent/20 text-fg"
+                      : "border-border bg-bg/70 text-muted hover:bg-bg hover:text-fg"
+                  }`}
+                  title="Graphics and audio tuner (F7 or `)"
+                >
+                  Tune F7
+                </button>
+              )}
+              {!lsTouch && (
+                <button
+                  type="button"
                   onClick={onNewWorld}
                   className={`pointer-events-auto mt-1 w-full rounded-md border px-1.5 py-0.5 text-[9px] font-medium transition-colors ${
                     confirmNew
@@ -761,7 +1086,7 @@ function GameShell() {
       )}
 
       {ready &&
-        (hud.playing || hud.craftingOpen || hud.furnaceOpen || hud.chestOpen) &&
+        (hud.playing || hud.craftingOpen || hud.furnaceOpen || hud.chestOpen || hud.debugOpen) &&
         !(
           hud.isTouch &&
           (hud.craftingOpen || hud.furnaceOpen || hud.chestOpen)
@@ -1291,7 +1616,7 @@ function GameShell() {
         </div>
       )}
 
-      {ready && hud.isTouch && hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && (
+      {ready && hud.isTouch && hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && !hud.debugOpen && (
         <>
           <div
             ref={stickRef}
@@ -1386,6 +1711,14 @@ function GameShell() {
       )}
 
       
+      {ready && hud.debugOpen && (
+        <DebugPanel
+          settings={hud.debug}
+          onPatch={onPatchDebug}
+          onClose={onToggleDebug}
+        />
+      )}
+
       {ready && hud.dead && (
         <div className="absolute inset-0 z-[80] flex items-center justify-center bg-bg/70 p-6 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-3xl border border-border bg-surface p-8 text-center shadow-2xl">
@@ -1407,7 +1740,7 @@ function GameShell() {
         </div>
       )}
 
-      {ready && !hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && !hud.dead && (
+      {ready && !hud.playing && !hud.craftingOpen && !hud.furnaceOpen && !hud.chestOpen && !hud.debugOpen && !hud.dead && (
         <div className="absolute inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-bg/55 p-4 backdrop-blur-[2px] sm:p-6">
           <div className="my-auto w-full max-w-md rounded-3xl border border-border bg-surface p-6 shadow-2xl shadow-black/40 sm:p-8">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-subtle">
@@ -1459,7 +1792,45 @@ function GameShell() {
         </div>
       )}
 
-      {!ready && (
+      {!bootGone && (
+        <div
+          className={`absolute inset-0 z-[90] flex items-center justify-center bg-bg/92 transition-opacity duration-500 ${
+            bootFade ? "opacity-0 pointer-events-none" : "opacity-100"
+          }`}
+        >
+          <div className="relative flex w-[min(92vw,22rem)] flex-col items-center px-6 text-center">
+            <div className="relative mb-8 h-28 w-28">
+              <div className="boot-pulse-ring absolute inset-0 rounded-full border border-fg/25" />
+              <div className="boot-pulse-ring absolute inset-3 rounded-full border border-fg/20 [animation-delay:-0.8s]" />
+              <div className="boot-pulse-core absolute inset-[2.15rem] rounded-full bg-fg/80" />
+            </div>
+            <p className="boot-title text-[11px] font-medium uppercase text-subtle">
+              Blockworld
+            </p>
+            <p className="mt-3 font-mono text-xs tabular-nums text-muted">
+              {hud.seed ? `seed ${hud.seed}` : "seeding…"}
+            </p>
+            <p className="mt-2 min-h-[1.5rem] text-lg font-medium tracking-wide text-fg">
+              {hud.biome && ready ? hud.biome : "Reading the land…"}
+            </p>
+            <div className="mt-6 h-[2px] w-full overflow-hidden rounded-full bg-border">
+              <div
+                className="h-full bg-fg/80 transition-[width] duration-300 ease-out"
+                style={{
+                  width: `${Math.round(Math.min(1, ready ? Math.max(0.08, hud.load.progress) : 0.04) * 100)}%`,
+                }}
+              />
+            </div>
+            <p className="mt-2 font-mono text-[10px] tabular-nums text-subtle">
+              {ready
+                ? `${hud.load.have} / ${hud.load.need} chunks`
+                : "waking workers"}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!ready && bootGone && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-bg">
           <p className="text-sm text-muted">Generating world…</p>
         </div>

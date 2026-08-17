@@ -24,14 +24,16 @@ type WeatherKind = CloudWeatherCell["kind"];
  */
 
 const FAIR_BASE_Y = 152;
+/** Highest cloud tops the sun shadow camera must sit above */
+export const CLOUD_SHADOW_TOP = 182;
 /** Full visibility radius (blocks) */
-const VIEW_RADIUS = 380;
+const VIEW_RADIUS = 460;
 /** Start soft edge fade here (blocks from player) */
-const FADE_START = 300;
+const FADE_START = 390;
 /** Cull completely past this */
-const CULL_RADIUS = 460;
+const CULL_RADIUS = 560;
 /** Keep existing islands a bit past spawn radius (anti thrash) */
-const KEEP_RADIUS = 400;
+const KEEP_RADIUS = 500;
 const MAX_FAIR = 1100;
 const MAX_WEATHER = 2800;
 const LAYOUT_HZ = 1.5;
@@ -94,6 +96,37 @@ function edgeFade(dist: number): number {
   if (dist <= FADE_START) return 1;
   if (dist >= CULL_RADIUS) return 0;
   return 1 - smooth01((dist - FADE_START) / (CULL_RADIUS - FADE_START));
+}
+
+function createCloudDepthMaterial(): THREE.MeshDepthMaterial {
+  const mat = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.RGBADepthPacking,
+  });
+  mat.customProgramCacheKey = () => "cloud-shadow-depth-v1";
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `#include <common>
+attribute float instanceOpacity;
+varying float vInstanceOpacity;`,
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+vInstanceOpacity = instanceOpacity;`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>
+varying float vInstanceOpacity;`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <clipping_planes_fragment>",
+      `#include <clipping_planes_fragment>
+if (vInstanceOpacity < 0.32) discard;`,
+    );
+  };
+  return mat;
 }
 
 /**
@@ -248,6 +281,9 @@ export class CloudLayer {
     this.fairMesh.frustumCulled = false;
     this.fairMesh.count = 0;
     this.fairMesh.renderOrder = -2;
+    this.fairMesh.castShadow = true;
+    this.fairMesh.receiveShadow = false;
+    this.fairMesh.customDepthMaterial = createCloudDepthMaterial();
     this.fairMesh.instanceColor = new THREE.InstancedBufferAttribute(
       new Float32Array(MAX_FAIR * 3),
       3,
@@ -268,6 +304,9 @@ export class CloudLayer {
     this.weatherMesh.frustumCulled = false;
     this.weatherMesh.count = 0;
     this.weatherMesh.renderOrder = -1;
+    this.weatherMesh.castShadow = true;
+    this.weatherMesh.receiveShadow = false;
+    this.weatherMesh.customDepthMaterial = createCloudDepthMaterial();
     this.weatherMesh.instanceColor = new THREE.InstancedBufferAttribute(
       new Float32Array(MAX_WEATHER * 3),
       3,
@@ -282,6 +321,11 @@ export class CloudLayer {
     this.group.add(this.fairMesh);
     this.group.add(this.weatherMesh);
     this.group.frustumCulled = false;
+  }
+
+  setCastShadow(on: boolean): void {
+    this.fairMesh.castShadow = on;
+    this.weatherMesh.castShadow = on;
   }
 
   get ceilingY(): number {
@@ -689,7 +733,11 @@ export class CloudLayer {
 
     const R = cell.radius;
     const step =
-      cell.kind === "storm" ? 5.5 : cell.kind === "rain" ? 9 : 11;
+      cell.kind === "storm"
+        ? Math.max(8, cell.radius / 16)
+        : cell.kind === "rain"
+          ? Math.max(9, cell.radius / 14)
+          : 11;
     // Sample bounds: storm ellipse is longer on wind axis
     const boundR =
       R *
@@ -980,5 +1028,7 @@ export class CloudLayer {
     this.weatherGeo.dispose();
     this.fairMat.dispose();
     this.weatherMat.dispose();
+    this.fairMesh.customDepthMaterial?.dispose();
+    this.weatherMesh.customDepthMaterial?.dispose();
   }
 }

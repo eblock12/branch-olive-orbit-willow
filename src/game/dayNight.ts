@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CLOUD_SHADOW_TOP } from "./clouds";
 
 /** Full cycle: 15 min day + 15 min night */
 export const DAY_LENGTH_SEC = 900;
@@ -10,6 +11,24 @@ export const CYCLE_LENGTH_SEC = DAY_LENGTH_SEC + NIGHT_LENGTH_SEC;
  * 1 ≈ very clear alpine, 2–3 typical clear day, 5+ hazy / humid.
  */
 export const AEROSOL_BASE_TURBIDITY = 2.15;
+
+/**
+ * Shadow-map bias for the key light.
+ *
+ * `bias` is a constant depth fudge (more negative as the ortho far plane
+ * grows for cloud casters). `normalBias` is world-space, so it must track
+ * shadow texel size — ~1 texel caused peter-panning under placed blocks.
+ */
+function applyKeyShadowBias(
+  shadow: THREE.DirectionalLightShadow,
+  far: number,
+  half: number,
+): void {
+  const texel = (half * 2) / Math.max(1, shadow.mapSize.x);
+  const farT = THREE.MathUtils.clamp((far - 180) / 260, 0, 1);
+  shadow.bias = -0.0002 - farT * 0.00022;
+  shadow.normalBias = texel * 0.5;
+}
 
 export type DayNightSample = {
   /** 0..1 through full cycle (0 = dawn) */
@@ -239,6 +258,7 @@ export class DayNightCycle {
   private readonly tmpUp = new THREE.Vector3();
   private readonly tmpCenter = new THREE.Vector3();
   private readonly tmpFog = new THREE.Color();
+  private _lastDist = -1;
 
   private readonly tmpSunCol = new THREE.Color();
   private readonly sample: DayNightSample;
@@ -262,15 +282,14 @@ export class DayNightCycle {
     this.keyLight = new THREE.DirectionalLight(0xfff4e0, 2.6);
     this.keyLight.castShadow = true;
     this.keyLight.shadow.mapSize.set(2048, 2048);
-    this.keyLight.shadow.bias = -0.00035;
-    this.keyLight.shadow.normalBias = 0.045;
-    this.keyLight.shadow.intensity = 0.68;
-    this.keyLight.shadow.radius = 1;
+    this.keyLight.shadow.intensity = 0.82;
+    this.keyLight.shadow.radius = 1.75;
+    applyKeyShadowBias(this.keyLight.shadow, 280, 48);
     {
       const cam = this.keyLight.shadow.camera;
-      cam.near = 2;
-      cam.far = 170;
-      const half = 44;
+      cam.near = 8;
+      cam.far = 280;
+      const half = 48;
       cam.left = -half;
       cam.right = half;
       cam.top = half;
@@ -464,19 +483,16 @@ export class DayNightCycle {
       Math.sin(this.turbidityDrift * 0.37) * 0.2;
 
     // Phase: 0 dawn → 0.25 noon → 0.5 dusk → 0.75 midnight
-    // Visual path: mid-latitude summer feel — nearly overhead at noon (not polar)
+    // Equatorial ring (east → zenith → west → nadir), then a small tilt so
+    // noon is ~74° — high, not polar — and midnight is well below the horizon.
     const theta = phase * Math.PI * 2;
-    // Peak elevation ~82° from horizon (sin ≈ 0.99) — high sun, not arctic low
-    const elevAngle = Math.sin(theta) * (Math.PI / 2.2);
-    const cosE = Math.cos(elevAngle);
-    const sinE = Math.sin(elevAngle);
-    const azim = theta;
-    // Mild south bias only — keep the arc readable without pinning the sun low
+    const obl = THREE.MathUtils.degToRad(16);
+    const yEq = Math.sin(theta);
     const sunDir = this.tmpSun
       .set(
-        cosE * Math.sin(azim),
-        sinE,
-        cosE * Math.cos(azim) * 0.35,
+        Math.cos(theta),
+        yEq * Math.cos(obl),
+        yEq * Math.sin(obl),
       )
       .normalize();
     const moonDir = this.tmpMoon.copy(sunDir).multiplyScalar(-1);
@@ -582,26 +598,25 @@ export class DayNightCycle {
 
     this.sunBillboard.position.set(
       px + sunDir.x * skyDist,
-      py + Math.max(0.05, sunDir.y) * skyDist,
+      py + sunDir.y * skyDist,
       pz + sunDir.z * skyDist,
     );
     this.moonBillboard.position.set(
       px + moonDir.x * skyDist,
-      py + Math.max(0.05, moonDir.y) * skyDist,
+      py + moonDir.y * skyDist,
       pz + moonDir.z * skyDist,
     );
     this.sunBillboard.quaternion.copy(camera.quaternion);
     this.moonBillboard.quaternion.copy(camera.quaternion);
 
-    // Billboard dimmed through haze (optical depth)
-    const sunVis = sunElevation > -0.06 ? 1 : 0;
-    const moonVis = -sunElevation > -0.06 ? 1 : 0;
+    const sunVis = THREE.MathUtils.smoothstep(sunDir.y, -0.03, 0.05);
+    const moonVis = THREE.MathUtils.smoothstep(moonDir.y, -0.03, 0.05);
     (this.sunBillboard.material as THREE.MeshBasicMaterial).opacity =
       sunVis * (0.55 + dayFactor * 0.45) * (1 - atm.mieHaze * 0.25);
     (this.moonBillboard.material as THREE.MeshBasicMaterial).opacity =
       moonVis * (0.4 + nightFactor * 0.55);
-    this.sunBillboard.visible = sunVis > 0 && sunDir.y > -0.05;
-    this.moonBillboard.visible = moonVis > 0 && moonDir.y > -0.05;
+    this.sunBillboard.visible = sunVis > 0.02;
+    this.moonBillboard.visible = moonVis > 0.02;
 
     // Slight billboard scale boost as “corona” grows with aerosols near horizon
     const corona = 1 + atm.mieHaze * 0.35 * horizon;
@@ -622,8 +637,6 @@ export class DayNightCycle {
     const pz = this._aimZ;
 
     const isDay = s.sunElevation >= 0;
-    // Actual celestial direction with a minimum slant so the shadow camera
-    // never looks straight down (unstable / vanishing shadows).
     const src = isDay ? s.sunDir : s.moonDir;
     const az = Math.atan2(src.x, src.z);
     const trueElev = Math.asin(THREE.MathUtils.clamp(src.y, -1, 1));
@@ -648,42 +661,42 @@ export class DayNightCycle {
     const color = isDay ? s.sunColor : s.moonColor;
 
     // --- World-locked shadow window ---
-    // Following the player 1:1 makes the ortho frustum slide, so shadow
-    // texels crawl across the ground when you strafe. Snap the aim point
-    // to the light-space texel grid (same basis Three.js lookAt uses) so
-    // a tree's umbra stays planted until you've moved a whole texel.
-    const dist = 78;
+    // Snap the look-at in *light space* to whole texels so walking doesn't
+    // slide the umbra. Must match Three's lookAt basis (up = +Y).
     const half = 48;
     const mapSize = this.keyLight.shadow.mapSize.x;
     const texel = (half * 2) / mapSize;
 
-    // Hold the window on a block so strafing inside a cell doesn't move it
     const gx = Math.floor(px) + 0.5;
-    const gy = Math.floor(py / 4) * 4 + 2;
+    const gy = Math.floor(py / 4) * 4 + 6;
     const gz = Math.floor(pz) + 0.5;
 
-    // Shadow camera sits at aim+dir*dist, looks at aim.
-    // lookAt: zAxis = normalize(eye - target) = dir
     const dir = this.tmpShadowDir;
-    if (Math.abs(dir.y) > 0.94) this.tmpLook.set(1, 0, 0);
-    else this.tmpLook.set(0, 1, 0);
+    this.tmpLook.set(0, 1, 0);
     this.tmpRight.crossVectors(this.tmpLook, dir).normalize();
     this.tmpUp.crossVectors(dir, this.tmpRight).normalize();
 
     const lsX = gx * this.tmpRight.x + gy * this.tmpRight.y + gz * this.tmpRight.z;
     const lsY = gx * this.tmpUp.x + gy * this.tmpUp.y + gz * this.tmpUp.z;
     const lsZ = gx * dir.x + gy * dir.y + gz * dir.z;
-    const sx = Math.floor(lsX / texel) * texel;
-    const sy = Math.floor(lsY / texel) * texel;
-    const sz = Math.floor(lsZ / texel) * texel;
+    const sx = Math.round(lsX / texel) * texel;
+    const sy = Math.round(lsY / texel) * texel;
+    const sz = Math.round(lsZ / texel) * texel;
 
     this.tmpCenter.set(
       this.tmpRight.x * sx + this.tmpUp.x * sy + dir.x * sz,
       this.tmpRight.y * sx + this.tmpUp.y * sy + dir.y * sz,
       this.tmpRight.z * sx + this.tmpUp.z * sy + dir.z * sz,
     );
-    // Raise the look-at a bit so nearby terrain is centered in the frustum
-    this.tmpCenter.y += 4;
+
+    const elevY = Math.max(0.22, dir.y);
+    const minLightY = CLOUD_SHADOW_TOP + 24;
+    const rawDist = THREE.MathUtils.clamp(
+      Math.max(110, (minLightY - this.tmpCenter.y) / elevY),
+      110,
+      320,
+    );
+    const dist = Math.round(rawDist / 16) * 16;
 
     this.keyLight.position.set(
       this.tmpCenter.x + dir.x * dist,
@@ -696,25 +709,25 @@ export class DayNightCycle {
     this.keyLight.intensity = keyI;
     this.keyLight.visible = true;
     this.keyLight.castShadow = true;
-    this.keyLight.shadow.intensity = isDay ? 0.72 : 0.88;
-    this.keyLight.shadow.bias = -0.00035;
-    this.keyLight.shadow.normalBias = 0.045;
-    this.keyLight.shadow.radius = 1;
+    this.keyLight.shadow.intensity = isDay ? 0.84 : 0.94;
+    this.keyLight.shadow.radius = 1.75;
     {
       const cam = this.keyLight.shadow.camera;
-      cam.near = 4;
-      cam.far = 160;
+      cam.near = 8;
+      cam.far = dist + 96;
       cam.left = -half;
       cam.right = half;
       cam.top = half;
       cam.bottom = -half;
       cam.up.set(0, 1, 0);
-      if (Math.abs(dir.y) > 0.94) cam.up.set(1, 0, 0);
-      cam.updateProjectionMatrix();
+      if (dist !== this._lastDist) {
+        cam.updateProjectionMatrix();
+        this._lastDist = dist;
+      }
+      applyKeyShadowBias(this.keyLight.shadow, cam.far, half);
     }
     this.keyLight.updateMatrixWorld(true);
     this.keyLight.shadow.camera.updateMatrixWorld();
-    this.keyLight.shadow.needsUpdate = true;
 
     // Fill: same direction/color, no shadows — far terrain stays lit
     this.fillLight.color.copy(color);

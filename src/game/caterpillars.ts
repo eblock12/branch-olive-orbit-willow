@@ -206,6 +206,17 @@ export class NaughtyCaterpillar {
     this.targetZ = this.z + Math.sin(a) * d;
   }
 
+  scareFrom(fromX: number, fromZ: number): void {
+    if (!this.alive || this.dying) return;
+    this.mood = "flee";
+    this.stateT = 1.6 + Math.random();
+    const dx = this.x - fromX;
+    const dz = this.z - fromZ;
+    const len = Math.hypot(dx, dz) || 1;
+    this.targetX = this.x + (dx / len) * 8;
+    this.targetZ = this.z + (dz / len) * 8;
+  }
+
   hit(fromX: number, fromZ: number, damage = 1): "hurt" | "dead" | "miss" {
     if (!this.alive || this.dying) return "miss";
     this.hp -= damage;
@@ -707,6 +718,31 @@ export class CaterpillarSystem {
       if (d < best) best = d;
     }
     return best;
+  }
+
+  nearest(
+    x: number,
+    z: number,
+    r: number,
+  ): { x: number; y: number; z: number; scare: () => void } | null {
+    let best: NaughtyCaterpillar | null = null;
+    let bestD = r;
+    for (const c of this.list) {
+      if (!c.alive) continue;
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    if (!best) return null;
+    const prey = best;
+    return {
+      x: prey.x,
+      y: prey.y,
+      z: prey.z,
+      scare: () => prey.scareFrom(x, z),
+    };
   }
 
   seedAround(world: World, cx: number, cz: number, n: number): void {

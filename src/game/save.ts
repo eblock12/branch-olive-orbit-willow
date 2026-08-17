@@ -3,6 +3,14 @@ import type { HotbarSlot } from "./survival";
 
 export const SAVE_KEY = "blockworld.save.v1";
 
+/** Old tool/material IDs (100–144) now live at 200–244 so blocks can use 100+. */
+function migrateLegacyItemId(id: number, durability?: number): number {
+  if (id < 100 || id > 144) return id;
+  // 100–106 overlap new blocks. Tools always carry durability; blocks don't.
+  if (id >= 101 && id <= 106 && durability == null) return id;
+  return id + 100;
+}
+
 export type SavedStack = {
   id: number;
   count: number;
@@ -71,9 +79,10 @@ export function stackToSaved(s: ItemStack | null | undefined): SavedStack | null
 
 export function savedToStack(s: SavedStack | null | undefined): HotbarSlot {
   if (!s || s.count <= 0) return null;
+  const id = migrateLegacyItemId(s.id, s.durability);
   return s.durability != null
-    ? { id: s.id, count: s.count, durability: s.durability }
-    : { id: s.id, count: s.count };
+    ? { id, count: s.count, durability: s.durability }
+    : { id, count: s.count };
 }
 
 export function loadWorldSave(): WorldSave | null {

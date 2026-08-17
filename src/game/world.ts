@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, isPlant, isSolid, isWater, isSourceWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isLeaves, canSupportTorch, canSupportLadder, torchAttachDir, ladderAttachDir, doorIsUpper, doorMateId, waterLevel, waterIdForLevel, lightEmission, blocksLight } from "./blocks";
+import { Block, isPlant, isSolid, isWater, isSourceWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isLeaves, canSupportTorch, canSupportLadder, torchAttachDir, ladderAttachDir, doorIsUpper, doorMateId, waterLevel, waterIdForLevel, lightEmission, blocksLight, isPortal } from "./blocks";
 import { computeChunkLighting, applyBlockLightEdit, estimateColumnSky } from "./lighting";
 import {
   Chunk,
@@ -11,12 +11,14 @@ import {
   chunkKey,
   geometryFromPacked,
   worldToChunk,
-  lodFromChunkDist,
+  VERTEX_AO,
+  AO_REV,
   type ChunkKey,
   type ChunkLod,
 } from "./chunk";
-import { sampleBiome, BIOME_LABEL, type BiomeId } from "./biomes";
+import { sampleBiome, BIOME_LABEL, isColdPrecip as coldPrecipAt, type BiomeId } from "./biomes";
 import { generateChunkBlocks } from "./chunkGen";
+import type { PortalSystem } from "./portals";
 import type { ChunkWorkerRequest, ChunkWorkerResponse } from "./chunkWorker";
 import { packEdit, unpackEdit } from "./save";
 import {
@@ -64,10 +66,14 @@ export class World {
   private material: THREE.MeshLambertMaterial;
   private waterMaterial: THREE.Material;
   private viewRadius: number;
+  private lodFull = 7;
+  private lodMid = 13;
   private meshQueue: Chunk[] = [];
   private maxMeshesPerFrame: number;
   /** ms budget for meshing per ensureChunksAround call */
   private meshBudgetMs: number;
+  private aoOn = true;
+  private aoRev = 0;
 
   private genQueue: GenJob[] = [];
   private pendingGen = new Set<ChunkKey>();
@@ -121,6 +127,7 @@ export class World {
   /** Sparse player/sim edits applied on top of generated terrain */
   private voxelEdits = new Map<ChunkKey, Map<number, number>>();
   editsDirty = false;
+  private portals: PortalSystem | null = null;
 
   constructor(
     seed: number,
@@ -139,6 +146,10 @@ export class World {
 
     this.group.add(this.waterGroup);
     this.initWorkers();
+  }
+
+  bindPortals(portals: PortalSystem): void {
+    this.portals = portals;
   }
 
   private initWorkers(): void {
@@ -343,7 +354,7 @@ export class World {
     for (const [dx, dz, theirBit] of dirs) {
       const n = this.chunks.get(chunkKey(chunk.cx + dx, chunk.cz + dz));
       if (!n?.mesh) continue;
-      if (lodFromChunkDist(n.cx - this.lastPcx, n.cz - this.lastPcz) !== 0) {
+      if (this.desiredLod(n.cx, n.cz, this.lastPcx, this.lastPcz) !== 0) {
         continue;
       }
       if (n.bakeMask & theirBit) continue;
@@ -406,7 +417,7 @@ export class World {
       const n = this.chunks.get(chunkKey(cx + dx, cz + dz));
       if (n) {
         n.lightDirty = true;
-        if (lodFromChunkDist(n.cx - this.lastPcx, n.cz - this.lastPcz) === 0) {
+        if (this.desiredLod(n.cx, n.cz, this.lastPcx, this.lastPcz) === 0) {
           n.dirty = true;
         }
       }
@@ -451,7 +462,31 @@ export class World {
 
   private desiredLod(cx: number, cz: number, pcx: number, pcz: number): ChunkLod {
     if (this.isStreamFocus(cx, cz)) return 0;
-    return lodFromChunkDist(cx - pcx, cz - pcz);
+    const d = Math.hypot(cx - pcx, cz - pcz);
+    if (d <= this.lodFull) return 0;
+    if (d <= this.lodMid) return 1;
+    return 2;
+  }
+
+  setViewSettings(radius: number, lodFull: number, lodMid: number): void {
+    const r = Math.max(6, Math.min(24, Math.round(radius)));
+    const f = Math.max(2, Math.min(r - 1, Math.round(lodFull)));
+    const m = Math.max(f + 1, Math.min(r, Math.round(lodMid)));
+    if (this.viewRadius === r && this.lodFull === f && this.lodMid === m) return;
+    this.viewRadius = r;
+    this.lodFull = f;
+    this.lodMid = m;
+    for (const c of this.chunks.values()) {
+      const desired = this.desiredLod(c.cx, c.cz, this.lastPcx, this.lastPcz);
+      if (c.targetLod !== desired || c.meshLod !== desired) {
+        c.targetLod = desired;
+        c.dirty = true;
+      }
+    }
+  }
+
+  getViewRadius(): number {
+    return this.viewRadius;
   }
 
   private pumpGenQueue(): void {
@@ -542,6 +577,30 @@ export class World {
 
   getBiomeLabel(wx: number, wz: number): string {
     return BIOME_LABEL[this.getBiomeAt(wx, wz)] ?? "Unknown";
+  }
+
+  isColdPrecip(wx: number, wy: number, wz: number): boolean {
+    return coldPrecipAt(wx, wy, wz, this.seed, SEA_LEVEL);
+  }
+
+  /** Fraction of a disk around (wx,wz) that is generated and meshed. */
+  getRingMeshProgress(
+    wx: number,
+    wz: number,
+    radius = 6,
+  ): { have: number; need: number; progress: number } {
+    const [pcx, pcz] = worldToChunk(Math.floor(wx), Math.floor(wz));
+    let need = 0;
+    let have = 0;
+    for (let dz = -radius; dz <= radius; dz++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dz * dz > radius * radius + 1) continue;
+        need++;
+        const chunk = this.chunks.get(chunkKey(pcx + dx, pcz + dz));
+        if (chunk && chunk.mesh && !chunk.dirty) have++;
+      }
+    }
+    return { have, need, progress: need > 0 ? have / need : 1 };
   }
 
   getBlock(wx: number, wy: number, wz: number): number {
@@ -826,6 +885,35 @@ export class World {
     this.queueWater(wx, wy, wz - 1);
     this.queueWater(wx, wy - 1, wz);
     this.queueWater(wx, wy + 1, wz);
+    if (!this.portals) return;
+    const cells = [
+      [wx, wy, wz],
+      [wx + 1, wy, wz],
+      [wx - 1, wy, wz],
+      [wx, wy, wz + 1],
+      [wx, wy, wz - 1],
+    ] as const;
+    for (const [x, y, z] of cells) {
+      if (!isPortal(this.getBlock(x, y, z))) continue;
+      for (const hop of this.portals.mapWater(this, x, y, z)) {
+        this.queueWater(hop.x, hop.y, hop.z);
+      }
+    }
+  }
+
+  private waterNeighbor(wx: number, wy: number, wz: number): number {
+    const id = this.getBlock(wx, wy, wz);
+    if (!this.portals || !isPortal(id)) return id;
+    let bestId = Block.AIR;
+    let best = 0;
+    for (const hop of this.portals.mapWater(this, wx, wy, wz)) {
+      const n = this.getBlock(hop.x, hop.y, hop.z);
+      if (isWater(n) && waterLevel(n) > best) {
+        best = waterLevel(n);
+        bestId = n;
+      }
+    }
+    return bestId;
   }
 
   private queueWater(wx: number, wy: number, wz: number): void {
@@ -850,6 +938,15 @@ export class World {
    */
   tick(dt: number, px: number, pz: number): BlockPop[] {
     const popped: BlockPop[] = [];
+    if (this.aoOn !== VERTEX_AO || this.aoRev !== AO_REV) {
+      this.aoOn = VERTEX_AO;
+      this.aoRev = AO_REV;
+      for (const c of this.chunks.values()) {
+        const d = Math.hypot(c.cx - this.lastPcx, c.cz - this.lastPcz);
+        if (d <= 8) this.remeshChunk(c);
+        else c.dirty = true;
+      }
+    }
 
     // Immediate scheduled (player broke dirt under a flower, etc.)
     if (this.scheduled.size > 0) {
@@ -874,12 +971,17 @@ export class World {
     }
 
     this.waterAcc += dt;
-    if (this.waterAcc >= 0.16) {
+    if (this.waterAcc >= 0.12) {
       this.waterAcc = 0;
       this.tickWater(popped);
       this.flushTickRemesh();
     }
     return popped;
+  }
+
+  /** Run one water step now (after placing/scooping a source). */
+  kickWater(): void {
+    this.waterAcc = 1;
   }
 
   private tickWater(popped: BlockPop[]): void {
@@ -901,14 +1003,15 @@ export class World {
     for (const chunk of this.remeshLater) {
       if (!this.chunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
       chunk.dirty = true;
-      if (!this.meshQueue.includes(chunk)) this.meshQueue.push(chunk);
+      this.remeshChunk(chunk);
     }
     this.remeshLater.clear();
   }
 
   /**
-   * Minecraft-like: sources stay; flowing decays by 1 per step, falls first,
-   * two horizontal sources create a new source. Plants in the way wash out.
+   * Sources stay put. Flowing water is always one less than the strongest
+   * neighbor (or a full fall from water above) and evaporates if that support
+   * disappears. Two adjacent sources still form a new source.
    */
   private tickWaterCell(
     wx: number,
@@ -931,7 +1034,7 @@ export class World {
       [0, -1],
     ];
     for (const [dx, dz] of dirs) {
-      const n = this.getBlock(wx + dx, wy, wz + dz);
+      const n = this.waterNeighbor(wx + dx, wy, wz + dz);
       if (isSourceWater(n)) {
         sources++;
         incoming = Math.max(incoming, 8);
@@ -939,19 +1042,29 @@ export class World {
         incoming = Math.max(incoming, waterLevel(n));
       }
     }
-    if (isWater(above)) incoming = Math.max(incoming, 8);
-    if (sources >= 2) incoming = 8;
+    const fromAbove = isWater(above);
 
-    const newLevel = incoming >= 8 ? 8 : incoming - 1;
-    const isSrc = isSourceWater(id);
-
-    // Source never evaporates or weakens
-    if (isSrc) {
+    // Source: never weaken. Keep flooding.
+    if (isSourceWater(id)) {
       this.tryFloodDown(wx, wy, wz, 7, popped);
       this.tryFloodSides(wx, wy, wz, 7, popped);
       return;
     }
 
+    // Infinite spring: 2+ horizontal sources
+    if (sources >= 2) {
+      if (isPlant(id)) {
+        if (!this.writeBlock(wx, wy, wz, Block.AIR, false)) return;
+        popped.push({ x: wx, y: wy, z: wz, id });
+      }
+      this.writeBlock(wx, wy, wz, Block.WATER, false);
+      this.tryFloodDown(wx, wy, wz, 7, popped);
+      this.tryFloodSides(wx, wy, wz, 7, popped);
+      return;
+    }
+
+    // Falling is flowing 7, never a new source — so it dries if the column dies.
+    const newLevel = fromAbove ? 7 : incoming - 1;
     if (newLevel < 1) {
       if (isWater(id)) this.writeBlock(wx, wy, wz, Block.AIR, false);
       return;
@@ -967,14 +1080,12 @@ export class World {
       this.writeBlock(wx, wy, wz, desired, false);
     }
 
-    // Fall first
     if (this.canWaterEnter(below)) {
-      this.placeFlow(wx, wy - 1, wz, Math.max(newLevel, 7), popped);
+      this.placeFlow(wx, wy - 1, wz, 7, popped);
     }
     if (newLevel > 1) {
       this.tryFloodSides(wx, wy, wz, newLevel - 1, popped);
     }
-    void below;
   }
 
   private canWaterEnter(id: number): boolean {
@@ -1013,6 +1124,12 @@ export class World {
     popped: BlockPop[],
   ): void {
     if (wy < 0 || wy >= CHUNK_HEIGHT) return;
+    if (this.portals && isPortal(this.getBlock(wx, wy, wz))) {
+      for (const hop of this.portals.mapWater(this, wx, wy, wz)) {
+        this.placeFlow(hop.x, hop.y, hop.z, level, popped);
+      }
+      return;
+    }
     const cur = this.getBlock(wx, wy, wz);
     if (!this.canWaterEnter(cur)) return;
     if (isPlant(cur)) {

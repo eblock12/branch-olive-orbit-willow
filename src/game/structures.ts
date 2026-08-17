@@ -584,15 +584,19 @@ function placeGiantMushroom(ctx: Ctx, ox: number, oz: number): void {
   const y = floor;
   ensureColumnGrounded(ctx, ox, oz, y + 1, Block.DIRT);
   const H = 6 + Math.floor(hash2(ox, oz, ctx.seed + 15) * 5);
-  pillar(ctx, ox, y + 1, oz, H, Block.WOOD);
+  pillar(ctx, ox, y + 1, oz, H, Block.MUSHROOM_STEM);
   const r = 3 + Math.floor(hash2(ox, oz, ctx.seed + 16) * 2);
   const capY = y + H;
+  const cap =
+    hash2(ox, oz, ctx.seed + 17) > 0.5
+      ? Block.MUSHROOM_CAP_CYAN
+      : Block.MUSHROOM_CAP_RED;
   for (let dz = -r; dz <= r; dz++) {
     for (let dx = -r; dx <= r; dx++) {
       if (dx * dx + dz * dz > r * r + 1) continue;
-      setBlock(ctx, ox + dx, capY, oz + dz, Block.LEAVES);
+      setBlock(ctx, ox + dx, capY, oz + dz, cap);
       if (dx * dx + dz * dz < (r - 1) * (r - 1)) {
-        setBlock(ctx, ox + dx, capY + 1, oz + dz, Block.LEAVES);
+        setBlock(ctx, ox + dx, capY + 1, oz + dz, cap);
       }
     }
   }
@@ -823,7 +827,7 @@ const STRUCTURES: Array<{
   { name: "pyramid", weight: 0.7, place: placePyramid, biomes: [Biome.DESERT, Biome.BEACH] },
   { name: "shipwreck", weight: 0.9, place: placeShipwreck, biomes: [Biome.OCEAN, Biome.BEACH, Biome.SWAMP] },
   { name: "well", weight: 0.8, place: placeWell, avoidOcean: true },
-  { name: "mushroom", weight: 0.75, place: placeGiantMushroom, biomes: [Biome.FOREST, Biome.SWAMP, Biome.PLAINS] },
+  { name: "mushroom", weight: 0.75, place: placeGiantMushroom, biomes: [Biome.FOREST, Biome.SWAMP, Biome.PLAINS, Biome.RAINFOREST, Biome.FUNGAL] },
   { name: "portal", weight: 0.85, place: placeRuinedPortal, avoidOcean: true },
   { name: "sky_islet", weight: 0.5, place: placeSkyIslet, avoidOcean: true },
   { name: "dungeon", weight: 0.65, place: placeDungeonMouth, avoidOcean: true },

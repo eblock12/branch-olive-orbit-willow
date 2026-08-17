@@ -87,6 +87,42 @@ export class GameAudio {
   private listenY = 0;
   private listenZ = 0;
   private listenYaw = 0;
+  private mix = {
+    master: 1,
+    sfx: 1,
+    amb: 1,
+    rain: 1,
+    wind: 1,
+    thunder: 1,
+    reverb: 1,
+  };
+
+  applyMix(m: {
+    master: number;
+    sfx: number;
+    amb: number;
+    rain: number;
+    wind: number;
+    thunder: number;
+    reverb: number;
+    mute: boolean;
+  }): void {
+    this.mix = {
+      master: m.master,
+      sfx: m.sfx,
+      amb: m.amb,
+      rain: m.rain,
+      wind: m.wind,
+      thunder: m.thunder,
+      reverb: m.reverb,
+    };
+    this.setMuted(m.mute);
+    if (this.muted) return;
+    if (this.master) this.master.gain.value = this.masterLevel * m.master;
+    if (this.sfx) this.sfx.gain.value = 0.72 * m.sfx;
+    if (this.sfxClose) this.sfxClose.gain.value = 0.8 * m.sfx;
+    if (this.amb) this.amb.gain.value = 0.85 * m.amb;
+  }
 
   async resume(): Promise<void> {
     if (this.muted) return;
@@ -137,6 +173,7 @@ export class GameAudio {
       submerged: boolean;
       dayFactor: number;
       rain: number;
+      snowing?: boolean;
       windSpeed: number;
       surface: AudioSurface;
       /** 0 = buried, 1 = open sky */
@@ -171,15 +208,19 @@ export class GameAudio {
       opts.playing ? 0.04 * night * (1 - opts.rain * 0.4) : 0,
       now,
     );
+    const raining = opts.playing && !opts.submerged && !opts.snowing ? opts.rain : 0;
+    const snowing = opts.playing && !opts.submerged && opts.snowing ? opts.rain : 0;
     this.ramp(
       this.windGain,
-      opts.playing ? 0.02 + opts.windSpeed * 0.06 + opts.rain * 0.02 : 0,
+      opts.playing
+        ? (0.02 + opts.windSpeed * 0.06 + raining * 0.02 + snowing * 0.05) *
+            this.mix.wind
+        : 0,
       now,
     );
-    const rainVol = opts.playing && !opts.submerged ? opts.rain : 0;
-    this.ramp(this.rainGain, rainVol * 0.5, now);
-    this.grainRain = rainVol;
-    if (opts.playing && !opts.submerged && this.rainWashGain && this.rainRumbleGain) {
+    this.ramp(this.rainGain, raining * 0.5 * this.mix.rain, now);
+    this.grainRain = raining * this.mix.rain;
+    if (opts.playing && !opts.submerged && !opts.snowing && this.rainWashGain && this.rainRumbleGain) {
       const r = opts.rain;
       this.rainWashGain.gain.setTargetAtTime(0.3 + r * 0.35, now, 0.4);
       this.rainRumbleGain.gain.setTargetAtTime(r * 0.4, now, 0.5);
@@ -211,22 +252,27 @@ export class GameAudio {
         Math.max(0, Math.min(1, (open - 0.38) / 0.42));
       const room = enclosed * (1 - open) * (1 - cave);
       const outdoor = sky > 0.65;
-      const send = outdoor ? 0 : 1;
+      const send = (outdoor ? 0 : 1) * this.mix.reverb;
       this.verbSend?.gain.setTargetAtTime(send, now, outdoor ? 0.04 : 0.12);
-      this.ambVerbSend?.gain.setTargetAtTime(outdoor ? 0 : 0.03, now, 0.1);
+      this.ambVerbSend?.gain.setTargetAtTime(
+        (outdoor ? 0 : 0.03) * this.mix.reverb,
+        now,
+        0.1,
+      );
 
       this.verbEarlyGain?.gain.setTargetAtTime(
-        outdoor ? 0 : 0.01 + room * 0.045 + cave * 0.03,
+        (outdoor ? 0 : 0.01 + room * 0.045 + cave * 0.03) * this.mix.reverb,
         now,
         outdoor ? 0.04 : 0.16,
       );
       this.verbHallGain?.gain.setTargetAtTime(
-        outdoor ? 0 : room * 0.028 + cave * 0.07,
+        (outdoor ? 0 : room * 0.028 + cave * 0.07) * this.mix.reverb,
         now,
         outdoor ? 0.04 : 0.16,
       );
       this.verbCanyonGain.gain.setTargetAtTime(
-        outdoor ? 0 : cave * cave * 0.12 + (cave > 0.55 ? 0.025 : 0),
+        (outdoor ? 0 : cave * cave * 0.12 + (cave > 0.55 ? 0.025 : 0)) *
+          this.mix.reverb,
         now,
         outdoor ? 0.05 : 0.18,
       );
@@ -306,6 +352,12 @@ export class GameAudio {
     if (t - this.lastUi < 50) return;
     this.lastUi = t;
     this.click();
+  }
+
+  meow(): void {
+    const pitch = 480 + Math.random() * 160;
+    this.tone(pitch, 0.07, 0.1, "sine");
+    this.tone(pitch * 0.72, 0.14, 0.08, "triangle", 0, undefined, 0.05);
   }
 
   door(opening: boolean, wx?: number, wy?: number, wz?: number): void {
@@ -1114,7 +1166,7 @@ export class GameAudio {
     const far = 1 - close;
     const mid = close * far * 4; // peaks around medium distance
     const rumbleBuf = this.thunderNoiseBuf ?? this.noiseBuf;
-    const V = vol * 1.2;
+    const V = vol * 1.2 * this.mix.thunder;
 
     // Strike character roll
     const roll = Math.random();
@@ -1638,8 +1690,13 @@ export function surfaceFromBlock(id: number): AudioSurface {
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
     case Block.JACARANDA_LEAVES:
+    case Block.REDWOOD_LEAVES:
+    case Block.JUNGLE_LEAVES:
     case Block.VINE:
     case Block.LILY_PAD:
+    case Block.MYCELIUM:
+    case Block.MUSHROOM_CAP_RED:
+    case Block.MUSHROOM_CAP_CYAN:
       return "grass";
     case Block.DIRT:
     case Block.CLAY:
@@ -1660,6 +1717,9 @@ export function surfaceFromBlock(id: number): AudioSurface {
     case Block.WOOD:
     case Block.BIRCH_WOOD:
     case Block.SPRUCE_WOOD:
+    case Block.REDWOOD_WOOD:
+    case Block.JUNGLE_WOOD:
+    case Block.MUSHROOM_STEM:
     case Block.PLANKS:
     case Block.PUMPKIN:
     case Block.DOOR:
