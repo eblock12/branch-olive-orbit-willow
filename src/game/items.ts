@@ -453,7 +453,9 @@ export function baseMineTime(blockId: number): number {
       return 0.55;
     case Block.CACTUS:
     case Block.ICE:
-      return 0.55;
+    case Block.GLASS:
+    case Block.GLASS_PANE:
+      return 0.45;
     case Block.WOOD:
     case Block.BIRCH_WOOD:
     case Block.SPRUCE_WOOD:
@@ -822,6 +824,13 @@ export const RECIPES: Recipe[] = [
     inputs: [{ id: Item.STICK, count: 7 }],
     output: { id: Block.LADDER, count: 3 },
     hint: "Hang on a wall and climb caves",
+  },
+  {
+    id: "glass_pane",
+    name: "Glass Pane",
+    inputs: [{ id: Block.GLASS, count: 6 }],
+    output: { id: Block.GLASS_PANE, count: 16 },
+    hint: "Thin windows — connects to neighbors",
   },
   {
     id: "bed",

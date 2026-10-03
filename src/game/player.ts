@@ -542,6 +542,7 @@ export class Player {
               px + this.halfW - eps,
               py + this.height - eps,
               pz + this.halfW - eps,
+              (gx, gy, gz) => world.getBlock(gx, gy, gz),
             )
           ) {
             return true;

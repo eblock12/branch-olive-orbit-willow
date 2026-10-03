@@ -210,89 +210,84 @@ export function createBlockAtlas(): {
   });
 
   // ───────────────────────────────────────────────────────────
-  // 3 — stone: layered grey with subtle cracks
+  // 3 — stone: mottled gray, crack veins, pale flecks
   // ───────────────────────────────────────────────────────────
   drawTile(d, 3, atlasW, (x, y, set) => {
     const n =
-      hSigned(x, y, 30) * 0.5 + hSigned(x >> 1, y >> 1, 31) * 0.5;
-    const band = h01(x, y >> 2, 32);
-    let v = 118 + n * 14 + band * 8;
-    // micro flecks
-    if (h01(x, y, 33) > 0.93) v -= 18;
-    if (h01(x, y, 34) > 0.95) v += 14;
-    // crack lines
-    const crack =
-      (Math.abs((x * 3 + y * 5 + 2) % 17) === 0 && h01(x, y, 35) > 0.4) ||
-      (Math.abs((x * 5 - y * 2) % 19) === 0 && h01(x, y, 36) > 0.55);
-    if (crack) v -= 28;
-    set(clamp(v), clamp(v), clamp(v + 3));
+      hSigned(x, y, 30) * 0.45 +
+      hSigned(x >> 1, y >> 1, 31) * 0.35 +
+      hSigned(x >> 2, y >> 2, 32) * 0.2;
+    let v = 126 + n * 16;
+    const vein =
+      Math.min(
+        wrapDist(x * 2 + y * 3 + 4, 11),
+        wrapDist(x * 3 - y * 2 + 7, 13),
+      ) < 0.55 && h01(x, y, 33) > 0.28;
+    if (vein) v -= 34;
+    if (h01(x, y, 34) > 0.91) v -= 22;
+    if (h01(x, y, 35) > 0.94) v += 20;
+    set(clamp(v), clamp(v), clamp(v + 4));
   });
 
   // ───────────────────────────────────────────────────────────
-  // 4 — sand: warm fine grain + soft dunes
+  // 4 — sand: warm grain + a few darker pebbles
   // ───────────────────────────────────────────────────────────
   drawTile(d, 4, atlasW, (x, y, set) => {
     const n =
-      hSigned(x, y, 40) * 0.45 + hSigned(x >> 1, y >> 1, 41) * 0.35;
-    const dune = Math.sin((x + y * 0.6) * 0.55) * 0.5 + 0.5;
-    let r = 214 + n * 10 + dune * 8;
-    let g = 194 + n * 8 + dune * 6;
-    let b = 132 + n * 6 + dune * 4;
-    if (h01(x, y, 42) > 0.94) {
-      r -= 12;
-      g -= 10;
-      b -= 8;
+      hSigned(x, y, 40) * 0.5 + hSigned(x >> 1, y >> 1, 41) * 0.3;
+    const dune = Math.sin((x + y * 0.55) * 0.5) * 0.5 + 0.5;
+    let r = 216 + n * 12 + dune * 8;
+    let g = 196 + n * 9 + dune * 6;
+    let b = 136 + n * 6 + dune * 4;
+    if (h01(x >> 1, y >> 1, 42) > 0.82 && h01(x, y, 43) > 0.55) {
+      r -= 28;
+      g -= 24;
+      b -= 18;
     }
-    if (h01(x, y, 43) > 0.96) {
-      r += 10;
-      g += 8;
+    if (h01(x, y, 44) > 0.96) {
+      r += 14;
+      g += 10;
     }
     set(clamp(r), clamp(g), clamp(b));
   });
 
   // ───────────────────────────────────────────────────────────
-  // 5 — wood top: growth rings + soft center
+  // 5 — wood top: growth rings + pith
   // ───────────────────────────────────────────────────────────
   drawTile(d, 5, atlasW, (x, y, set) => {
     const cx = x - 7.5;
     const cy = y - 7.5;
     const r0 = Math.sqrt(cx * cx + cy * cy);
-    const ring = Math.sin(r0 * 1.65 + hSigned(x, y, 50) * 0.35);
-    const heart = r0 < 1.6;
-    if (heart) {
-      set(96, 68, 36);
+    const ring = Math.sin(r0 * 1.7 + hSigned(x, y, 50) * 0.4);
+    const n = hSigned(x, y, 51) * 5;
+    if (r0 < 1.5) {
+      set(102, 72, 38);
       return;
     }
-    const light = ring > 0;
-    const n = hSigned(x, y, 51) * 4;
-    if (light) set(clamp(168 + n), clamp(128 + n * 0.7), clamp(72 + n * 0.4));
-    else set(clamp(124 + n), clamp(88 + n * 0.7), clamp(48 + n * 0.4));
+    if (ring > 0.15) set(clamp(176 + n), clamp(132 + n * 0.7), clamp(74 + n * 0.4));
+    else set(clamp(132 + n), clamp(94 + n * 0.7), clamp(50 + n * 0.4));
   });
 
   // ───────────────────────────────────────────────────────────
-  // 6 — wood side / bark: vertical grain + dark seams
+  // 6 — wood side / bark: vertical ridges + knot
   // ───────────────────────────────────────────────────────────
   drawTile(d, 6, atlasW, (x, y, set) => {
-    const grain = hSigned(x, y, 60) * 0.4 + hSigned(x, y >> 1, 61) * 0.6;
-    const strip = h01(x, 0, 62);
-    // bark ridges every few columns
-    const ridge = x % 4 === 0 || (x % 4 === 1 && strip > 0.6);
-    if (ridge) {
-      set(
-        clamp(62 + grain * 8),
-        clamp(44 + grain * 6),
-        clamp(26 + grain * 4),
-      );
-      return;
-    }
-    let r = 108 + grain * 14;
-    let g = 76 + grain * 10;
-    let b = 42 + grain * 6;
-    // knot
-    if (h01(x >> 1, y >> 1, 63) > 0.93 && Math.hypot(x - 8, y - 9) < 2.4) {
-      r -= 30;
-      g -= 22;
-      b -= 12;
+    const col = Math.floor(x / 3);
+    const local = x % 3;
+    const n = hSigned(x, y, 60 + col) * 8;
+    const ridge = local === 0 || (local === 1 && h01(col, 0, 62) > 0.62);
+    let r = ridge ? 72 : 124;
+    let g = ridge ? 50 : 86;
+    let b = ridge ? 30 : 46;
+    r += n;
+    g += n * 0.7;
+    b += n * 0.45;
+    const kx = 10;
+    const ky = 7;
+    if (Math.hypot(x - kx, y - ky) < 2.3) {
+      r -= 28;
+      g -= 20;
+      b -= 10;
     }
     set(clamp(r), clamp(g), clamp(b));
   });
@@ -357,14 +352,14 @@ export function createBlockAtlas(): {
       const dist = dx * dx + dy * dy;
       if (dist < best2) best2 = dist;
     }
-    const edge = best2 - best < 6;
+    const edge = best2 - best < 9;
     const shade = hSigned(bestI, 0, 82);
     if (edge) {
-      set(68, 68, 72);
+      set(62, 62, 68);
       return;
     }
-    const v = 108 + shade * 16 + hSigned(x, y, 83) * 6;
-    set(clamp(v), clamp(v), clamp(v + 4));
+    const v = 118 + shade * 22 + hSigned(x, y, 83) * 8;
+    set(clamp(v), clamp(v - 2), clamp(v + 4));
   });
 
   // ───────────────────────────────────────────────────────────
@@ -446,25 +441,25 @@ export function createBlockAtlas(): {
   // ───────────────────────────────────────────────────────────
   drawTile(d, 12, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 120) * 0.5 + hSigned(x >> 1, y >> 1, 121) * 0.5;
-    let r = 150 + n * 10;
-    let g = 198 + n * 8;
-    let b = 228 + n * 6;
-    // fracture
-    if (
-      Math.abs((x * 3 + y * 7) % 13) === 0 ||
-      Math.abs((x * 5 - y * 2) % 17) === 0
-    ) {
-      r -= 20;
-      g -= 10;
-      b += 8;
+    let r = 168 + n * 12;
+    let g = 214 + n * 8;
+    let b = 236 + n * 6;
+    const crack =
+      Math.min(
+        wrapDist(x * 3 + y * 5, 14),
+        wrapDist(x * 5 - y * 2 + 3, 16),
+      ) < 0.6;
+    if (crack) {
+      r -= 36;
+      g -= 18;
+      b += 6;
     }
-    // highlight flecks
-    if (h01(x, y, 122) > 0.96) {
-      r = 220;
-      g = 240;
+    if (h01(x, y, 122) > 0.95) {
+      r = 236;
+      g = 248;
       b = 255;
     }
-    set(clamp(r), clamp(g), clamp(b), 210);
+    set(clamp(r), clamp(g), clamp(b), 220);
   });
 
   // ───────────────────────────────────────────────────────────
@@ -554,30 +549,30 @@ export function createBlockAtlas(): {
   // 38 — coal ore: stone + charcoal flecks
   drawTile(d, 38, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 380) * 0.5 + hSigned(x >> 1, y >> 1, 381) * 0.5;
-    let v = 118 + n * 14;
-    if (h01(x, y, 382) > 0.93) v -= 16;
+    let v = 124 + n * 16;
     const blob =
-      h01(x >> 1, y >> 1, 383) > 0.62 && h01(x, y, 384) > 0.35;
+      h01(x >> 1, y >> 1, 383) > 0.55 && h01(x, y, 384) > 0.22;
     if (blob) {
-      const c = 28 + h01(x, y, 385) * 18;
+      const c = 22 + h01(x, y, 385) * 16;
       set(clamp(c), clamp(c), clamp(c + 4));
       return;
     }
+    if (h01(x, y, 382) > 0.93) v -= 16;
     set(clamp(v), clamp(v), clamp(v + 3));
   });
 
   // 39 — iron ore: stone + rusty-peach specks
   drawTile(d, 39, atlasW, (x, y, set) => {
     const n = hSigned(x, y, 390) * 0.5 + hSigned(x >> 1, y >> 1, 391) * 0.5;
-    let v = 118 + n * 14;
+    let v = 124 + n * 16;
     const blob =
-      h01(x >> 1, y >> 1, 392) > 0.58 && h01(x, y, 393) > 0.32;
+      h01(x >> 1, y >> 1, 392) > 0.52 && h01(x, y, 393) > 0.2;
     if (blob) {
       const t = h01(x, y, 394);
       set(
-        clamp(176 + t * 40),
-        clamp(132 + t * 24),
-        clamp(88 + t * 16),
+        clamp(196 + t * 36),
+        clamp(154 + t * 22),
+        clamp(98 + t * 14),
       );
       return;
     }
@@ -675,6 +670,11 @@ export function createBlockAtlas(): {
   drawTile(d, 80, atlasW, (x, y, set) => paintMushroomCap(x, y, set, true));
   paintPlant(d, atlasW, 81, "glowshroom");
   paintPlant(d, atlasW, 82, "toadstool");
+  paintPlant(d, atlasW, 83, "tallGrass");
+  paintPlant(d, atlasW, 84, "tuftGrass");
+  paintPlant(d, atlasW, 85, "clover");
+  paintPlant(d, atlasW, 86, "wheatgrass");
+  drawTile(d, 87, atlasW, (x, y, set) => paintGlass(x, y, set));
 
   ctx.putImageData(img, 0, 0);
   const icons = buildIsometricBlockIcons(canvas);
@@ -718,9 +718,19 @@ function createSpecAtlas(): THREE.CanvasTexture {
     const n = h01(x, y, 203);
     return [0, 28 + n * 36];
   });
+  spec(4, (x, y) => {
+    const n = h01(x, y, 204);
+    const pebble = h01(x >> 1, y >> 1, 42) > 0.82;
+    return [0, pebble ? 18 : 40 + n * 48];
+  });
+  spec(7, (x, y) => [0, 16 + h01(x, y, 207) * 26]);
   spec(8, (x, y) => {
     const n = h01(x, y, 208);
     return [0, 32 + n * 40];
+  });
+  spec(10, (x, y) => {
+    const n = h01(x, y, 210);
+    return [n > 0.94 ? 40 : 0, 22 + n * 28];
   });
   spec(11, (x, y) => {
     const fleck = h01(x, y, 113) > 0.97;
@@ -735,6 +745,11 @@ function createSpecAtlas(): THREE.CanvasTexture {
     return [fleck ? 240 : crack ? 200 : 155, 0];
   });
   spec(13, () => [90, 0]);
+  spec(14, (x, y) => {
+    if (x <= 1 || x >= 14) return [0, 0];
+    const spine = x % 3 !== 0 && h01(x, y, 141) > 0.94;
+    return [spine ? 180 : 28, 36 + h01(x, y, 214) * 28];
+  });
   spec(15, (x, y) => {
     const snowH = 4 + ((h01(x, 0, 150) * 2) | 0);
     if (y < snowH) return [70 + h01(x, y, 215) * 40, 0];
@@ -750,7 +765,16 @@ function createSpecAtlas(): THREE.CanvasTexture {
       h01(x >> 1, y >> 1, 392) > 0.58 && h01(x, y, 393) > 0.32;
     return [blob ? 220 : 0, 0];
   });
+  spec(51, (x, y) => {
+    const pane =
+      x >= 4 && x <= 11 && y >= 3 && y <= 10 &&
+      x !== 4 && x !== 11 && y !== 3 && y !== 10;
+    return pane ? [170, 50] : [0, 14];
+  });
+  spec(54, (x, y) => [0, 16 + h01(x, y, 254) * 26]);
+  spec(57, (x, y) => [0, 16 + h01(x, y, 257) * 26]);
   spec(62, (x, y) => [0, 24 + h01(x, y, 262) * 32]);
+  spec(63, (x, y) => [8, 48 + h01(x, y, 263) * 52]);
   spec(64, (x, y) => {
     const d1 = wrapDist(x + 2 * y + 3, 16);
     const d2 = wrapDist(2 * x - y + 11, 16);
@@ -764,6 +788,24 @@ function createSpecAtlas(): THREE.CanvasTexture {
     const cx = Math.abs((x - 7.5) / 7.5);
     const core = Math.pow(1 - Math.min(1, cx * 1.05), 1.4);
     return [core > 0.25 ? 80 + core * 140 : 0, 0];
+  });
+  spec(66, (x, y) => [0, 16 + h01(x, y, 266) * 26]);
+  spec(70, (x, y) => [0, 16 + h01(x, y, 270) * 26]);
+  spec(73, (x, y) => [0, 16 + h01(x, y, 273) * 26]);
+  spec(76, (x, y) => [0, 30 + h01(x, y, 276) * 34]);
+  spec(79, (x, y) => {
+    const spot = h01(x >> 1, y >> 1, 771) > 0.72;
+    return [spot ? 70 : 42, 36];
+  });
+  spec(80, (x, y) => {
+    const spot = h01(x >> 1, y >> 1, 773) > 0.72;
+    return [spot ? 80 : 48, 36];
+  });
+  spec(87, (x, y) => {
+    const rim = x === 0 || x === 15 || y === 0 || y === 15;
+    if (!rim) return [0, 0];
+    const corner = (x <= 1 && y <= 1) || (x >= 14 && y <= 2);
+    return [corner ? 70 : 18, 8];
   });
 
   ctx.putImageData(img, 0, 0);
@@ -1076,18 +1118,49 @@ function paintVine(x: number, y: number, set: (r: number, g: number, b: number, 
   else set(clamp(52 + n * 10), clamp(118 + n * 12), clamp(44 + n * 6));
 }
 
+function paintGlass(
+  x: number,
+  y: number,
+  set: (r: number, g: number, b: number, a?: number) => void,
+): void {
+  const rim = x === 0 || x === 15 || y === 0 || y === 15;
+  if (!rim) {
+    set(0, 0, 0, 0);
+    return;
+  }
+  const n = hSigned(x, y, 870);
+  set(clamp(186 + n * 8), clamp(214 + n * 6), clamp(222 + n * 6), 210);
+}
+
 function paintGravel(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
-  const cell = (h01(x >> 1, y >> 1, 620) * 5) | 0;
-  const n = hSigned(x, y, 621) * 10;
-  const tones = [
-    [132, 128, 120],
-    [108, 104, 98],
-    [148, 142, 132],
-    [92, 90, 86],
-    [120, 116, 108],
-  ];
-  const t = tones[cell]!;
-  set(clamp(t[0]! + n), clamp(t[1]! + n), clamp(t[2]! + n * 0.8));
+  let best = 1e9;
+  let bestI = 0;
+  for (let i = 0; i < 10; i++) {
+    const fx = (h01(i, 0, 620) * 15) | 0;
+    const fy = (h01(i, 1, 621) * 15) | 0;
+    const d = (x - fx) * (x - fx) + (y - fy) * (y - fy);
+    if (d < best) {
+      best = d;
+      bestI = i;
+    }
+  }
+  let best2 = 1e9;
+  for (let i = 0; i < 10; i++) {
+    if (i === bestI) continue;
+    const fx = (h01(i, 0, 620) * 15) | 0;
+    const fy = (h01(i, 1, 621) * 15) | 0;
+    const d = (x - fx) * (x - fx) + (y - fy) * (y - fy);
+    if (d < best2) best2 = d;
+  }
+  if (best2 - best < 5) {
+    set(78, 76, 72);
+    return;
+  }
+  const warm = h01(bestI, 0, 622) > 0.55;
+  const n = hSigned(x, y, 623) * 8;
+  const shade = hSigned(bestI, 2, 624) * 14;
+  if (warm) set(clamp(148 + shade + n), clamp(132 + shade * 0.8 + n), clamp(104 + shade * 0.5 + n));
+  else set(clamp(122 + shade + n), clamp(120 + shade + n), clamp(116 + shade + n));
 }
 
 function paintClay(x: number, y: number, set: (r: number, g: number, b: number, a?: number) => void): void {
@@ -1678,6 +1751,75 @@ function paintPlant(
         px(196, 44, 52);
         if (h01(x, y, 250) > 0.72) px(244, 236, 220);
       }
+    } else if (kind === "tallGrass") {
+      const blades: [number, number, number][] = [
+        [3, 5, 14],
+        [4, 2, 14],
+        [6, 1, 14],
+        [7, 3, 14],
+        [9, 0, 14],
+        [10, 2, 14],
+        [12, 4, 14],
+        [13, 6, 14],
+      ];
+      for (const [bx, y0, y1] of blades) {
+        if (x === bx && y >= y0 && y <= y1) {
+          const t = (y1 - y) / (y1 - y0 + 1);
+          px(clamp(48 + t * 28), clamp(128 + t * 36), clamp(42 + t * 14));
+        }
+        if (x === bx + 1 && y === y0) px(90, 168, 62);
+      }
+    } else if (kind === "tuftGrass") {
+      const clump = Math.hypot(x - 8, Math.max(0, y - 9) * 0.55);
+      if (y >= 6 && y <= 14 && clump < 5.2) {
+        const n = hSigned(x, y, 260);
+        px(clamp(46 + n * 8), clamp(124 + n * 14), clamp(40 + n * 6));
+      }
+      const tips: [number, number][] = [
+        [5, 5],
+        [7, 3],
+        [8, 4],
+        [10, 3],
+        [12, 6],
+      ];
+      for (const [tx, ty] of tips) {
+        if (x === tx && y >= ty && y <= 8) px(72, 154, 52);
+        if (x === tx && y === ty) px(110, 176, 64);
+      }
+    } else if (kind === "clover") {
+      const heads: [number, number][] = [
+        [5, 10],
+        [8, 8],
+        [11, 10],
+        [7, 12],
+      ];
+      for (const [cx, cy] of heads) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy <= 3) px(46, 132, 58);
+        if (Math.abs(dx) + Math.abs(dy) === 0) px(36, 108, 46);
+      }
+      if (x === 8 && y >= 11 && y <= 14) px(42, 100, 44);
+    } else if (kind === "wheatgrass") {
+      const stalks: [number, number, number][] = [
+        [4, 4, 14],
+        [6, 2, 14],
+        [8, 3, 14],
+        [10, 1, 14],
+        [12, 5, 14],
+      ];
+      for (const [bx, y0, y1] of stalks) {
+        if (x === bx && y >= y0 && y <= y1) {
+          const t = (y1 - y) / (y1 - y0 + 1);
+          px(
+            clamp(118 + t * 50),
+            clamp(140 + t * 28),
+            clamp(42 + t * 8),
+          );
+        }
+        if (x === bx && y === y0) px(214, 188, 78);
+        if ((x === bx - 1 || x === bx + 1) && y === y0 + 1) px(196, 168, 62);
+      }
     }
   });
 }
@@ -1726,7 +1868,7 @@ function buildIsometricBlockIcons(atlas: HTMLCanvasElement): BlockIconMap {
     octx.imageSmoothingEnabled = false;
     octx.clearRect(0, 0, size, size);
 
-    if (def.shape === "cross" || isDoor(id) || isLadder(id) || id === Block.DOOR) {
+    if (def.shape === "cross" || def.shape === "pane" || isDoor(id) || isLadder(id) || id === Block.DOOR) {
       const tile = def.tiles[2]!;
       const spr = sampleTile(tile);
       octx.fillStyle = "rgba(0,0,0,0.16)";

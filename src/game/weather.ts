@@ -78,9 +78,13 @@ const SKY_CLEAR = new THREE.Color(0x5ba3d9);
 const SKY_OVERCAST = new THREE.Color(0x7a8fa3);
 const SKY_STORM = new THREE.Color(0x2c3348);
 const SKY_FLASH = new THREE.Color(0xd4e4ff);
+const SKY_NIGHT = new THREE.Color(0x050a16);
+const SKY_NIGHT_STORM = new THREE.Color(0x04070e);
 const FOG_CLEAR = new THREE.Color(0x8ec4e8);
 const FOG_STORM = new THREE.Color(0x3a4158);
 const FOG_FLASH = new THREE.Color(0xc8d8f0);
+const FOG_NIGHT = new THREE.Color(0x070d16);
+const FOG_NIGHT_STORM = new THREE.Color(0x05080e);
 
 const WIND_PEAK_STORM = 2.6;
 const WIND_PEAK_RAIN = 1.6;
@@ -300,6 +304,8 @@ export class WeatherSystem {
   private cells: WeatherCell[] = [];
   private time = 0;
   private spawnTimer = 3;
+  /** Seconds until a new mega-storm may form (only if none exist). */
+  private nextStormIn = 360 + Math.random() * 420;
   private seed: number;
   private baseWindX = 0.25;
   private baseWindZ = 0.12;
@@ -713,17 +719,7 @@ export class WeatherSystem {
     radius: number;
     intensity: number;
   } {
-    // Storms: ~24–36 chunks across so one deck can fill the whole view.
-    // 24 chunks * 16 = 384 blocks → radius 192 covers the view from center.
-    const stormRadius = () => 200 + Math.random() * 80; // 200–280 → ~25–35 chunks ø
-    // At most one of these; extras are rain / overcast on the fringe
-    if (slot < 1 && stormCount < 1) {
-      return {
-        kind: "storm",
-        radius: stormRadius(),
-        intensity: 0.84 + Math.random() * 0.16,
-      };
-    }
+    // Storms are spawned on their own long timer — never here.
     const roll = Math.random();
     if (roll < 0.4) {
       return {
@@ -749,32 +745,18 @@ export class WeatherSystem {
   /** Initial Poisson layout around a world center. */
   private seedWeatherFromPoisson(cx: number, cz: number): void {
     this.cells = [];
-    // One continent-scale storm sitting over/near the player so the
-    // first day is actually *in* weather, not watching a distant cell.
-    const stormR = 210 + Math.random() * 70;
-    const stormAng = Math.random() * Math.PI * 2;
-    const stormD = 30 + Math.random() * 90;
-    this.cells.push(
-      this.makeCell(
-        cx + Math.cos(stormAng) * stormD,
-        cz + Math.sin(stormAng) * stormD,
-        "storm",
-        0.88 + Math.random() * 0.12,
-        stormR,
-      ),
-    );
-    // Fringe rain / overcast well outside the mega-deck
-    const pts = this.poissonDiskAnnulus(cx, cz, 280, 520, 160, 5);
-    let i = 1;
+    // Open on rain / overcast only — mega-storms roll in later on a long timer.
+    const pts = this.poissonDiskAnnulus(cx, cz, 80, 420, 150, 5);
+    let i = 0;
     for (const p of pts) {
-      const spec = this.pickKindForSlot(i, 1);
+      const spec = this.pickKindForSlot(i, 0);
       if (spec.kind === "storm") continue;
       if (!this.canPlaceSystem(p.x, p.z, spec.radius, spec.kind)) continue;
       this.cells.push(
         this.makeCell(p.x, p.z, spec.kind, spec.intensity, spec.radius),
       );
       i++;
-      if (this.cells.length >= 4) break;
+      if (this.cells.length >= 3) break;
     }
     this.separateCellsHard();
   }
@@ -989,7 +971,7 @@ export class WeatherSystem {
           : 0.35 + Math.random() * 0.3;
     const life =
       kind === "storm"
-        ? 1400 + Math.random() * 900 // ~23–38 min — longer than a 15 min day
+        ? 520 + Math.random() * 340 // ~9–14 min over the land
         : kind === "rain"
           ? 280 + Math.random() * 260
           : 140 + Math.random() * 200;
@@ -1228,31 +1210,56 @@ export class WeatherSystem {
     this.separateCellsSoft(dt);
 
     this.spawnTimer -= dt;
+    this.nextStormIn -= dt;
     if (this.spawnTimer <= 0) {
       this.spawnTimer = 22 + Math.random() * 30;
-      // Expire old non-storm systems first
-      this.cells = this.cells.filter(
-        (c) => c.age < c.life || c.kind === "storm",
-      );
+      const beforeStorms = this.cells.filter((c) => c.kind === "storm").length;
+      this.cells = this.cells.filter((c) => c.age < c.life);
+      const afterStorms = this.cells.filter((c) => c.kind === "storm").length;
+      if (beforeStorms > 0 && afterStorms === 0) {
+        this.nextStormIn = 480 + Math.random() * 420; // 8–15 min until the next mega
+      }
 
       if (this.cells.length < 6) {
-        const storms = this.cells.filter((c) => c.kind === "storm").length;
+        const storms = afterStorms;
         const spec = this.pickKindForSlot(this.cells.length, storms);
-        const pos = this.placeFromPoisson(px, pz, spec.kind, spec.radius);
-        if (pos) {
-          this.cells.push(
-            this.makeCell(
-              pos.x,
-              pos.z,
-              spec.kind,
-              spec.intensity,
-              spec.radius,
-            ),
-          );
+        if (spec.kind !== "storm") {
+          const pos = this.placeFromPoisson(px, pz, spec.kind, spec.radius);
+          if (pos) {
+            this.cells.push(
+              this.makeCell(
+                pos.x,
+                pos.z,
+                spec.kind,
+                spec.intensity,
+                spec.radius,
+              ),
+            );
+          }
         }
       }
       if (this.cells.length > 7) this.cells.length = 7;
       this.separateCellsHard();
+    }
+
+    const stormAlive = this.cells.some((c) => c.kind === "storm");
+    if (!stormAlive && this.nextStormIn <= 0) {
+      const radius = 300 + Math.random() * 110; // 300–410 → ~38–51 chunks across
+      const pos = this.placeFromPoisson(px, pz, "storm", radius);
+      if (pos) {
+        this.cells.push(
+          this.makeCell(
+            pos.x,
+            pos.z,
+            "storm",
+            0.88 + Math.random() * 0.12,
+            radius,
+          ),
+        );
+        this.nextStormIn = 9999; // wait until this one dies
+      } else {
+        this.nextStormIn = 45 + Math.random() * 40;
+      }
     }
 
     const local = this.sampleAt(px, pz);
@@ -1430,6 +1437,8 @@ export class WeatherSystem {
     const approach = s.stormProximity;
     const f = Math.min(1, this.flashAmount);
     const dn = this.lastDayNight;
+    const dayF = dn?.dayFactor ?? 1;
+    const nightF = 1 - dayF;
 
     const localGrey = Math.min(
       1,
@@ -1455,40 +1464,64 @@ export class WeatherSystem {
     if (dn) this.tmpSky.copy(dn.sky);
     else this.tmpSky.copy(SKY_CLEAR);
 
-    if (totalMie > 0.04 && skyWeather < 0.55) {
+    // Day-only milk: pale Mie / overcast wash turns night into grey
+    if (dayF > 0.35 && totalMie > 0.04 && skyWeather < 0.55) {
       const mr = 0.9 - dustAerosol * 0.12;
       const mg = 0.92 - dustAerosol * 0.15;
       const mb = 0.95 - dustAerosol * 0.2;
-      const k = totalMie * 0.35 * (1 - skyWeather * 0.7);
+      const k = totalMie * 0.35 * (1 - skyWeather * 0.7) * dayF;
       this.tmpSky.r = this.tmpSky.r * (1 - k) + mr * k;
       this.tmpSky.g = this.tmpSky.g * (1 - k) + mg * k;
       this.tmpSky.b = this.tmpSky.b * (1 - k) + mb * k;
     }
 
     if (skyWeather > 0.04) {
-      this.tmpSky.lerp(SKY_OVERCAST, skyWeather * 0.65);
-      this.tmpSky.lerp(
-        SKY_STORM,
-        Math.min(1, s.storm * 0.7 + s.gloom * 0.45) * 0.85,
-      );
+      if (nightF > 0.45) {
+        this.tmpSky.lerp(SKY_NIGHT, skyWeather * 0.55 * nightF);
+        this.tmpSky.lerp(
+          SKY_NIGHT_STORM,
+          Math.min(1, s.storm * 0.7 + s.gloom * 0.45) * 0.7 * nightF,
+        );
+      } else {
+        this.tmpSky.lerp(SKY_OVERCAST, skyWeather * 0.65 * dayF);
+        this.tmpSky.lerp(
+          SKY_STORM,
+          Math.min(1, s.storm * 0.7 + s.gloom * 0.45) * 0.85 * dayF,
+        );
+      }
+    }
+    if (nightF > 0.2) {
+      this.tmpSky.lerp(SKY_NIGHT, nightF * 0.82);
     }
     if (f > 0) this.tmpSky.lerp(SKY_FLASH, Math.min(0.45, f * 0.55));
     this.scene.background = this.tmpSky;
 
     if (dn) this.tmpFog.copy(dn.fog);
     else this.tmpFog.copy(FOG_CLEAR);
-    if (totalMie > 0.05) {
-      this.tmpFog.lerp(new THREE.Color(0xd0dce8), totalMie * 0.45);
+    if (dayF > 0.4 && totalMie > 0.05) {
+      this.tmpFog.lerp(new THREE.Color(0xd0dce8), totalMie * 0.45 * dayF);
     }
-    this.tmpFog.lerp(FOG_STORM, Math.min(1, peak * 0.75 + distantHaze * 0.3));
+    if (nightF > 0.2) {
+      this.tmpFog.lerp(FOG_NIGHT, nightF * 0.9);
+      this.tmpFog.lerp(
+        FOG_NIGHT_STORM,
+        Math.min(1, peak * 0.55) * nightF,
+      );
+    } else {
+      this.tmpFog.lerp(FOG_STORM, Math.min(1, peak * 0.75 + distantHaze * 0.3));
+    }
     if (f > 0) this.tmpFog.lerp(FOG_FLASH, Math.min(0.35, f * 0.4));
     this.fog.color.copy(this.tmpFog);
     const aerosolFog = totalMie * 22 + humidAerosol * 18;
     const reach = this.fogViewBlocks;
-    this.fog.near = Math.max(18, reach * 0.28 - peak * 22 - aerosolFog * 0.28 + f * 7);
+    const nightOpen = nightF * 0.22;
+    this.fog.near = Math.max(
+      18,
+      reach * (0.28 + nightOpen) - peak * 22 - aerosolFog * 0.28 * dayF + f * 7,
+    );
     this.fog.far = Math.max(
       this.fog.near + 60,
-      reach * 1.12 - peak * 70 - aerosolFog * 1.2 + f * 28,
+      reach * (1.12 + nightF * 0.35) - peak * 70 * dayF - aerosolFog * 1.2 * dayF + f * 28,
     );
     if (!this.fogEnabled) {
       this.fog.near = Math.max(800, reach * 3);
@@ -1512,11 +1545,9 @@ export class WeatherSystem {
       0.65,
       1 - localGrey * 0.22 - Math.max(0, approach - 0.55) * 0.1,
     );
-    const dayF = dn?.dayFactor ?? 1;
-    const nightF = 1 - dayF;
     // Day stays playable-bright; night floor drops hard for a dark cool night
-    const ambFloor = 0.035 + dayF * 0.26;
-    const ambCeil = 0.18 + dayF * 0.56;
+    const ambFloor = 0.032 + dayF * 0.263;
+    const ambCeil = 0.12 + dayF * 0.62;
     this.ambient.intensity = Math.max(
       ambFloor,
       Math.min(
@@ -1528,29 +1559,29 @@ export class WeatherSystem {
     if (dn) {
       // Day: soft warm-neutral · Night: deep cool blue, not washed grey
       const r =
-        THREE.MathUtils.lerp(0.14, 0.82, dayF) -
+        THREE.MathUtils.lerp(0.12, 0.82, dayF) -
         localGrey * 0.06 +
         totalMie * 0.04 * dayF;
       const g =
-        THREE.MathUtils.lerp(0.22, 0.86, dayF) -
+        THREE.MathUtils.lerp(0.16, 0.86, dayF) -
         localGrey * 0.05 +
         totalMie * 0.03 * dayF;
       const b =
-        THREE.MathUtils.lerp(0.42, 0.94, dayF) - localGrey * 0.03;
+        THREE.MathUtils.lerp(0.24, 0.94, dayF) - localGrey * 0.03;
       this.ambient.color.setRGB(
         Math.max(0.08, r),
         Math.max(0.12, g),
         Math.max(0.2, b),
       );
       if (nightF > 0.15) {
-        this.ambient.color.lerp(new THREE.Color(0x0c1830), nightF * 0.65);
+        this.ambient.color.lerp(new THREE.Color(0x08101c), nightF * 0.7);
       }
     } else {
       this.ambient.color.setRGB(0.68, 0.76, 0.88);
     }
 
     const hemiMul = Math.max(0.6, 1 - localGrey * 0.22);
-    const hemiFloor = 0.03 + dayF * 0.19;
+    const hemiFloor = 0.016 + dayF * 0.204;
     const hemiCeil = 0.16 + dayF * 0.52;
     this.hemi.intensity = Math.max(
       hemiFloor,
@@ -1571,8 +1602,8 @@ export class WeatherSystem {
         );
       }
       if (nightF > 0.2) {
-        this.hemi.color.lerp(new THREE.Color(0x081428), nightF * 0.55);
-        this.hemi.groundColor.lerp(new THREE.Color(0x040a14), nightF * 0.65);
+        this.hemi.color.lerp(new THREE.Color(0x08101a), nightF * 0.6);
+        this.hemi.groundColor.lerp(new THREE.Color(0x03060c), nightF * 0.7);
       }
     } else {
       this.hemi.color.set(localGrey > 0.4 ? 0x6a7a98 : 0xb8d8ff);

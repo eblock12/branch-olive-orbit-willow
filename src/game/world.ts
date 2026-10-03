@@ -174,6 +174,7 @@ export class World {
         };
         w.onerror = () => {
           this.useWorkers = false;
+          this.failPendingMesh();
           this.recycleWorker(w);
         };
         if (this.share) {
@@ -198,9 +199,47 @@ export class World {
       this.idleWorkers.push(w);
     }
     this.installReadyMesh();
-    if (this.genQueue.length === 0) this.pumpMeshQueue();
-    this.pumpGenQueue();
-    this.pumpMeshQueue();
+    this.pumpStreaming();
+  }
+
+  /** Holes in front of the player beat remeshing the loaded trail. */
+  private pumpStreaming(): void {
+    if (this.nearbyGenUrgent()) {
+      this.pumpGenQueue();
+      this.pumpMeshQueue();
+    } else {
+      this.pumpMeshQueue();
+      this.pumpGenQueue();
+    }
+  }
+
+  private nearbyGenUrgent(): boolean {
+    if (this.genQueue.length === 0) return false;
+    const lim = 10 * 10;
+    for (const j of this.genQueue) {
+      const dx = j.cx - this.lastPcx;
+      const dz = j.cz - this.lastPcz;
+      if (dx * dx + dz * dz <= lim) return true;
+    }
+    return false;
+  }
+
+  private inStreamWindow(cx: number, cz: number): boolean {
+    const dx = cx - this.lastPcx;
+    const dz = cz - this.lastPcz;
+    if (dx * dx + dz * dz <= (this.viewRadius + 2) * (this.viewRadius + 2)) {
+      return true;
+    }
+    return this.isStreamFocus(cx, cz);
+  }
+
+  private failPendingMesh(): void {
+    this.pendingMesh.clear();
+    for (const chunk of this.chunks.values()) {
+      if (chunk.dirty || !chunk.mesh) {
+        if (!this.meshQueue.includes(chunk)) this.meshQueue.push(chunk);
+      }
+    }
   }
 
   private onWorkerResult(w: Worker, data: ChunkWorkerResponse): void {
@@ -359,7 +398,6 @@ export class World {
       }
       if (n.bakeMask & theirBit) continue;
       n.dirty = true;
-      n.lightDirty = true;
     }
   }
 
@@ -372,8 +410,8 @@ export class World {
     if (!chunk || data.epoch !== chunk.meshEpoch || data.overflow) {
       this.releaseMeshSlot(meshSlot);
       if (chunk && data.overflow) {
-        chunk.dirty = false;
-        this.remeshChunk(chunk);
+        chunk.dirty = true;
+        if (!this.meshQueue.includes(chunk)) this.meshQueue.push(chunk);
       }
       return;
     }
@@ -518,6 +556,10 @@ export class World {
       let slot = -1;
       if (this.share) {
         slot = allocSlot(this.share.ctrl, this.share.slotCount);
+        if (slot < 0) {
+          this.evictOldest(24);
+          slot = allocSlot(this.share.ctrl, this.share.slotCount);
+        }
         if (slot < 0) {
           this.genQueue.unshift(job);
           break;
@@ -816,6 +858,8 @@ export class World {
     if (remeshNow) {
       chunk.meshLod = -1;
       this.remeshChunk(chunk);
+      // Only stitch the chunk across the face this cell sits on.
+      // Remeshing all 4 neighbors on every glass pane froze the main thread.
       if (lx === 0) this.remeshIfLoaded(cx - 1, cz);
       if (lx === CHUNK_SIZE - 1) this.remeshIfLoaded(cx + 1, cz);
       if (lz === 0) this.remeshIfLoaded(cx, cz - 1);
@@ -1344,6 +1388,9 @@ export class World {
     const flowers = [
       Block.SHORT_GRASS,
       Block.SHORT_GRASS,
+      Block.TALL_GRASS,
+      Block.TUFT_GRASS,
+      Block.CLOVER,
       Block.FERN,
       Block.POPPY,
       Block.DANDELION,
@@ -1436,7 +1483,9 @@ export class World {
 
   private remeshIfLoaded(cx: number, cz: number): void {
     const c = this.chunks.get(chunkKey(cx, cz));
-    if (c) this.remeshChunk(c);
+    if (!c) return;
+    c.dirty = true;
+    c.targetLod = 0;
   }
 
   isSolidAt(wx: number, wy: number, wz: number): boolean {
@@ -1516,10 +1565,10 @@ export class World {
       return false;
     });
 
-    this.pumpGenQueue();
     this.ingestReady();
-    this.pumpMeshQueue();
+    this.pumpStreaming();
     this.installReadyMesh();
+    this.fillStandingRing(pcx, pcz);
 
     this.flushTickRemesh();
 
@@ -1537,8 +1586,8 @@ export class World {
     });
 
     const t0 = performance.now();
-    const meshCap = 1;
-    const budget = 2;
+    const meshCap = 2;
+    const budget = 4;
     let built = 0;
     while (this.meshQueue.length > 0 && built < meshCap) {
       if (performance.now() - t0 > budget) break;
@@ -1546,7 +1595,19 @@ export class World {
       if (!this.chunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
       if (!chunk.dirty && chunk.mesh) continue;
       if (this.pendingMesh.has(chunkKey(chunk.cx, chunk.cz))) continue;
-      if (useWorkerMesh && chunk.sharedSlot >= 0) continue;
+      const nearby =
+        this.streamDist2(chunk.cx, chunk.cz, pcx, pcz) <= 7 * 7;
+      // Workers own distant SAB meshes. Nearby boot-ring chunks remesh here
+      // if every worker is still off generating the far disk.
+      if (useWorkerMesh && chunk.sharedSlot >= 0 && !nearby) continue;
+      if (
+        useWorkerMesh &&
+        chunk.sharedSlot >= 0 &&
+        nearby &&
+        this.idleWorkers.length > 0
+      ) {
+        continue;
+      }
       this.remeshChunk(chunk);
       built++;
     }
@@ -1558,6 +1619,43 @@ export class World {
       if (chunk.waterMesh) chunk.waterMesh.visible = false;
     }
     this.evictLru(needed);
+  }
+
+  /** Never let the player step into an ungenerated column. */
+  private fillStandingRing(pcx: number, pcz: number): void {
+    let budget = 3;
+    for (let dz = -1; dz <= 1 && budget > 0; dz++) {
+      for (let dx = -1; dx <= 1 && budget > 0; dx++) {
+        const cx = pcx + dx;
+        const cz = pcz + dz;
+        const key = chunkKey(cx, cz);
+        let chunk = this.chunks.get(key);
+        if (!chunk) {
+          chunk = this.generateSync(cx, cz);
+          budget--;
+        }
+        if (chunk && !chunk.mesh) {
+          chunk.targetLod = 0;
+          this.remeshChunk(chunk);
+          budget--;
+        }
+      }
+    }
+  }
+
+  private evictOldest(count: number): void {
+    const victims: Chunk[] = [];
+    const keep = (this.viewRadius + 1) * (this.viewRadius + 1);
+    for (const chunk of this.chunks.values()) {
+      const dx = chunk.cx - this.lastPcx;
+      const dz = chunk.cz - this.lastPcz;
+      if (dx * dx + dz * dz <= keep) continue;
+      if (this.isStreamFocus(chunk.cx, chunk.cz)) continue;
+      victims.push(chunk);
+    }
+    victims.sort((a, b) => a.lastUsed - b.lastUsed);
+    const n = Math.min(count, victims.length);
+    for (let i = 0; i < n; i++) this.dropResident(victims[i]!);
   }
 
   private evictLru(needed: Set<ChunkKey>): void {
@@ -1577,6 +1675,7 @@ export class World {
 
   private dropResident(chunk: Chunk): void {
     const key = chunkKey(chunk.cx, chunk.cz);
+    this.pendingMesh.delete(key);
     this.dropChestsInChunk(chunk);
     this.releaseSlot(chunk.sharedSlot);
     chunk.sharedSlot = -1;
@@ -1587,30 +1686,45 @@ export class World {
   }
 
   /**
-   * Block until a ring around (wx,wz) exists and is meshed.
-   * Used for first spawn and death respawn so the player never drops into void.
+   * Ensure a ring exists. Remesh at most `meshCap` closest columns so the
+   * first frame cannot lock the main thread (portal dest used to remesh ~50).
    */
-  prepareAround(wx: number, wz: number, radius = 3, shiftOrigin = true): void {
+  prepareAround(
+    wx: number,
+    wz: number,
+    radius = 3,
+    shiftOrigin = true,
+    meshCap = 16,
+  ): void {
     const [pcx, pcz] = worldToChunk(Math.floor(wx), Math.floor(wz));
     if (shiftOrigin) {
       this.lastPcx = pcx;
       this.lastPcz = pcz;
     }
     const r = Math.min(radius, this.viewRadius);
+    const toMesh: Chunk[] = [];
     for (let dz = -r; dz <= r; dz++) {
       for (let dx = -r; dx <= r; dx++) {
         if (dx * dx + dz * dz > r * r + 1) continue;
-        this.generateSync(pcx + dx, pcz + dz);
-      }
-    }
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (dx * dx + dz * dz > r * r + 1) continue;
-        const chunk = this.chunks.get(chunkKey(pcx + dx, pcz + dz));
+        const chunk = this.generateSync(pcx + dx, pcz + dz);
         if (chunk && (chunk.dirty || !chunk.mesh || chunk.meshLod !== 0)) {
           chunk.targetLod = 0;
-          this.remeshChunk(chunk);
+          toMesh.push(chunk);
         }
+      }
+    }
+    toMesh.sort((a, b) => {
+      const da = (a.cx - pcx) ** 2 + (a.cz - pcz) ** 2;
+      const db = (b.cx - pcx) ** 2 + (b.cz - pcz) ** 2;
+      return da - db;
+    });
+    const n = Math.max(0, meshCap);
+    for (let i = 0; i < toMesh.length; i++) {
+      const chunk = toMesh[i]!;
+      if (i < n) this.remeshChunk(chunk);
+      else {
+        chunk.dirty = true;
+        if (!this.meshQueue.includes(chunk)) this.meshQueue.push(chunk);
       }
     }
   }
@@ -1634,6 +1748,7 @@ export class World {
       for (const chunk of this.chunks.values()) {
         if (!chunk.dirty && chunk.mesh) continue;
         if (chunk.sharedSlot < 0) continue;
+        if (!this.inStreamWindow(chunk.cx, chunk.cz)) continue;
         if (this.pendingMesh.has(chunkKey(chunk.cx, chunk.cz))) continue;
         const d = this.streamDist2(
           chunk.cx,
@@ -1710,7 +1825,8 @@ export class World {
     const header = readMeshHeader(this.share!.meshCtrl, job.meshSlot);
     if (header.overflow) {
       this.releaseMeshSlot(job.meshSlot);
-      this.remeshChunk(chunk);
+      chunk.dirty = true;
+      if (!this.meshQueue.includes(chunk)) this.meshQueue.push(chunk);
       return false;
     }
     const views = meshViews(this.share!.mesh, job.meshSlot);
@@ -1816,13 +1932,22 @@ export class World {
       sky: this.getSkyLight(wx, wy, wz),
     });
 
-    const geo = buildChunkGeometry(chunk, getBlock, lod, undefined, getLight, this.seed);
-    if (chunk.mesh) {
-      this.group.remove(chunk.mesh);
-      chunk.mesh.geometry.dispose();
-      chunk.mesh = null;
+    let geo: THREE.BufferGeometry | null = null;
+    let wgeo: THREE.BufferGeometry | null = null;
+    try {
+      geo = buildChunkGeometry(chunk, getBlock, lod, undefined, getLight, this.seed);
+      wgeo = buildChunkWaterGeometry(chunk, getBlock, lod, isLoaded);
+    } catch (err) {
+      console.error("remesh failed", chunk.cx, chunk.cz, err);
+      chunk.dirty = false;
+      return;
     }
     if (geo) {
+      if (chunk.mesh) {
+        this.group.remove(chunk.mesh);
+        chunk.mesh.geometry.dispose();
+        chunk.mesh = null;
+      }
       const mesh = new THREE.Mesh(geo, this.material);
       mesh.matrixAutoUpdate = false;
       mesh.updateMatrix();
@@ -1839,13 +1964,12 @@ export class World {
       this.group.add(mesh);
     }
 
-    const wgeo = buildChunkWaterGeometry(chunk, getBlock, lod, isLoaded);
-    if (chunk.waterMesh) {
-      this.waterGroup.remove(chunk.waterMesh);
-      chunk.waterMesh.geometry.dispose();
-      chunk.waterMesh = null;
-    }
     if (wgeo) {
+      if (chunk.waterMesh) {
+        this.waterGroup.remove(chunk.waterMesh);
+        chunk.waterMesh.geometry.dispose();
+        chunk.waterMesh = null;
+      }
       const wmesh = new THREE.Mesh(wgeo, this.waterMaterial);
       wmesh.matrixAutoUpdate = false;
       wmesh.updateMatrix();

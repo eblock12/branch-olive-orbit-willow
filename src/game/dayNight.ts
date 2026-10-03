@@ -188,8 +188,8 @@ export function atmosphereSkyColor(
   if (h < 0.06) {
     // GLSL-style smoothstep(0.06, -0.28, h) → Three: 1 - smoothstep(h, -0.28, 0.06)
     const n = 1 - THREE.MathUtils.smoothstep(h, -0.28, 0.06);
-    r = THREE.MathUtils.lerp(r, 0.012, n);
-    g = THREE.MathUtils.lerp(g, 0.025, n);
+    r = THREE.MathUtils.lerp(r, 0.015, n);
+    g = THREE.MathUtils.lerp(g, 0.028, n);
     b = THREE.MathUtils.lerp(b, 0.07, n);
   }
 
@@ -210,7 +210,7 @@ export function atmosphereSkyColor(
     outFog.lerp(new THREE.Color(0xc8dce8), 0.12 + haze * 0.2);
   }
   if (h < 0) {
-    outFog.lerp(new THREE.Color(0x0a1020), Math.min(1, -h * 1.5));
+    outFog.lerp(new THREE.Color(0x070e1c), Math.min(1, -h * 1.5));
   }
 
   // Sun disc color through aerosol path (reddens with air mass + T)
@@ -539,32 +539,31 @@ export class DayNightCycle {
     s.sunIntensity = dayFactor * (1.95 + 0.85 * elev) * hazeExt;
     s.moonIntensity =
       nightFactor *
-      (0.32 + 0.28 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
-    // Night ambient floor lowered + cool bias applied via hemi colors
+      (0.42 + 0.32 * THREE.MathUtils.clamp(-sunElevation, 0, 1));
+    // Night: keep ambient/hemi low so the moon key can sculpt form
     s.ambientIntensity =
-      0.05 +
-      dayFactor * 0.51 +
-      nightFactor * 0.035 +
+      0.028 +
+      dayFactor * 0.532 +
+      nightFactor * 0.028 +
       atm.mieHaze * 0.04 * dayFactor;
     s.hemiIntensity =
-      0.06 +
-      dayFactor * 0.46 +
-      nightFactor * 0.04 +
+      0.032 +
+      dayFactor * 0.488 +
+      nightFactor * 0.032 +
       atm.mieHaze * 0.03 * dayFactor;
 
     // Hemisphere: day airy sky; night deep cool indigo
     s.hemiSky.copy(s.sky).multiplyScalar(1.05);
     if (nightFactor > 0.01) {
       // Cool cast: deep navy / indigo, not warm grey
-      const nightSky = new THREE.Color(0x0a1528);
+      const nightSky = new THREE.Color(0x081422);
       s.hemiSky.lerp(nightSky, nightFactor * 0.92);
-      s.hemiSky.multiplyScalar(THREE.MathUtils.lerp(1, 0.38, nightFactor));
-      // Pull residual warmth out of sky sample
-      s.hemiSky.r *= THREE.MathUtils.lerp(1, 0.55, nightFactor);
-      s.hemiSky.g *= THREE.MathUtils.lerp(1, 0.72, nightFactor);
+      s.hemiSky.multiplyScalar(THREE.MathUtils.lerp(1, 0.55, nightFactor));
+      s.hemiSky.r *= THREE.MathUtils.lerp(1, 0.5, nightFactor);
+      s.hemiSky.g *= THREE.MathUtils.lerp(1, 0.58, nightFactor);
       s.hemiSky.b = Math.min(
         1,
-        s.hemiSky.b * THREE.MathUtils.lerp(1, 1.15, nightFactor),
+        s.hemiSky.b * THREE.MathUtils.lerp(1, 0.95, nightFactor),
       );
     }
     s.hemiGround.set(
@@ -573,20 +572,21 @@ export class DayNightCycle {
       THREE.MathUtils.lerp(0.1, 0.24, dayFactor),
     );
     if (nightFactor > 0.01) {
-      s.hemiGround.lerp(new THREE.Color(0x060c18), nightFactor * 0.85);
+      s.hemiGround.lerp(new THREE.Color(0x03070e), nightFactor * 0.85);
     }
 
     // Darken sky/fog sample toward cool night for clear weather baseline
     if (nightFactor > 0.01) {
-      const nightDeep = new THREE.Color(0x040814);
-      const nightFog = new THREE.Color(0x0a1220);
-      s.sky.lerp(nightDeep, nightFactor * 0.88);
-      s.sky.r *= THREE.MathUtils.lerp(1, 0.45, nightFactor);
-      s.sky.g *= THREE.MathUtils.lerp(1, 0.65, nightFactor);
-      s.fog.lerp(nightFog, nightFactor * 0.85);
+      const nightDeep = new THREE.Color(0x050a16);
+      const nightFog = new THREE.Color(0x081018);
+      s.sky.lerp(nightDeep, nightFactor * 0.94);
+      s.sky.r *= THREE.MathUtils.lerp(1, 0.48, nightFactor);
+      s.sky.g *= THREE.MathUtils.lerp(1, 0.55, nightFactor);
+      s.sky.b = Math.min(1, s.sky.b * THREE.MathUtils.lerp(1, 0.88, nightFactor));
+      s.fog.lerp(nightFog, nightFactor * 0.92);
       s.fog.r *= THREE.MathUtils.lerp(1, 0.5, nightFactor);
-      s.fog.g *= THREE.MathUtils.lerp(1, 0.7, nightFactor);
-      s.fog.b = Math.min(1, s.fog.b * THREE.MathUtils.lerp(1, 1.05, nightFactor));
+      s.fog.g *= THREE.MathUtils.lerp(1, 0.58, nightFactor);
+      s.fog.b = Math.min(1, s.fog.b * THREE.MathUtils.lerp(1, 0.9, nightFactor));
     }
 
     this._aimX = px;
@@ -653,11 +653,10 @@ export class DayNightCycle {
     const flash = s.weatherFlash ?? 0;
     const baseI = isDay
       ? Math.max(1.75, s.sunIntensity * 1.35)
-      : Math.max(0.7, s.moonIntensity * 1.55);
+      : Math.max(0.95, s.moonIntensity * 1.85);
     const totalI = baseI * weatherDim + flash * 0.4;
-    // Stronger key / slightly weaker fill → darker, readable shadows
-    const keyI = totalI * 1.05;
-    const fillI = totalI * 0.38;
+    const keyI = isDay ? totalI * 1.05 : totalI * 1.08;
+    const fillI = isDay ? totalI * 0.38 : totalI * 0.22;
     const color = isDay ? s.sunColor : s.moonColor;
 
     // --- World-locked shadow window ---
@@ -709,7 +708,7 @@ export class DayNightCycle {
     this.keyLight.intensity = keyI;
     this.keyLight.visible = true;
     this.keyLight.castShadow = true;
-    this.keyLight.shadow.intensity = isDay ? 0.84 : 0.94;
+    this.keyLight.shadow.intensity = isDay ? 0.84 : 0.72;
     this.keyLight.shadow.radius = 1.75;
     {
       const cam = this.keyLight.shadow.camera;
@@ -729,14 +728,27 @@ export class DayNightCycle {
     this.keyLight.updateMatrixWorld(true);
     this.keyLight.shadow.camera.updateMatrixWorld();
 
-    // Fill: same direction/color, no shadows — far terrain stays lit
+    // Fill: day matches the sun so the shadow-map ring doesn't go black.
+    // Night bounce comes from the opposite sky so moon shadows can read.
     this.fillLight.color.copy(color);
+    if (!isDay) {
+      this.fillLight.color.lerp(new THREE.Color(0x1a2848), 0.45);
+    }
     this.fillLight.intensity = fillI;
-    this.fillLight.position.set(
-      px + dir.x * 100,
-      py + Math.max(50, dir.y * 100 + 30),
-      pz + dir.z * 100,
-    );    this.fillLight.target.position.set(px, py, pz);
+    if (isDay) {
+      this.fillLight.position.set(
+        px + dir.x * 100,
+        py + Math.max(50, dir.y * 100 + 30),
+        pz + dir.z * 100,
+      );
+    } else {
+      this.fillLight.position.set(
+        px - dir.x * 90,
+        py + 95,
+        pz - dir.z * 90,
+      );
+    }
+    this.fillLight.target.position.set(px, py, pz);
     this.fillLight.target.updateMatrixWorld();
     this.fillLight.visible = true;
     this.fillLight.castShadow = false;

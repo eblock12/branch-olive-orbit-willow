@@ -125,7 +125,7 @@ export class PortalSystem {
         ];
         this.stickyUntil = 10;
         world.setStreamFoci(foci);
-        world.prepareAround(dest.ox + 2, dest.oz, 4, false);
+        world.prepareAround(dest.ox + 2, dest.oz, 4, false, 0);
       }
     }
     if (foci.length > 0) world.setStreamFoci(foci);

@@ -40,6 +40,10 @@ export type BiomeSample = {
   /** 0 dry … 1 wet */
   moisture: number;
   continental: number;
+  /** 0..1 mountain-belt mask (slow) */
+  range: number;
+  /** 0..1 open-basin mask (slow) */
+  open: number;
   /** Base continental height bias before local relief */
   heightBias: number;
   /** Multiplier on relief noise */
@@ -57,12 +61,21 @@ export function sampleClimate(
   wx: number,
   wz: number,
   seed: number,
-): { temperature: number; moisture: number; continental: number; bloom: number } {
-  const temperature = fbm2(wx * 0.0045, wz * 0.0045, seed + 900, 4, 2.0, 0.55);
-  const moisture = fbm2(wx * 0.0055, wz * 0.0055, seed + 1400, 4, 2.1, 0.52);
-  const continental = fbm2(wx * 0.0032, wz * 0.0032, seed + 400, 5, 2.0, 0.5);
-  const bloom = fbm2(wx * 0.0036, wz * 0.0036, seed + 2100, 4, 2.0, 0.52);
-  return { temperature, moisture, continental, bloom };
+): {
+  temperature: number;
+  moisture: number;
+  continental: number;
+  bloom: number;
+  range: number;
+  open: number;
+} {
+  const temperature = fbm2(wx * 0.0028, wz * 0.0028, seed + 900, 4, 2.0, 0.55);
+  const moisture = fbm2(wx * 0.0034, wz * 0.0034, seed + 1400, 4, 2.1, 0.52);
+  const continental = fbm2(wx * 0.0022, wz * 0.0022, seed + 400, 5, 2.0, 0.5);
+  const bloom = fbm2(wx * 0.0024, wz * 0.0024, seed + 2100, 4, 2.0, 0.52);
+  const range = fbm2(wx * 0.0019, wz * 0.0019, seed + 90, 4, 2.05, 0.5);
+  const open = fbm2(wx * 0.0015, wz * 0.0015, seed + 70, 4, 2.0, 0.52);
+  return { temperature, moisture, continental, bloom, range, open };
 }
 
 /** Hermite blend, 0 below e0 and 1 above e1. */
@@ -93,6 +106,7 @@ export function terrainInfluence(
   heightHint: number,
   seaLevel: number,
   bloom = 0,
+  range = 0.5,
 ): TerrainInfluence {
   const ocean = 1 - smooth01(0.26, 0.41, continental);
   const nearCoast =
@@ -115,7 +129,8 @@ export function terrainInfluence(
     inland *
     (1 - desert * 0.85) *
     (1 - beach) *
-    smooth01(0.46, 0.80, continental) *
+    smooth01(0.58, 0.86, continental) *
+    smooth01(0.54, 0.78, range) *
     smooth01(seaLevel - 4, seaLevel + 22, heightHint);
 
   const snow = inland * (1 - desert * 0.7) * (1 - smooth01(0.18, 0.44, temperature));
@@ -189,6 +204,7 @@ export function biomeFromClimate(
   heightHint: number,
   seaLevel: number,
   bloom = 0,
+  range = 0.5,
 ): BiomeId {
   // Deep / shallow ocean from continental basins
   if (continental < 0.34) {
@@ -207,8 +223,10 @@ export function biomeFromClimate(
   // Hot dry
   if (temperature > 0.62 && moisture < 0.38) return Biome.DESERT;
 
-  // Mountains on high continental + high local relief hint
-  if (continental > 0.68 && heightHint > seaLevel + 10) return Biome.MOUNTAINS;
+  // Mountains only on rare, large range belts
+  if (continental > 0.72 && range > 0.6 && heightHint > seaLevel + 12) {
+    return Biome.MOUNTAINS;
+  }
 
   // Wet lowlands
   if (moisture > 0.62 && continental < 0.55 && heightHint < seaLevel + 5) {
@@ -275,7 +293,9 @@ export function biomeFromClimate(
   }
 
   // Default plains
-  if (heightHint > seaLevel + 14 && continental > 0.6) return Biome.MOUNTAINS;
+  if (heightHint > seaLevel + 18 && continental > 0.74 && range > 0.62) {
+    return Biome.MOUNTAINS;
+  }
 
   return Biome.PLAINS;
 }
@@ -304,25 +324,25 @@ export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "
       return {
         id,
         heightBias: 0,
-        relief: 1.15,
-        treeThreshold: 0.985,
+        relief: 0.55,
+        treeThreshold: 0.992,
         cactus: false,
         snowLine: 95,
       };
     case Biome.FOREST:
       return {
         id,
-        heightBias: 2,
-        relief: 1.2,
-        treeThreshold: 0.955,
+        heightBias: 1,
+        relief: 0.72,
+        treeThreshold: 0.968,
         cactus: false,
         snowLine: 98,
       };
     case Biome.DESERT:
       return {
         id,
-        heightBias: -2,
-        relief: 0.95,
+        heightBias: -3,
+        relief: 0.62,
         treeThreshold: 1.1,
         cactus: true,
         snowLine: 200,
@@ -407,15 +427,14 @@ export function getBiomeParams(id: BiomeId): Omit<BiomeSample, "temperature" | "
  * classification stays consistent with final terrain.
  */
 export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: number): BiomeSample {
-  const { temperature, moisture, continental, bloom } = sampleClimate(wx, wz, seed);
-  // Height hint aligned with multi-scale relief (see chunk.surfaceAt)
-  const macro = fbm2(wx * 0.008, wz * 0.008, seed + 50, 5, 2.05, 0.5);
-  const hills = fbm2(wx * 0.02, wz * 0.02, seed, 6, 2.1, 0.48);
+  const { temperature, moisture, continental, bloom, range, open } = sampleClimate(wx, wz, seed);
+  const macro = fbm2(wx * 0.006, wz * 0.006, seed + 50, 4, 2.05, 0.5);
+  const hills = fbm2(wx * 0.016, wz * 0.016, seed, 5, 2.1, 0.48);
   const heightHint =
     seaLevel +
-    (continental - 0.45) * 22 +
-    (macro - 0.5) * 28 +
-    (hills - 0.45) * 18;
+    (continental - 0.45) * 16 +
+    (macro - 0.5) * 16 +
+    (hills - 0.45) * 8;
   const id = biomeFromClimate(
     temperature,
     moisture,
@@ -423,6 +442,7 @@ export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: numb
     heightHint,
     seaLevel,
     bloom,
+    range,
   );
   const params = getBiomeParams(id);
   return {
@@ -430,6 +450,8 @@ export function sampleBiome(wx: number, wz: number, seed: number, seaLevel: numb
     temperature,
     moisture,
     continental,
+    range,
+    open,
   };
 }
 
@@ -473,11 +495,11 @@ export function grassTintAt(
   wz: number,
   seed: number,
 ): [number, number, number] {
-  const { temperature, moisture, continental, bloom } = sampleClimate(wx, wz, seed);
-  const macro = fbm2(wx * 0.008, wz * 0.008, seed + 50, 5, 2.05, 0.5);
-  const hills = fbm2(wx * 0.02, wz * 0.02, seed, 6, 2.1, 0.48);
+  const { temperature, moisture, continental, bloom, range } = sampleClimate(wx, wz, seed);
+  const macro = fbm2(wx * 0.006, wz * 0.006, seed + 50, 4, 2.05, 0.5);
+  const hills = fbm2(wx * 0.016, wz * 0.016, seed, 5, 2.1, 0.48);
   const heightHint =
-    62 + (continental - 0.45) * 22 + (macro - 0.5) * 28 + (hills - 0.45) * 18;
+    62 + (continental - 0.45) * 16 + (macro - 0.5) * 16 + (hills - 0.45) * 8;
   const inf = terrainInfluence(
     temperature,
     moisture,
@@ -485,6 +507,7 @@ export function grassTintAt(
     heightHint,
     62,
     bloom,
+    range,
   );
 
   const t = Math.max(0, Math.min(1, temperature));

@@ -360,6 +360,13 @@ export class GameAudio {
     this.tone(pitch * 0.72, 0.14, 0.08, "triangle", 0, undefined, 0.05);
   }
 
+  beeBuzz(x: number, y: number, z: number, vol = 1): void {
+    const w = { x, y, z };
+    const v = 0.045 * vol;
+    this.noiseBurst(0.08, "bandpass", 420 + Math.random() * 90, v * 1.1, 1.4, w);
+    this.tone(210 + Math.random() * 40, 0.07, v * 0.7, "sawtooth", 0, w);
+  }
+
   door(opening: boolean, wx?: number, wy?: number, wz?: number): void {
     const base = opening ? 140 : 110;
     this.tone(base + Math.random() * 18, 0.09, opening ? 0.11 : 0.14, "triangle");
@@ -1686,6 +1693,10 @@ export function surfaceFromBlock(id: number): AudioSurface {
     case Block.GRASS:
     case Block.SNOW_GRASS:
     case Block.SHORT_GRASS:
+    case Block.TALL_GRASS:
+    case Block.TUFT_GRASS:
+    case Block.CLOVER:
+    case Block.WHEATGRASS:
     case Block.LEAVES:
     case Block.BIRCH_LEAVES:
     case Block.SPRUCE_LEAVES:
@@ -1727,6 +1738,8 @@ export function surfaceFromBlock(id: number): AudioSurface {
       return "wood";
     case Block.WATER:
     case Block.ICE:
+    case Block.GLASS:
+    case Block.GLASS_PANE:
       return "water";
     default:
       if (isDoor(id) || isLadder(id)) return "wood";

@@ -121,7 +121,27 @@ ctx.onmessage = (ev: MessageEvent<ChunkWorkerRequest>) => {
   }
 
   if ("type" in data && data.type === "mesh" && voxels && mesh && meshCtrl) {
-    bakeMesh(data);
+    try {
+      bakeMesh(data);
+    } catch (err) {
+      console.error("worker mesh failed", data.cx, data.cz, err);
+      if (meshCtrl) {
+        writeMeshHeader(meshCtrl, data.meshSlot, 0, 0, 0, 0, 1);
+        markMeshReady(meshCtrl, data.meshSlot);
+      }
+      const res: ChunkWorkerResponse = {
+        type: "meshed",
+        id: data.id,
+        cx: data.cx,
+        cz: data.cz,
+        slot: data.slot,
+        meshSlot: data.meshSlot,
+        lod: data.lod,
+        epoch: data.epoch,
+        overflow: true,
+      };
+      ctx.postMessage(res);
+    }
     return;
   }
 

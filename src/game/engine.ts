@@ -20,10 +20,12 @@ import { CatSystem, isCatTreat } from "./cats";
 import { HostileSystem } from "./hostiles";
 import { SlenderGiantSystem } from "./slenderGiant";
 import { BirdSystem } from "./birds";
+import { BeeSystem } from "./bees";
 import { AmbianceFX } from "./ambiance";
 import { GameAudio, surfaceFromBlock } from "./audio";
 import { WeatherSystem, type WeatherKind } from "./weather";
 import { DayNightCycle } from "./dayNight";
+import { Starfield } from "./stars";
 import {
   SurvivalState,
   blockDrop,
@@ -155,10 +157,10 @@ export class GameEngine {
   private caterpillars: CaterpillarSystem;
   private animals: PassiveMobSystem;
   private cats: CatSystem;
-  private cats!: CatSystem;
   private hostiles: HostileSystem;
   private slenderGiant: SlenderGiantSystem;
   private birds: BirdSystem;
+  private bees: BeeSystem;
   private ambiance: AmbianceFX;
   private audio = new GameAudio();
   private wasOnGround = true;
@@ -172,9 +174,12 @@ export class GameEngine {
   private debug = defaultDebugSettings();
   private debugOpen = false;
   private debugRev = 0;
+  private bootPending = true;
+  private bootSave: WorldSave | null = null;
 
 
   private dayNight: DayNightCycle;
+  private stars: Starfield;
   private material: THREE.MeshLambertMaterial;
   private atlas: THREE.CanvasTexture;
   private atlasUrl = "";
@@ -397,6 +402,8 @@ export class GameEngine {
     this.hostiles = new HostileSystem();
     this.slenderGiant = new SlenderGiantSystem();
     this.birds = new BirdSystem();
+    this.bees = new BeeSystem();
+    this.bees.onBuzz = (x, y, z, vol) => this.audio.beeBuzz(x, y, z, vol);
     this.ambiance = new AmbianceFX();
     this.itemDrops = new ItemDropSystem(this.atlas, this.torchFlame.emissiveMap);
     this.chestVisuals = new ChestVisuals(this.atlas);
@@ -405,21 +412,7 @@ export class GameEngine {
     this.viewHand.setHeldItem(this.survival.selectedSlot?.id ?? null);
     this.portals = new PortalSystem(this.scene);
     this.world.bindPortals(this.portals);
-
-    const startX = loaded?.player?.x ?? 0;
-    const startZ = loaded?.player?.z ?? 0;
-    this.world.ensureChunksAround(startX, startZ);
-    this.world.flushMeshes();
-    if (loaded?.player && this.tryRestorePose(loaded.player)) {
-      // restored
-    } else {
-      this.spawnPlayer();
-    }
-    this.world.prepareAround(this.player.x, this.player.z, 3);
-    this.portals.preloadVisibleExits(this.world, this.player.x, this.player.z);
-    this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 3);
-    this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
-    this.cats.seedAround(this.world, this.player.x, this.player.z, 3);
+    this.bootSave = loaded ?? null;
 
     this.scene.add(this.world.group);
     this.scene.add(this.caterpillars.group);
@@ -428,12 +421,15 @@ export class GameEngine {
     this.scene.add(this.hostiles.group);
     this.scene.add(this.slenderGiant.group);
     this.scene.add(this.birds.group);
+    this.scene.add(this.bees.group);
     this.scene.add(this.ambiance.group);
     this.scene.add(this.itemDrops.group);
     this.scene.add(this.chestVisuals.group);
     this.scene.add(this.arrows.group);
 
     this.dayNight = new DayNightCycle(this.scene, this.sun);
+    this.stars = new Starfield();
+    this.scene.add(this.stars.group);
     this.sun = this.dayNight.light;
     if (loaded && Number.isFinite(loaded.dayTime)) {
       this.dayNight.setTime(loaded.dayTime);
@@ -510,6 +506,26 @@ export class GameEngine {
     this.onResize();
     this.installControlsTest();
     this.flushSave();
+    this.emitHud();
+  }
+
+  private finishTerrainBoot(): void {
+    const loaded = this.bootSave;
+    this.bootSave = null;
+    const startX = loaded?.player?.x ?? 0;
+    const startZ = loaded?.player?.z ?? 0;
+    this.world.ensureChunksAround(startX, startZ);
+    this.world.flushMeshes();
+    if (loaded?.player && this.tryRestorePose(loaded.player)) {
+      // restored
+    } else {
+      this.spawnPlayer();
+    }
+    this.world.prepareAround(this.player.x, this.player.z, 3, true, 12);
+    this.portals.preloadVisibleExits(this.world, this.player.x, this.player.z);
+    this.caterpillars.seedAround(this.world, this.player.x, this.player.z, 3);
+    this.animals.seedAround(this.world, this.player.x, this.player.z, 16);
+    this.cats.seedAround(this.world, this.player.x, this.player.z, 3);
     this.emitHud();
   }
 
@@ -822,6 +838,7 @@ export class GameEngine {
     this.weather.dispose();
     this.volumetrics.dispose();
     this.dayNight.dispose(this.scene);
+    this.stars.dispose();
     this.itemDrops.dispose();
     this.chestVisuals.dispose();
     this.viewHand.dispose();
@@ -834,6 +851,7 @@ export class GameEngine {
     this.hostiles.dispose();
     this.slenderGiant.dispose();
     this.birds.dispose();
+    this.bees.dispose();
     this.ambiance.dispose();
     this.audio.dispose();
     this.waterFX.dispose();
@@ -1784,9 +1802,9 @@ export class GameEngine {
 
   private applyDebug(): void {
     const d = this.debug;
-    if (this.debugRev < 2) {
-      this.debugRev = 2;
-      d.vertexAo = true;
+    if (this.debugRev < 3) {
+      this.debugRev = 3;
+      d.volStrength = 0.3;
     }
     if (d.viewRadius == null) d.viewRadius = 16;
     if (d.lodFull == null) d.lodFull = 7;
@@ -1826,7 +1844,7 @@ export class GameEngine {
       this.camera.updateProjectionMatrix();
     }
     const sh = this.sun.shadow;
-    if (sh) sh.intensity = (this.dayNight.state.dayFactor > 0.45 ? 0.84 : 0.94) * d.shadowStrength;
+    if (sh) sh.intensity = (this.dayNight.state.dayFactor > 0.45 ? 0.84 : 0.72) * d.shadowStrength;
   }
 
   private toggleCrafting(): void {
@@ -2190,6 +2208,10 @@ export class GameEngine {
   }
 
   private frame(timestamp: number): void {
+    if (this.bootPending) {
+      this.bootPending = false;
+      this.finishTerrainBoot();
+    }
     let dt = (timestamp - this.lastTime) / 1000;
     this.lastTime = timestamp;
     if (dt > 0.1) dt = 0.1;
@@ -2324,6 +2346,8 @@ export class GameEngine {
       this.player.z,
       this.player.yaw,
     );
+    this.bees.setDayFactor(dn.dayFactor);
+    this.bees.update(dt, this.world, this.player.x, this.player.y, this.player.z);
     this.weather.setDayNight(dn);
     this.weather.update(
       dt,
@@ -2334,6 +2358,18 @@ export class GameEngine {
       this.player.submerged,
       this.world.isColdPrecip(this.player.x, this.player.y, this.player.z),
     );
+    {
+      const w = this.weather.sample;
+      this.stars.update(
+        dt,
+        this.camera.position.x,
+        this.camera.position.y,
+        this.camera.position.z,
+        dn.nightFactor,
+        Math.max(0, 1 - w.gloom * 0.85 - w.storm * 0.7 - w.cloud * 0.25),
+        dn.phase,
+      );
+    }
     {
       const w = this.weather.sample;
       this.torchFlame.update(dt, w.windX);
@@ -2471,7 +2507,7 @@ export class GameEngine {
       this.eatJuice > 0.02 ||
       this.swingJuice > 0.02;
     const booting =
-      this.world.getRingMeshProgress(this.player.x, this.player.z, 6).progress <
+      this.world.getRingMeshProgress(this.player.x, this.player.z, 4).progress <
       0.9;
     if (this.hudAccum >= (juiceHud || booting ? 0.05 : 0.25)) {
       this.fps = Math.round(this.frames / this.hudAccum);
@@ -3066,7 +3102,7 @@ export class GameEngine {
         z: this.player.z,
       },
       chunkGen: this.world.getQueueStats(),
-      load: this.world.getRingMeshProgress(this.player.x, this.player.z, 6),
+      load: this.world.getRingMeshProgress(this.player.x, this.player.z, 4),
       target: this.target,
       isTouch: this.isTouch,
       caterpillars: stats.alive,

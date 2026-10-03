@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCKS, isPlant, type BlockId } from "./blocks";
+import { BLOCKS, isPlant, isGlassPane, type BlockId } from "./blocks";
 import { isTool, itemIconDataUrl, type ItemId } from "./items";
 import { tileUVs } from "./textures";
 
@@ -355,7 +355,7 @@ function buildHeldGeometry(blockId: BlockId): THREE.BufferGeometry {
     tiles[2],
     tiles[2],
   ];
-  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const geo = new THREE.BoxGeometry(1, 1, isGlassPane(blockId) ? 0.125 : 1);
   const uvAttr = geo.getAttribute("uv") as THREE.BufferAttribute;
   for (let f = 0; f < 6; f++) {
     const { u0, v0, u1, v1 } = tileUVs(faceTiles[f]!);

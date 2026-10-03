@@ -1,6 +1,6 @@
 import { Block, isLeaves, isLog, isSolid } from "./blocks";
 import { fbm2, hash2, shouldPlaceTree, shouldPlaceCactus } from "./noise";
-import { sampleBiome, terrainInfluence, Biome, type BiomeId } from "./biomes";
+import { sampleBiome, terrainInfluence, smooth01, Biome, type BiomeId } from "./biomes";
 import { shouldCarveCave, shouldFloodCave } from "./caves";
 import { placeStructuresInChunk } from "./structures";
 import { placePlantsInChunk } from "./plants";
@@ -456,56 +456,64 @@ export function generateChunkBlocks(
     const biome = sampleBiome(wx, wz, seed, SEA_LEVEL);
 
     // Multi-scale relief: continents → hills → ridges → detail
-    const continental = fbm2(wx * 0.0035, wz * 0.0035, seed + 11, 5, 2.0, 0.52);
-    const macro = fbm2(wx * 0.008, wz * 0.008, seed + 50, 5, 2.05, 0.5);
-    const hills = fbm2(wx * 0.02, wz * 0.02, seed, 6, 2.1, 0.48);
-    const detail = fbm2(wx * 0.055, wz * 0.055, seed + 120, 3, 2.2, 0.45);
-    const ridge = fbm2(wx * 0.012, wz * 0.012, seed + 80, 4, 2.15, 0.5);
-    // Domain warp for less regular slopes
-    const warpX = fbm2(wx * 0.015, wz * 0.015, seed + 200, 3, 2, 0.5);
-    const warpZ = fbm2(wx * 0.015 + 40, wz * 0.015 + 40, seed + 210, 3, 2, 0.5);
+    const continental = biome.continental;
+    const macro = fbm2(wx * 0.006, wz * 0.006, seed + 50, 4, 2.05, 0.5);
+    const hills = fbm2(wx * 0.016, wz * 0.016, seed, 5, 2.1, 0.48);
+    const detail = fbm2(wx * 0.05, wz * 0.05, seed + 120, 3, 2.2, 0.45);
+    const ridge = fbm2(wx * 0.011, wz * 0.011, seed + 80, 4, 2.15, 0.5);
+    const warpX = fbm2(wx * 0.014, wz * 0.014, seed + 200, 3, 2, 0.5);
+    const warpZ = fbm2(wx * 0.014 + 40, wz * 0.014 + 40, seed + 210, 3, 2, 0.5);
     const warped = fbm2(
-      wx * 0.018 + warpX * 4,
-      wz * 0.018 + warpZ * 4,
+      wx * 0.016 + warpX * 4,
+      wz * 0.016 + warpZ * 4,
       seed + 220,
       4,
       2.1,
       0.5,
     );
 
-    // Ridged multifractal peaks (0..1, sharp summits)
     const ridged = 1 - Math.abs(ridge * 2 - 1);
     const ridgedPeak = Math.pow(ridged, 1.35);
 
     const heightHint =
       SEA_LEVEL +
-      (biome.continental - 0.45) * 22 +
-      (macro - 0.5) * 28 +
-      (hills - 0.45) * 18;
+      (continental - 0.45) * 16 +
+      (macro - 0.5) * 16 +
+      (hills - 0.45) * 8;
     const inf = terrainInfluence(
       biome.temperature,
       biome.moisture,
-      biome.continental,
+      continental,
       heightHint,
       SEA_LEVEL,
+      0,
+      biome.range,
     );
 
+    const openMask =
+      smooth01(0.4, 0.74, biome.open) *
+      (1 - inf.mountain) *
+      (1 - inf.ocean) *
+      (1 - inf.beach);
+    const flatten = 1 - openMask * 0.84;
+
     const relief =
-      1.12 +
-      inf.mountain * 0.78 +
-      inf.snow * 0.18 -
-      inf.ocean * 0.55 -
-      inf.beach * 0.5 -
-      inf.swamp * 0.65 -
-      inf.desert * 0.4 +
-      inf.rainforest * 0.08 -
-      inf.fungal * 0.22;
+      0.72 +
+      inf.mountain * 1.05 +
+      inf.snow * 0.22 -
+      inf.ocean * 0.5 -
+      inf.beach * 0.45 -
+      inf.swamp * 0.55 -
+      inf.desert * 0.28 -
+      inf.lavender * 0.18 -
+      inf.fungal * 0.18 -
+      openMask * 0.28;
     const bias =
-      inf.mountain * 14 +
+      inf.mountain * 16 +
       inf.snow * 5 +
       inf.desert * -2 +
       inf.swamp * -3 +
-      inf.rainforest * 2 +
+      inf.rainforest * 1 +
       inf.fungal * -1 +
       inf.beach * -2 +
       inf.ocean * -14;
@@ -513,49 +521,48 @@ export function generateChunkBlocks(
     let height =
       SEA_LEVEL +
       bias +
-      (continental - 0.45) * 22 * relief +
-      (macro - 0.5) * 28 * relief +
-      (hills - 0.45) * 18 * relief +
-      (detail - 0.5) * 5 * relief +
-      (warped - 0.5) * 10 * relief;
+      (continental - 0.45) * 16 * relief +
+      (macro - 0.5) * 16 * relief * flatten +
+      (hills - 0.45) * 8 * relief * flatten +
+      (detail - 0.5) * 3 * flatten +
+      (warped - 0.5) * 5 * flatten;
 
-    // Peak extras fade with mountain weight — no more sliced ridgelines
     height +=
       inf.mountain *
-      (ridgedPeak * 48 + ridge * 18 + macro * 12 + Math.pow(ridged, 3.2) * 22);
-    height += inf.snow * (1 - inf.mountain * 0.55) * (ridgedPeak * 22 + hills * 8);
+      (ridgedPeak * 52 + ridge * 16 + macro * 10 + Math.pow(ridged, 3.2) * 24);
+    height += inf.snow * (1 - inf.mountain * 0.55) * (ridgedPeak * 20 + hills * 6);
     const dunes =
-      Math.sin(wx * 0.09 + warpX * 6) * 3.5 +
-      Math.sin(wz * 0.07 + warpZ * 5) * 2.8 +
-      ridged * 4;
-    height += inf.desert * dunes;
-    // Gentle countryside folds where mountains haven't taken over
+      Math.sin(wx * 0.09 + warpX * 6) * 2.8 +
+      Math.sin(wz * 0.07 + warpZ * 5) * 2.2 +
+      ridged * 3;
+    height += inf.desert * dunes * (0.55 + (1 - openMask) * 0.45);
     height +=
       (1 - inf.ocean) *
       (1 - inf.beach) *
       (1 - inf.swamp) *
       (1 - inf.desert) *
       (1 - inf.mountain) *
+      (1 - openMask) *
       ridgedPeak *
-      6;
+      4;
 
-    const swampH = SEA_LEVEL - 2 + hills * 3.5 + detail * 1.5 + (macro - 0.5) * 2;
+    const swampH = SEA_LEVEL - 2 + hills * 2.2 + detail * 1.2 + (macro - 0.5) * 1.5;
     height = height * (1 - inf.swamp) + swampH * inf.swamp;
 
-    const desertH = SEA_LEVEL - 1 + hills * 5 + detail * 2 + dunes;
+    const desertH = SEA_LEVEL - 1 + hills * 3 + detail * 1.5 + dunes * 0.7;
     height = height * (1 - inf.desert) + desertH * inf.desert;
 
-    const beachH = SEA_LEVEL + (hills - 0.4) * 4 + detail * 1.5;
+    const beachH = SEA_LEVEL + (hills - 0.4) * 2.5 + detail * 1.2;
     height = height * (1 - inf.beach) + beachH * inf.beach;
 
     const oceanH =
       SEA_LEVEL -
       14 -
-      macro * 22 -
-      hills * 12 -
-      ridgedPeak * 18 -
-      detail * 4 +
-      Math.pow(1 - ridged, 2) * 6;
+      macro * 18 -
+      hills * 8 -
+      ridgedPeak * 14 -
+      detail * 3 +
+      Math.pow(1 - ridged, 2) * 5;
     height = height * (1 - inf.ocean) + oceanH * inf.ocean;
 
     height = Math.floor(height);
@@ -591,7 +598,18 @@ export function generateChunkBlocks(
     }
     if (biome === Biome.SNOW || height >= snowLine) return Block.SNOW_GRASS;
     if (biome === Biome.SWAMP) {
-      return hash2(wx, wz, seed + 77) > 0.55 ? Block.CLAY : Block.GRASS;
+      // Mud flats, not per-column salt-and-pepper (grass|clay checkerboard).
+      const warp = fbm2(wx * 0.018, wz * 0.018, seed + 91, 3, 2.05, 0.5) - 0.5;
+      const mud = fbm2(
+        wx * 0.038 + warp * 7,
+        wz * 0.038 - warp * 5,
+        seed + 77,
+        4,
+        2.08,
+        0.52,
+      );
+      const wet = smooth01(SEA_LEVEL + 5, SEA_LEVEL - 1, height);
+      return mud + wet * 0.2 > 0.66 ? Block.CLAY : Block.GRASS;
     }
     if (biome === Biome.FUNGAL) return Block.MYCELIUM;
     return Block.GRASS;

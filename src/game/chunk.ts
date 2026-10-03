@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isSlab, isStairCell, isLeaves, isPortal, stairFacing, shapeMaterial, doorPlane, waterLevel, lightEmission } from "./blocks";
+import { Block, BLOCKS, isSolid, isTransparent, isPlant, isWater, isTorch, isDoor, isDoorCell, isLadder, isLadderCell, isSlab, isStairCell, isLeaves, isPortal, isGlass, isGlassPane, paneConnects, stairFacing, shapeMaterial, doorPlane, waterLevel, lightEmission } from "./blocks";
 import { tileUVs } from "./textures";
 import { grassTintMul } from "./biomes";
 
@@ -58,6 +58,7 @@ export class Chunk {
   lightReady = false;
   /** Bitmask of neighbor dirs (+X=1,-X=2,+Z=4,-Z=8) that were lit when last baked */
   bakeMask = 0;
+  lastUsed = 0;
 
   constructor(cx: number, cz: number) {
     this.cx = cx;
@@ -334,6 +335,10 @@ function usesGrassTint(id: number, faceIdx?: number): boolean {
   if (id === Block.GRASS) return faceIdx === undefined || faceIdx === 0;
   return (
     id === Block.SHORT_GRASS ||
+    id === Block.TALL_GRASS ||
+    id === Block.TUFT_GRASS ||
+    id === Block.CLOVER ||
+    id === Block.WHEATGRASS ||
     id === Block.FERN ||
     id === Block.VINE ||
     id === Block.LILY_PAD ||
@@ -679,6 +684,62 @@ function emitShapeBlock(
   else emitPartialBox(m, wx, wy, wz, 0, 0.5, 0.5, 1, 1, 1, id, light);
 }
 
+function emitGlassPane(
+  m: MeshBuild,
+  wx: number,
+  wy: number,
+  wz: number,
+  light: LightSample,
+  getBlock: NeighborGetter,
+): void {
+  const t = 2 / 16;
+  const c0 = 0.5 - t / 2;
+  const c1 = 0.5 + t / 2;
+  const L = {
+    nx: paneConnects(getBlock(wx - 1, wy, wz)),
+    px: paneConnects(getBlock(wx + 1, wy, wz)),
+    nz: paneConnects(getBlock(wx, wy, wz - 1)),
+    pz: paneConnects(getBlock(wx, wy, wz + 1)),
+  };
+  const any = L.nx || L.px || L.nz || L.pz;
+  if (!any) {
+    emitPartialBox(m, wx, wy, wz, c0, 0, c0, c1, 1, c1, Block.GLASS_PANE, light);
+    return;
+  }
+  if (L.nx || L.px) {
+    emitPartialBox(
+      m,
+      wx,
+      wy,
+      wz,
+      L.nx ? 0 : c0,
+      0,
+      c0,
+      L.px ? 1 : c1,
+      1,
+      c1,
+      Block.GLASS_PANE,
+      light,
+    );
+  }
+  if (L.nz || L.pz) {
+    emitPartialBox(
+      m,
+      wx,
+      wy,
+      wz,
+      c0,
+      0,
+      L.nz ? 0 : c0,
+      c1,
+      1,
+      L.pz ? 1 : c1,
+      Block.GLASS_PANE,
+      light,
+    );
+  }
+}
+
 type MeshBuild = {
   positions: number[];
   normals: number[];
@@ -918,6 +979,10 @@ function buildLod0(
           emitShapeBlock(m, wx, wy, wz, id, lightAt(getLight, wx, wy, wz));
           continue;
         }
+        if (isGlassPane(id)) {
+          emitGlassPane(m, wx, wy, wz, lightAt(getLight, wx, wy, wz), getBlock);
+          continue;
+        }
 
         // Cross-shaped plants (flowers, grass, ferns…)
         if (def.shape === "cross" || isPlant(id)) {
@@ -958,6 +1023,7 @@ function buildLod0(
             // Custom chest model — don't occlude neighbor faces
           } else if (isSolid(neighbor) && !isTransparent(neighbor)) continue;
           if (id === Block.ICE && neighbor === Block.ICE) continue;
+          if (isGlass(id) && isGlass(neighbor)) continue;
 
           const ao = faceCornerAO(
             chunk,
@@ -1064,6 +1130,7 @@ function buildLod1(
           if (isOccluder(neighbor)) continue;
           if (isLeaves(id) && isLeaves(neighbor)) continue;
           if (id === Block.ICE && neighbor === Block.ICE) continue;
+          if (isGlass(id) && isGlass(neighbor)) continue;
           emitFace(
             m,
             wx,

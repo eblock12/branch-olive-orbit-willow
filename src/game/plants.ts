@@ -103,6 +103,7 @@ export function placePlantsInChunk(
 
       const h = hash2(wx, wz, seed + 9001);
       const patch = fbm2(wx * 0.04, wz * 0.04, seed + 44, 3);
+      const meadow = fbm2(wx * 0.016, wz * 0.016, seed + 48, 3);
 
       // Desert: dead bush
       if (biome === Biome.DESERT || (biome === Biome.BEACH && onSand)) {
@@ -134,14 +135,25 @@ export function placePlantsInChunk(
         continue;
       }
 
-      // Lavender fields: dense purple carpet
+      // Lavender fields: purple + grass only inside large patches
       if (biome === Biome.LAVENDER_FIELD && onGrass) {
-        if (h > 0.42) {
-          blocks[idx(lx, py, lz)] =
-            h > 0.78 ? Block.LAVENDER_TALL : h > 0.72 ? Block.ALLIUM : Block.LAVENDER;
-          continue;
-        }
-        if (h > 0.28) {
+        if (meadow > 0.54) {
+          if (h > 0.38) {
+            blocks[idx(lx, py, lz)] =
+              h > 0.78 ? Block.LAVENDER_TALL : h > 0.72 ? Block.ALLIUM : Block.LAVENDER;
+            continue;
+          }
+          if (h > 0.22) {
+            const roll = hash2(wx, wz, seed + 67);
+            blocks[idx(lx, py, lz)] =
+              roll > 0.7
+                ? Block.TUFT_GRASS
+                : roll > 0.45
+                  ? Block.TALL_GRASS
+                  : Block.SHORT_GRASS;
+            continue;
+          }
+        } else if (h > 0.97) {
           blocks[idx(lx, py, lz)] = Block.SHORT_GRASS;
           continue;
         }
@@ -197,6 +209,44 @@ export function placePlantsInChunk(
         }
       }
 
+      // Plains: specials + foliage in big meadow patches, bare grass between
+      if (biome === Biome.PLAINS && onGrass) {
+        if (patch > 0.48 && patch < 0.56 && h > 0.978) {
+          blocks[idx(lx, py, lz)] = Block.PUMPKIN;
+          continue;
+        }
+        if (patch > 0.62 && h > 0.97) {
+          blocks[idx(lx, py, lz)] = Block.SUNFLOWER;
+          continue;
+        }
+        if (patch > 0.55 && patch < 0.62 && h > 0.94) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.97 ? Block.FIREWEED : Block.LAVENDER;
+          continue;
+        }
+        if (meadow > 0.58 && h > 0.32) {
+          const roll = hash2(wx, wz, seed + 66);
+          if (patch > 0.68 && roll > 0.4) {
+            blocks[idx(lx, py, lz)] = Block.WHEATGRASS;
+          } else if (patch > 0.32 && patch < 0.48 && roll > 0.45) {
+            blocks[idx(lx, py, lz)] = Block.CLOVER;
+          } else if (roll > 0.66) {
+            blocks[idx(lx, py, lz)] = Block.TALL_GRASS;
+          } else if (roll > 0.42) {
+            blocks[idx(lx, py, lz)] = Block.TUFT_GRASS;
+          } else {
+            blocks[idx(lx, py, lz)] = Block.SHORT_GRASS;
+          }
+          continue;
+        }
+        // Bare meadow: a few stray blades
+        if (h > 0.965) {
+          blocks[idx(lx, py, lz)] =
+            h > 0.988 ? Block.TUFT_GRASS : Block.SHORT_GRASS;
+          continue;
+        }
+      }
+
       // Pumpkin patches on open plains
       if (biome === Biome.PLAINS && onGrass && patch > 0.48 && patch < 0.56 && h > 0.978) {
         blocks[idx(lx, py, lz)] = Block.PUMPKIN;
@@ -216,8 +266,8 @@ export function placePlantsInChunk(
         continue;
       }
 
-      // Short grass carpet
-      if (onGrass && h > 0.72 - patch * 0.15) {
+      // Short grass in remaining biomes — also patchy, not a full carpet
+      if (onGrass && meadow > 0.6 && h > 0.55) {
         // Density by biome
         const dens =
           biome === Biome.FOREST || biome === Biome.REDWOOD || biome === Biome.RAINFOREST
@@ -228,10 +278,20 @@ export function placePlantsInChunk(
                 ? 0.88
                 : 0.9;
         if (h > dens) {
+          const mix = hash2(wx, wz, seed + 81);
           blocks[idx(lx, py, lz)] =
-            h > dens + 0.06 ? Block.FERN : Block.SHORT_GRASS;
+            mix > 0.78
+              ? Block.TALL_GRASS
+              : mix > 0.58
+                ? Block.TUFT_GRASS
+                : mix > 0.42
+                  ? Block.FERN
+                  : Block.SHORT_GRASS;
           continue;
         }
+      } else if (onGrass && h > 0.972) {
+        blocks[idx(lx, py, lz)] = Block.SHORT_GRASS;
+        continue;
       }
 
       // Flower scatter

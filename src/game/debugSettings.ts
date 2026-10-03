@@ -35,7 +35,7 @@ export function defaultDebugSettings(): DebugSettings {
     specular: true,
     specStrength: 1,
     volumetrics: true,
-    volStrength: 1,
+    volStrength: 0.55,
     shadows: true,
     shadowStrength: 1,
     clouds: true,

@@ -44,6 +44,7 @@ export function entityCollides(
             x + halfW - eps,
             y + height - eps,
             z + halfW - eps,
+            (gx, gy, gz) => world.getBlock(gx, gy, gz),
           )
         ) {
           return true;

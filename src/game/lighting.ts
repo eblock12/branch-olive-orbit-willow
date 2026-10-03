@@ -101,7 +101,8 @@ export function computeChunkLighting(
     }
   }
 
-  while (qh < q.length) {
+  const LIGHT_BFS_CAP = 65536;
+  while (qh < q.length && qh < LIGHT_BFS_CAP) {
     const i = q[qh++]!;
     const cur = sky[i]!;
     if (cur <= 1) continue;
@@ -170,7 +171,7 @@ export function computeChunkLighting(
     }
   }
 
-  while (qh < q.length) {
+  while (qh < q.length && qh < LIGHT_BFS_CAP) {
     const i = q[qh++]!;
     const cur = blk[i]!;
     if (cur <= 1) continue;
@@ -286,17 +287,42 @@ function updateSkyAround(
     }
   }
 
+  const decreased: number[] = [];
   for (let y = 0; y < CHUNK_HEIGHT; y++) {
     if (oldCol[y]! > neu[y]!) {
       subtractLight(w.getSky, w.setSky, w.getBlock, wx, y, wz, oldCol[y]!, false);
+      decreased.push(y);
     }
   }
+
+  // Vertical sky is a floor, never clobber brighter side-fill.
   for (let y = 0; y < CHUNK_HEIGHT; y++) {
-    if (w.getSky(wx, y, wz) !== neu[y]!) w.setSky(wx, y, wz, neu[y]!);
+    if (neu[y]! > w.getSky(wx, y, wz)) w.setSky(wx, y, wz, neu[y]!);
   }
+
   for (let y = 0; y < CHUNK_HEIGHT; y++) {
-    if (neu[y]! > oldCol[y]! && neu[y]! > 1) {
+    if (w.getSky(wx, y, wz) > 1) {
       spreadLight(w.getSky, w.setSky, w.getBlock, wx, y, wz, false);
+    }
+  }
+
+  // Roof / wall: pull skylight in from open neighbors.
+  for (const y of decreased) {
+    if (blocksLight(w.getBlock(wx, y, wz))) continue;
+    for (const [dx, dy, dz] of EDIT_DIRS) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= CHUNK_HEIGHT) continue;
+      if (w.getSky(wx + dx, ny, wz + dz) > 1) {
+        spreadLight(
+          w.getSky,
+          w.setSky,
+          w.getBlock,
+          wx + dx,
+          ny,
+          wz + dz,
+          false,
+        );
+      }
     }
   }
   void wy;

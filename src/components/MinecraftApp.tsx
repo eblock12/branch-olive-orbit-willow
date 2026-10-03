@@ -726,17 +726,21 @@ function GameShell() {
     let engine: GameEngine | null = null;
 
     (async () => {
-      const { GameEngine: Engine } = await import("../game/engine");
-      if (cancelled || !canvasRef.current) return;
-      engine = new Engine({
-        canvas: canvasRef.current,
-        onHud: (h) => {
-          if (!cancelled) setHud(h);
-        },
-      });
-      engineRef.current = engine;
-      engine.start();
-      setReady(true);
+      try {
+        const { GameEngine: Engine } = await import("../game/engine");
+        if (cancelled || !canvasRef.current) return;
+        engine = new Engine({
+          canvas: canvasRef.current,
+          onHud: (h) => {
+            if (!cancelled) setHud(h);
+          },
+        });
+        engineRef.current = engine;
+        engine.start();
+        if (!cancelled) setReady(true);
+      } catch (err) {
+        console.error("Failed to start game", err);
+      }
     })();
 
     return () => {

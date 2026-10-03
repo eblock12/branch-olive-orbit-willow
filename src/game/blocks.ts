@@ -103,11 +103,17 @@ export const Block = {
   MUSHROOM_CAP_CYAN: 110,
   GLOWSHROOM: 111,
   TOADSTOOL: 112,
+  TALL_GRASS: 113,
+  TUFT_GRASS: 114,
+  CLOVER: 115,
+  WHEATGRASS: 116,
+  GLASS: 117,
+  GLASS_PANE: 118,
 } as const;
 
 export type BlockId = (typeof Block)[keyof typeof Block];
 
-export type BlockShape = "cube" | "cross" | "slab" | "stair";
+export type BlockShape = "cube" | "cross" | "slab" | "stair" | "pane";
 
 export type BlockDef = {
   id: BlockId;
@@ -637,6 +643,27 @@ export const BLOCKS: Record<number, BlockDef> = {
   },
   [Block.GLOWSHROOM]: plant(Block.GLOWSHROOM, "Glowshroom", 81, "#48e0d0"),
   [Block.TOADSTOOL]: plant(Block.TOADSTOOL, "Toadstool", 82, "#d84850"),
+  [Block.TALL_GRASS]: plant(Block.TALL_GRASS, "Tall Grass", 83, "#5aad48"),
+  [Block.TUFT_GRASS]: plant(Block.TUFT_GRASS, "Grass Tuft", 84, "#6ab04a"),
+  [Block.CLOVER]: plant(Block.CLOVER, "Clover", 85, "#3d8f4a"),
+  [Block.WHEATGRASS]: plant(Block.WHEATGRASS, "Wheatgrass", 86, "#b8a048"),
+  [Block.GLASS]: {
+    id: Block.GLASS,
+    name: "Glass",
+    solid: true,
+    transparent: true,
+    tiles: [87, 87, 87],
+    color: "#a8d4e8",
+  },
+  [Block.GLASS_PANE]: {
+    id: Block.GLASS_PANE,
+    name: "Glass Pane",
+    solid: true,
+    transparent: true,
+    tiles: [87, 87, 87],
+    color: "#a8d4e8",
+    shape: "pane",
+  },
 };
 
 /** Hotbar / creative placeables (includes a selection of flora) */
@@ -669,9 +696,15 @@ export const PLACEABLE: BlockId[] = [
   Block.PLANKS,
   Block.SNOW,
   Block.ICE,
+  Block.GLASS,
+  Block.GLASS_PANE,
   Block.CACTUS,
   Block.SNOW_GRASS,
   Block.SHORT_GRASS,
+  Block.TALL_GRASS,
+  Block.TUFT_GRASS,
+  Block.CLOVER,
+  Block.WHEATGRASS,
   Block.FERN,
   Block.JUNGLE_FERN,
   Block.ORCHID,
@@ -704,6 +737,8 @@ export const PLACEABLE: BlockId[] = [
   Block.PLANKS_SLAB,
   Block.COBBLE_STAIR,
   Block.COBBLE_SLAB,
+  Block.GLASS,
+  Block.GLASS_PANE,
 ];
 
 /** Packed door cells in the world: 55–70 (facing + upper + open). */
@@ -806,6 +841,7 @@ export function canSupportLadder(id: number): boolean {
   if (isDoor(id) || isLadder(id) || isTorch(id)) return false;
   if (!isSolid(id) || isPlant(id) || isWater(id)) return false;
   if (isLeaves(id) || id === Block.ICE || id === Block.CACTUS) return false;
+  if (isGlassPane(id)) return false;
   return true;
 }
 
@@ -864,6 +900,41 @@ export function isStair(id: number): boolean {
   return isStairItem(id) || isStairCell(id);
 }
 
+export function isGlass(id: number): boolean {
+  return id === Block.GLASS;
+}
+
+export function isGlassPane(id: number): boolean {
+  return id === Block.GLASS_PANE;
+}
+
+export function isGlassLike(id: number): boolean {
+  return id === Block.GLASS || id === Block.GLASS_PANE;
+}
+
+/** Panes connect to full glass, other panes, and opaque cubes. */
+export function paneConnects(id: number): boolean {
+  if (isGlassLike(id)) return true;
+  if (id === Block.ICE) return true;
+  if (!isSolid(id) || isTransparent(id) || isPlant(id)) return false;
+  if (isDoor(id) || isLadder(id) || isTorch(id)) return false;
+  return true;
+}
+
+export function paneLinks(
+  getBlock: (x: number, y: number, z: number) => number,
+  x: number,
+  y: number,
+  z: number,
+): { nx: boolean; px: boolean; nz: boolean; pz: boolean } {
+  return {
+    nx: paneConnects(getBlock(x - 1, y, z)),
+    px: paneConnects(getBlock(x + 1, y, z)),
+    nz: paneConnects(getBlock(x, y, z - 1)),
+    pz: paneConnects(getBlock(x, y, z + 1)),
+  };
+}
+
 export function stairFacing(id: number): number {
   if (id >= Block.PLANKS_STAIR_NX && id <= Block.PLANKS_STAIR_PZ) {
     return id - Block.PLANKS_STAIR_NX;
@@ -919,7 +990,10 @@ export type LocalBox = {
 };
 
 /** Local 0–1 occupancy. `full` = whole cell; empty = no collision. */
-export function collisionBoxes(id: number): LocalBox[] | "full" | null {
+export function collisionBoxes(
+  id: number,
+  links?: { nx: boolean; px: boolean; nz: boolean; pz: boolean },
+): LocalBox[] | "full" | null {
   if (isSlab(id)) {
     return [{ x0: 0, y0: 0, z0: 0, x1: 1, y1: 0.5, z1: 1 }];
   }
@@ -930,6 +1004,38 @@ export function collisionBoxes(id: number): LocalBox[] | "full" | null {
     else if (f === 1) boxes.push({ x0: 0.5, y0: 0.5, z0: 0, x1: 1, y1: 1, z1: 1 });
     else if (f === 2) boxes.push({ x0: 0, y0: 0.5, z0: 0, x1: 1, y1: 1, z1: 0.5 });
     else boxes.push({ x0: 0, y0: 0.5, z0: 0.5, x1: 1, y1: 1, z1: 1 });
+    return boxes;
+  }
+  if (isGlassPane(id)) {
+    const t = 2 / 16;
+    const c0 = 0.5 - t / 2;
+    const c1 = 0.5 + t / 2;
+    const L = links ?? { nx: false, px: false, nz: false, pz: false };
+    const any = L.nx || L.px || L.nz || L.pz;
+    if (!any) {
+      return [{ x0: c0, y0: 0, z0: c0, x1: c1, y1: 1, z1: c1 }];
+    }
+    const boxes: LocalBox[] = [];
+    if (L.nx || L.px) {
+      boxes.push({
+        x0: L.nx ? 0 : c0,
+        y0: 0,
+        z0: c0,
+        x1: L.px ? 1 : c1,
+        y1: 1,
+        z1: c1,
+      });
+    }
+    if (L.nz || L.pz) {
+      boxes.push({
+        x0: c0,
+        y0: 0,
+        z0: L.nz ? 0 : c0,
+        x1: c1,
+        y1: 1,
+        z1: L.pz ? 1 : c1,
+      });
+    }
     return boxes;
   }
   if (isPlant(id) || isLadder(id) || isTorch(id) || isWater(id)) return null;
@@ -948,8 +1054,13 @@ export function cellCollidesAABB(
   maxX: number,
   maxY: number,
   maxZ: number,
+  getBlock?: (x: number, y: number, z: number) => number,
 ): boolean {
-  const boxes = collisionBoxes(id);
+  const links =
+    isGlassPane(id) && getBlock
+      ? paneLinks(getBlock, bx, by, bz)
+      : undefined;
+  const boxes = collisionBoxes(id, links);
   if (!boxes) return false;
   if (boxes === "full") return true;
   for (const b of boxes) {
@@ -1059,7 +1170,7 @@ export function lightEmission(id: number): number {
 /** Fully stops light (solid cubes). Leaves / water / plants do not. */
 export function blocksLight(id: number): boolean {
   if (id === Block.AIR || isWater(id) || isPlant(id) || isPortal(id)) return false;
-  if (isLeaves(id) || id === Block.ICE) return false;
+  if (isLeaves(id) || id === Block.ICE || isGlassLike(id)) return false;
   if (isDoor(id) || isLadder(id)) return false;
   return isSolid(id);
 }
@@ -1069,6 +1180,7 @@ export function lightLoss(id: number): number {
   if (id === Block.PORTAL) return 1;
   if (isLeaves(id)) return 1;
   if (isWater(id) || id === Block.ICE) return 2;
+  if (isGlassLike(id)) return 1;
   return 0;
 }
 
@@ -1102,6 +1214,7 @@ export function canSupportTorch(id: number): boolean {
   if (!isSolid(id) || isPlant(id) || isWater(id) || isTorch(id)) return false;
   if (isDoor(id) || isLadder(id)) return false;
   if (isLeaves(id) || id === Block.ICE || id === Block.CACTUS) return false;
+  if (isGlassPane(id)) return false;
   return true;
 }
 

@@ -345,6 +345,8 @@ export class CloudLayer {
   ): void {
     this.flash = flash;
     this.dayFactor = dayFactor;
+    this.fairMat.emissiveIntensity = 0.04 + dayFactor * 0.31;
+    this.weatherMat.emissiveIntensity = 0.06 + dayFactor * 0.22;
 
     const wSpd = Math.hypot(windX, windZ);
     const drift = 0.55 + wSpd * 0.35;
@@ -574,7 +576,8 @@ export class CloudLayer {
 
   private writeFairInstances(px: number, pz: number): void {
     let idx = 0;
-    const dayLift = 0.92 + this.dayFactor * 0.08;
+    const night = 1 - this.dayFactor;
+    const dayLift = 0.24 + this.dayFactor * 0.76;
     const flashLift = 1 + this.flash * 0.12;
     const step = this.fairStep;
     const opac = this.fairOpacity.array as Float32Array;
@@ -604,8 +607,12 @@ export class CloudLayer {
         this.fairMesh.setMatrixAt(idx, this.dummy.matrix);
 
         const dim = 1 - p.shade * 0.03;
-        const w = Math.min(1.25, 1.1 * dayLift * flashLift * dim);
-        this.color.setRGB(w, w * 0.99, Math.min(1.28, w * 1.01));
+        const w = Math.min(1.15, 1.08 * dayLift * flashLift * dim);
+        this.color.setRGB(
+          w * (1 - night * 0.18),
+          w * (0.99 - night * 0.12),
+          w * (1.0 - night * 0.04),
+        );
         this.fairMesh.setColorAt(idx, this.color);
         // Pure fade — no solid floor (that caused hard pop)
         opac[idx] = dev * dev * (3 - 2 * dev);
@@ -941,7 +948,7 @@ export class CloudLayer {
     flash: number,
   ): void {
     let idx = 0;
-    const day = 0.7 + this.dayFactor * 0.3;
+    const day = 0.26 + this.dayFactor * 0.74;
     const opac = this.weatherOpacity.array as Float32Array;
 
     for (const bank of this.banks) {
